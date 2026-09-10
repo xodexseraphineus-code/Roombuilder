@@ -10,13 +10,13 @@ import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
 
 const WALL_HEIGHT = 3.6576; // 12 ft
 const MIN_WALL_HEIGHT = 0.5;
-const MAX_WALL_HEIGHT = 8;
+const MAX_WALL_HEIGHT = 50;
 const MIN_SIZE = 1.0;             // smallest a room dimension can shrink to
 const MAX_COORD = 40;             // how far any base wall can travel from center
 const MAX_DEPTH = 30;             // how far a pulled-out section can extrude
 const OUTWARD_PARTITION_MAX = 20; // how far a partition can reach when there's no opposite wall to meet
 const MIN_RADIUS = 4;             // closest the camera can zoom in
-const MAX_RADIUS = 70;            // farthest the camera can zoom out
+const MAX_RADIUS = 250;           // farthest the camera can zoom out (tall buildings need more room)
 const MIN_OPENING = 0.5;          // smallest opening you can cut
 const MIN_HIGHLIGHT = 0.15;       // smallest highlight worth keeping
 const HOLD_MS = 420;              // press-and-hold duration to arm a partition/cut
@@ -225,7 +225,7 @@ export default function RoomBuilder() {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(COLORS.bg);
-    scene.fog = new THREE.Fog(COLORS.bg, 35, 220);
+    scene.fog = new THREE.Fog(COLORS.bg, 60, 400);
     const sceneFog = scene.fog;
 
     const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 500);
@@ -275,19 +275,29 @@ export default function RoomBuilder() {
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.55);
     scene.add(ambient);
-    const keyLight = new THREE.DirectionalLight(0xfff3e0, 1.15);
-    keyLight.position.set(6, 10, 4);
+    // "magic hour" sun: 45 degrees above the horizon and 45 degrees off
+    // both wall axes (equal x/z, y = horizontal-distance * sqrt(2)) so a
+    // wall's shadow reads as a clean 45-degree diagonal across the floor,
+    // exactly as long as the wall is tall, rather than the near-overhead
+    // angle a small x/y/z position gives.
+    const keyLight = new THREE.DirectionalLight(0xffa457, 1.2);
+    keyLight.position.set(20, 28.3, 20);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(1024, 1024);
-    keyLight.shadow.camera.left = -10;
-    keyLight.shadow.camera.right = 10;
-    keyLight.shadow.camera.top = 10;
-    keyLight.shadow.camera.bottom = -10;
-    keyLight.shadow.radius = 3; // softer penumbra on shadow edges
+    // wide enough to cover a large room plus the long, low-angle shadows a
+    // tall building throws at a 45-degree sun -- bigger than the old +-10
+    // (which was clipping shadows off well inside a 25m room).
+    keyLight.shadow.camera.left = -40;
+    keyLight.shadow.camera.right = 40;
+    keyLight.shadow.camera.top = 40;
+    keyLight.shadow.camera.bottom = -40;
+    keyLight.shadow.radius = 1.5; // crisp edge -- a dramatic low sun reads as a sharp line, not a soft blur
     keyLight.shadow.bias = -0.0004; // reduces shadow acne without visible peter-panning
     keyLight.shadow.normalBias = 0.02;
     scene.add(keyLight);
-    const fillLight = new THREE.DirectionalLight(0x8fb8ff, 0.35);
+    // cool blue skylight fill, complementing the warm sun (the classic
+    // magic-hour palette: warm key, cool ambient/fill)
+    const fillLight = new THREE.DirectionalLight(0x5f8fff, 0.4);
     fillLight.position.set(-6, 4, -5);
     scene.add(fillLight);
     // fixed, non-shadow-casting fill lights aligned with each orthographic
@@ -307,37 +317,67 @@ export default function RoomBuilder() {
     orthoFillRight.position.set(30, 2, 0);
     scene.add(orthoFillRight);
 
+    // a 50x50m site ground plane under the room, so a building smaller than
+    // that (like the 25x15 default) reads as sitting on a lawn rather than
+    // floating in the void -- sits just below the room floor slab (which
+    // spans y=-0.08 to y=0) so the two never z-fight.
+    const groundPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(50, 50),
+      new THREE.MeshStandardMaterial({ color: 0x8fbf6a, roughness: 0.95, metalness: 0, envMapIntensity: 0.35 })
+    );
+    groundPlane.rotation.x = -Math.PI / 2;
+    groundPlane.position.y = -0.1;
+    groundPlane.receiveShadow = true;
+    scene.add(groundPlane);
+
     // ---------- "Realistic" mode: image-based lighting + postprocessing ----------
     let ultraRealisticOn = false;
-    // A small hand-built sky/ground environment for image-based lighting --
-    // deliberately dim, tuned to sit alongside the scene's own key/fill/
-    // ambient lights rather than fight them. (three.js's stock
+    // A hand-built "magic hour" sky for image-based lighting: a warm
+    // horizon-to-blue-zenith gradient plus a bright sun disc placed exactly
+    // where keyLight points, so the environment's reflections/highlights
+    // agree with the actual shadow-casting light. Intensities are kept
+    // modest and deliberately tuned to sit alongside the scene's own key/
+    // fill/ambient lights rather than fight them. (three.js's stock
     // RoomEnvironment was tried first and rejected: it's a product-photo
     // studio rig with a 900-intensity point light and light panels up to
     // 100x scalar, built for shiny jewelry close-ups -- wired into this
     // scene it blew every wall out to solid white.) Generated procedurally
     // via PMREMGenerator, so there's no external HDRI file to fetch.
+    function paintVerticalGradient(geometry, radius, horizonColor, zenithColor) {
+      const pos = geometry.attributes.position;
+      const colors = new Float32Array(pos.count * 3);
+      const c = new THREE.Color();
+      for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i);
+        const t = Math.pow(THREE.MathUtils.clamp(y / radius, 0, 1), 0.6);
+        c.copy(horizonColor).lerp(zenithColor, t);
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      }
+      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    }
     function buildSoftEnvironmentScene() {
       const envScene = new THREE.Scene();
-      const sky = new THREE.Mesh(
-        new THREE.SphereGeometry(40, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2),
-        new THREE.MeshBasicMaterial({ color: new THREE.Color(0x8fb4ff).multiplyScalar(0.3), side: THREE.BackSide })
-      );
+      const skyRadius = 40;
+      const skyGeo = new THREE.SphereGeometry(skyRadius, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+      paintVerticalGradient(skyGeo, skyRadius, new THREE.Color(0xff9d5c).multiplyScalar(0.55), new THREE.Color(0x4a7fdb).multiplyScalar(0.5));
+      const sky = new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide }));
       envScene.add(sky);
       const ground = new THREE.Mesh(
-        new THREE.SphereGeometry(40, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
+        new THREE.SphereGeometry(skyRadius, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: new THREE.Color(0x2a271f).multiplyScalar(0.4), side: THREE.BackSide })
       );
       envScene.add(ground);
-      // one soft warm patch off to one side so rough/glossy surfaces pick up
-      // a gentle highlight direction instead of perfectly flat ambient
-      const sunPatch = new THREE.Mesh(
-        new THREE.PlaneGeometry(18, 18),
-        new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3e0).multiplyScalar(1.4), side: THREE.DoubleSide })
+      // sun disc, placed on the sky sphere exactly along keyLight's
+      // direction -- bright enough to read as a distinct hotspot and cast a
+      // warm highlight on glossy surfaces, but nowhere near the intensity
+      // of an actual light source, so it doesn't blow out diffuse walls.
+      const sunDir = keyLight.position.clone().normalize();
+      const sun = new THREE.Mesh(
+        new THREE.SphereGeometry(2.6, 16, 16),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff0d5).multiplyScalar(9) })
       );
-      sunPatch.position.set(18, 22, 10);
-      sunPatch.lookAt(0, 0, 0);
-      envScene.add(sunPatch);
+      sun.position.copy(sunDir.multiplyScalar(skyRadius * 0.96));
+      envScene.add(sun);
       return envScene;
     }
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -346,9 +386,18 @@ export default function RoomBuilder() {
 
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
-    const gtaoPass = new GTAOPass(scene, camera, width, height);
+    // default AO radius (0.25 world units) only catches tight crevices --
+    // widened so the contact shadow actually spreads out across the floor
+    // near a wall, the way a real soft ambient occlusion falloff looks.
+    const gtaoPass = new GTAOPass(scene, camera, width, height, undefined, {
+      radius: 1.1,
+      distanceExponent: 1,
+      thickness: 1,
+      distanceFallOff: 0.5,
+      scale: 1.8,
+    });
     gtaoPass.output = GTAOPass.OUTPUT.Default;
-    gtaoPass.blendIntensity = 0.7;
+    gtaoPass.blendIntensity = 1.6;
     gtaoPass.enabled = false;
     composer.addPass(gtaoPass);
     // High threshold + low strength: this should only catch genuinely bright
@@ -2063,14 +2112,17 @@ export default function RoomBuilder() {
 
     function applyUltraRealistic(on) {
       ultraRealisticOn = on;
-      const size = on ? 2048 : 1024;
+      // "maximized for lighting" -- Realistic mode is the deliberately
+      // expensive option, so it gets the biggest shadow map the frustum
+      // above can reasonably fill, not a token bump.
+      const size = on ? 4096 : 1024;
       keyLight.shadow.mapSize.set(size, size);
       if (keyLight.shadow.map) { keyLight.shadow.map.dispose(); keyLight.shadow.map = null; }
-      keyLight.intensity = on ? 1.2 : 1.15;
+      keyLight.intensity = on ? 1.3 : 1.2;
       // the environment map below adds its own ambient fill once IBL is on,
       // so the flat AmbientLight comes down a bit to leave room for it
       // rather than the two stacking on top of each other.
-      ambient.intensity = on ? 0.32 : 0.55;
+      ambient.intensity = on ? 0.28 : 0.55;
       // Postprocessing (AO/bloom/DOF) already costs several extra
       // full-screen passes, so realistic mode keeps the same pixel ratio
       // cap as normal rather than also pushing supersampling higher --
@@ -4250,6 +4302,8 @@ export default function RoomBuilder() {
       wallRoughTex.dispose();
       floorGrainTex.dispose();
       floorRoughTex.dispose();
+      groundPlane.geometry.dispose();
+      groundPlane.material.dispose();
       realisticEnvMap.dispose();
       composer.dispose();
       gtaoPass.dispose();
