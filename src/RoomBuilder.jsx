@@ -204,6 +204,11 @@ export default function RoomBuilder() {
   const [wireframeMode, setWireframeMode] = useState(false);
   const wireframeApiRef = useRef(() => {});
   useEffect(() => { wireframeApiRef.current(wireframeMode); }, [wireframeMode]);
+  // cycles the building's wall material: 0 = default (the textured look),
+  // then grey concrete / black metal / white plastic / red, back to default.
+  const [buildingMaterialIndex, setBuildingMaterialIndex] = useState(0);
+  const buildingMaterialApiRef = useRef(() => {});
+  useEffect(() => { buildingMaterialApiRef.current(buildingMaterialIndex); }, [buildingMaterialIndex]);
   const [ultraRealistic, setUltraRealistic] = useState(false);
   const ultraRealisticApiRef = useRef(() => {});
   useEffect(() => { ultraRealisticApiRef.current(ultraRealistic); }, [ultraRealistic]);
@@ -2417,6 +2422,42 @@ export default function RoomBuilder() {
       [wallMat, floorMat, wallMatDim, floorMatDim, wallMatSelected, floorMatSelected].forEach((m) => { m.wireframe = on; });
     }
     wireframeApiRef.current = applyWireframe;
+
+    // grey concrete / black metal / white plastic / red -- flat color +
+    // roughness/metalness only, no textures, so each reads as a clean,
+    // uniform surface rather than fighting the wall's default grain map.
+    // grey/white lean deliberately cool (a hint of blue) and a touch of
+    // metalness/lower roughness than a "pure matte" value -- the scene's
+    // key light is warm enough that a neutral or warm-leaning matte grey
+    // or white washes out to the same beige as the default wall color.
+    const BUILDING_MATERIAL_PRESETS = [
+      null,
+      { color: 0x93999c, roughness: 0.88, metalness: 0.08 },
+      { color: 0x141414, roughness: 0.28, metalness: 0.85 },
+      { color: 0xfafcff, roughness: 0.16, metalness: 0.15 },
+      { color: 0xa8241d, roughness: 0.3, metalness: 0.4 },
+    ];
+    function applyBuildingMaterial(index) {
+      const preset = BUILDING_MATERIAL_PRESETS[index];
+      const mainColor = preset ? preset.color : COLORS.wall;
+      const roughness = preset ? preset.roughness : 0.85;
+      const metalness = preset ? preset.metalness : 0.02;
+      const map = preset ? null : wallGrainTex;
+      const roughnessMap = preset ? null : wallRoughTex;
+      wallMat.map = map;
+      wallMat.roughnessMap = roughnessMap;
+      wallMat.color.set(mainColor);
+      wallMat.roughness = roughness;
+      wallMat.metalness = metalness;
+      wallMat.needsUpdate = true;
+      wallMatDim.map = map;
+      wallMatDim.roughnessMap = roughnessMap;
+      wallMatDim.color.set(new THREE.Color(mainColor).multiplyScalar(0.5));
+      wallMatDim.roughness = roughness;
+      wallMatDim.metalness = metalness;
+      wallMatDim.needsUpdate = true;
+    }
+    buildingMaterialApiRef.current = applyBuildingMaterial;
 
     function applyUltraRealistic(on) {
       ultraRealisticOn = on;
@@ -5517,6 +5558,7 @@ export default function RoomBuilder() {
               if (walkMode) setWalkMode(false);
               setHiddenLineMode(false);
               setWireframeMode(false);
+              setBuildingMaterialIndex(0);
               setTransparentInactive(false);
               setUltraRealistic(false);
               setTintActiveOn(false);
@@ -5610,6 +5652,20 @@ export default function RoomBuilder() {
       <div className="ribbon">
         <div className="ribbon-section">
           <span className="panel-title" style={{ marginRight: 4 }}>Exodex</span>
+          <button
+            className="rb-btn"
+            onClick={() => setBuildingMaterialIndex((i) => (i + 1) % 5)}
+            title="Cycle building material (default, concrete, black metal, white plastic, red)"
+            style={{
+              padding: 2, width: 22, height: 22, minWidth: 22, display: "grid",
+              gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr 1fr", gap: 1, overflow: "hidden",
+            }}
+          >
+            <span style={{ background: "#9b968c", borderRadius: 1 }} />
+            <span style={{ background: "#141414", borderRadius: 1 }} />
+            <span style={{ background: "#f0efe9", borderRadius: 1 }} />
+            <span style={{ background: "#a8241d", borderRadius: 1 }} />
+          </button>
           <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
           <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
           <button className={`rb-btn ${tool === "door" ? "active" : ""}`} onClick={() => setTool("door")}>Door</button>
