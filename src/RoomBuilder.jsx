@@ -209,7 +209,7 @@ export default function RoomBuilder() {
   const [buildingMaterialIndex, setBuildingMaterialIndex] = useState(0);
   const buildingMaterialApiRef = useRef(() => {});
   useEffect(() => { buildingMaterialApiRef.current(buildingMaterialIndex); }, [buildingMaterialIndex]);
-  const [ultraRealistic, setUltraRealistic] = useState(false);
+  const [ultraRealistic, setUltraRealistic] = useState(true);
   const ultraRealisticApiRef = useRef(() => {});
   useEffect(() => { ultraRealisticApiRef.current(ultraRealistic); }, [ultraRealistic]);
   const [tintInactiveOn, setTintInactiveOn] = useState(false);
@@ -2489,23 +2489,43 @@ export default function RoomBuilder() {
       { color: 0xfafcff, roughness: 0.16, metalness: 0.15, floorSame: true },
       { color: 0xffe600, roughness: 0.18, metalness: 0.08, floorSame: true },
     ];
-    function applyBuildingMaterial(index) {
-      const preset = BUILDING_MATERIAL_PRESETS[index];
+    // the building-material preset and the tint-active/tint-inactive
+    // swatches (an older, separate feature) both ultimately want to set
+    // wallMat/floorMat's .color -- keeping them as three independent
+    // "just overwrite .color" functions meant whichever ran last silently
+    // erased the other's result (tint's "off" branch in particular reset
+    // straight to the hardcoded default COLORS.wall/floor, losing whatever
+    // material -- concrete included -- was actually selected, without
+    // touching .map, so the texture was still assigned but tinted back
+    // toward near-white and easy to mistake for "gone"). All three now
+    // just record their own bit of state and recompute the materials from
+    // scratch together, so there's no order-dependent clobbering.
+    let currentBuildingMaterialIndex = 0;
+    let currentTintActiveOn = false, currentTintActiveColor = 0xff6b1a;
+    let currentTintInactiveOn = false, currentTintInactiveColor = 0xff6b1a;
+    function recomputeWallFloorMaterials() {
+      const preset = BUILDING_MATERIAL_PRESETS[currentBuildingMaterialIndex];
       const mainColor = preset ? preset.color : COLORS.wall;
       const roughness = preset ? preset.roughness : 0.85;
       const metalness = preset ? preset.metalness : 0.02;
       const useConcreteTex = !!(preset && preset.concrete);
       const map = preset ? (useConcreteTex ? concretePanelTex : null) : wallGrainTex;
       const roughnessMap = preset ? null : wallRoughTex;
+
+      const wallColor = new THREE.Color(mainColor);
+      if (currentTintActiveOn) wallColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
       wallMat.map = map;
       wallMat.roughnessMap = roughnessMap;
-      wallMat.color.set(mainColor);
+      wallMat.color.copy(wallColor);
       wallMat.roughness = roughness;
       wallMat.metalness = metalness;
       wallMat.needsUpdate = true;
+
+      const wallDimColor = new THREE.Color(mainColor).multiplyScalar(0.5);
+      if (currentTintInactiveOn) wallDimColor.lerp(new THREE.Color(currentTintInactiveColor), 0.8);
       wallMatDim.map = map;
       wallMatDim.roughnessMap = roughnessMap;
-      wallMatDim.color.set(new THREE.Color(mainColor).multiplyScalar(0.5));
+      wallMatDim.color.copy(wallDimColor);
       wallMatDim.roughness = roughness;
       wallMatDim.metalness = metalness;
       wallMatDim.needsUpdate = true;
@@ -2514,34 +2534,43 @@ export default function RoomBuilder() {
       // own covered ceiling already tracks currentWallMat directly, so it
       // follows for free without any change here.
       ceilingMat.map = map;
-      ceilingMat.color.set(mainColor);
+      ceilingMat.color.copy(wallColor);
       ceilingMat.roughness = roughness;
       ceilingMat.metalness = metalness;
       ceilingMat.needsUpdate = true;
 
-      let floorColor = COLORS.floor, floorRough = 0.88, floorMetal = 0.0;
+      let floorBase = COLORS.floor, floorRough = 0.88, floorMetal = 0.0;
       let floorMap = floorGrainTex, floorRoughnessMap = floorRoughTex;
       if (preset && preset.floorLighten != null) {
-        floorColor = new THREE.Color(mainColor).lerp(new THREE.Color(0xffffff), preset.floorLighten);
+        floorBase = new THREE.Color(mainColor).lerp(new THREE.Color(0xffffff), preset.floorLighten);
         floorRough = roughness; floorMetal = metalness;
         floorMap = useConcreteTex ? concretePanelTex : null;
         floorRoughnessMap = null;
       } else if (preset && preset.floorSame) {
-        floorColor = mainColor; floorRough = roughness; floorMetal = metalness;
+        floorBase = mainColor; floorRough = roughness; floorMetal = metalness;
         floorMap = null; floorRoughnessMap = null;
       }
+      const floorColor = new THREE.Color(floorBase);
+      if (currentTintActiveOn) floorColor.lerp(new THREE.Color(currentTintActiveColor), 0.92).multiplyScalar(0.94);
       floorMat.map = floorMap;
       floorMat.roughnessMap = floorRoughnessMap;
-      floorMat.color.set(floorColor);
+      floorMat.color.copy(floorColor);
       floorMat.roughness = floorRough;
       floorMat.metalness = floorMetal;
       floorMat.needsUpdate = true;
+
+      const floorDimColor = new THREE.Color(floorBase).multiplyScalar(0.5);
+      if (currentTintInactiveOn) floorDimColor.lerp(new THREE.Color(currentTintInactiveColor), 0.8).multiplyScalar(0.92);
       floorMatDim.map = floorMap;
       floorMatDim.roughnessMap = floorRoughnessMap;
-      floorMatDim.color.set(new THREE.Color(floorColor).multiplyScalar(0.5));
+      floorMatDim.color.copy(floorDimColor);
       floorMatDim.roughness = floorRough;
       floorMatDim.metalness = floorMetal;
       floorMatDim.needsUpdate = true;
+    }
+    function applyBuildingMaterial(index) {
+      currentBuildingMaterialIndex = index;
+      recomputeWallFloorMaterials();
     }
     buildingMaterialApiRef.current = applyBuildingMaterial;
 
@@ -2572,28 +2601,25 @@ export default function RoomBuilder() {
       bokehPass.enabled = on;
     }
     ultraRealisticApiRef.current = applyUltraRealistic;
+    // Realistic mode defaults on -- applied explicitly here (matching the
+    // ultraRealistic useState default below) rather than relying solely on
+    // the [ultraRealistic] effect, since that effect is declared (and so
+    // runs, on mount) before this one populates ultraRealisticApiRef.current
+    // -- calling it there on the very first mount would just hit the ref's
+    // no-op placeholder and silently do nothing.
+    applyUltraRealistic(true);
 
     function applyTintInactive(on, colorHex) {
-      if (on) {
-        const pure = new THREE.Color(colorHex);
-        wallMatDim.color.copy(new THREE.Color(COLORS.wall).multiplyScalar(0.5)).lerp(pure, 0.8);
-        floorMatDim.color.copy(new THREE.Color(COLORS.floor).multiplyScalar(0.5)).lerp(pure, 0.8).multiplyScalar(0.92);
-      } else {
-        wallMatDim.color.copy(new THREE.Color(COLORS.wall)).multiplyScalar(0.5);
-        floorMatDim.color.copy(new THREE.Color(COLORS.floor)).multiplyScalar(0.5);
-      }
+      currentTintInactiveOn = on;
+      currentTintInactiveColor = colorHex;
+      recomputeWallFloorMaterials();
     }
     tintInactiveApiRef.current = applyTintInactive;
 
     function applyTintActive(on, colorHex) {
-      if (on) {
-        const pure = new THREE.Color(colorHex);
-        wallMat.color.copy(new THREE.Color(COLORS.wall)).lerp(pure, 0.92);
-        floorMat.color.copy(new THREE.Color(COLORS.floor)).lerp(pure, 0.92).multiplyScalar(0.94);
-      } else {
-        wallMat.color.copy(new THREE.Color(COLORS.wall));
-        floorMat.color.copy(new THREE.Color(COLORS.floor));
-      }
+      currentTintActiveOn = on;
+      currentTintActiveColor = colorHex;
+      recomputeWallFloorMaterials();
     }
     tintActiveApiRef.current = applyTintActive;
 
@@ -5656,7 +5682,7 @@ export default function RoomBuilder() {
               setWireframeMode(false);
               setBuildingMaterialIndex(0);
               setTransparentInactive(false);
-              setUltraRealistic(false);
+              setUltraRealistic(true);
               setTintActiveOn(false);
               setTintInactiveOn(false);
               setSnapEnabled(true);
