@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic } from "lucide-react";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
+import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
 
 const WALL_HEIGHT = 3.6576; // 12 ft
 const MIN_WALL_HEIGHT = 0.5;
@@ -300,6 +306,79 @@ export default function RoomBuilder() {
     const orthoFillRight = new THREE.DirectionalLight(0xffffff, 0.15);
     orthoFillRight.position.set(30, 2, 0);
     scene.add(orthoFillRight);
+
+    // ---------- "Realistic" mode: image-based lighting + postprocessing ----------
+    let ultraRealisticOn = false;
+    // A small hand-built sky/ground environment for image-based lighting --
+    // deliberately dim, tuned to sit alongside the scene's own key/fill/
+    // ambient lights rather than fight them. (three.js's stock
+    // RoomEnvironment was tried first and rejected: it's a product-photo
+    // studio rig with a 900-intensity point light and light panels up to
+    // 100x scalar, built for shiny jewelry close-ups -- wired into this
+    // scene it blew every wall out to solid white.) Generated procedurally
+    // via PMREMGenerator, so there's no external HDRI file to fetch.
+    function buildSoftEnvironmentScene() {
+      const envScene = new THREE.Scene();
+      const sky = new THREE.Mesh(
+        new THREE.SphereGeometry(40, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0x8fb4ff).multiplyScalar(0.3), side: THREE.BackSide })
+      );
+      envScene.add(sky);
+      const ground = new THREE.Mesh(
+        new THREE.SphereGeometry(40, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0x2a271f).multiplyScalar(0.4), side: THREE.BackSide })
+      );
+      envScene.add(ground);
+      // one soft warm patch off to one side so rough/glossy surfaces pick up
+      // a gentle highlight direction instead of perfectly flat ambient
+      const sunPatch = new THREE.Mesh(
+        new THREE.PlaneGeometry(18, 18),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff3e0).multiplyScalar(1.4), side: THREE.DoubleSide })
+      );
+      sunPatch.position.set(18, 22, 10);
+      sunPatch.lookAt(0, 0, 0);
+      envScene.add(sunPatch);
+      return envScene;
+    }
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    const realisticEnvMap = pmremGenerator.fromScene(buildSoftEnvironmentScene(), 0.04).texture;
+    pmremGenerator.dispose();
+
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    const gtaoPass = new GTAOPass(scene, camera, width, height);
+    gtaoPass.output = GTAOPass.OUTPUT.Default;
+    gtaoPass.blendIntensity = 0.7;
+    gtaoPass.enabled = false;
+    composer.addPass(gtaoPass);
+    // High threshold + low strength: this should only catch genuinely bright
+    // spots (a window with sky behind it, a light fixture), not glow every
+    // wall -- bloom is a highlight accent, not a global brightener.
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.22, 0.4, 0.94);
+    bloomPass.enabled = false;
+    composer.addPass(bloomPass);
+    const bokehPass = new BokehPass(scene, camera, { focus: 9, aperture: 0.00004, maxblur: 0.008 });
+    bokehPass.enabled = false;
+    composer.addPass(bokehPass);
+    composer.addPass(new OutputPass());
+    composer.setSize(width, height);
+
+    // Renders through the postprocessing chain only in Realistic mode and
+    // only for the free perspective camera (orbit/walk) -- the fixed
+    // top/front/left/right drafting views and the quad-view panes stay on
+    // the cheap direct-render path, same as shadows already do.
+    function renderActive(cam) {
+      if (ultraRealisticOn && cam === camera) {
+        // keep whatever the camera is orbiting around (the character, in
+        // walk mode) in focus rather than a fixed distance -- otherwise
+        // zooming in to inspect a wall would just blur the wall you're
+        // trying to look at.
+        bokehPass.uniforms["focus"].value = radius;
+        composer.render();
+      } else {
+        renderer.render(scene, cam);
+      }
+    }
 
     // ---------- procedural placeholder character (no external assets --
     // built from primitives, animated with simple sine-wave limb swings) ----------
@@ -791,14 +870,18 @@ export default function RoomBuilder() {
     }
 
     // ---------- materials & geometry helpers ----------
-    const wallMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02 });
-    const floorMat = new THREE.MeshStandardMaterial({ color: COLORS.floor, map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0 });
-    const wallMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.5), map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02 });
-    const floorMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).multiplyScalar(0.5), map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0 });
+    // envMapIntensity is kept modest -- Realistic mode's environment map is
+    // an *additional* light source on top of the existing lamps, so without
+    // this every large flat surface (i.e. most of what's on screen) blows
+    // out toward white instead of just picking up a subtle IBL tint.
+    const wallMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    const floorMat = new THREE.MeshStandardMaterial({ color: COLORS.floor, map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
+    const wallMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.5), map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    const floorMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).multiplyScalar(0.5), map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
     // tinted magenta -- used on the active floor while the Move Room tool is
     // selected, so it's obvious which whole room you're about to drag
-    const wallMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02 });
-    const floorMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.95, metalness: 0.0 });
+    const wallMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02, envMapIntensity: 0.35 });
+    const floorMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.95, metalness: 0.0, envMapIntensity: 0.35 });
     // swapped to the dimmed pair whenever we're building a non-active floor,
     // so every other floor reads as 30% darker while it's not the one you're editing
     let currentWallMat = wallMat;
@@ -1979,12 +2062,27 @@ export default function RoomBuilder() {
     wireframeApiRef.current = applyWireframe;
 
     function applyUltraRealistic(on) {
+      ultraRealisticOn = on;
       const size = on ? 2048 : 1024;
       keyLight.shadow.mapSize.set(size, size);
       if (keyLight.shadow.map) { keyLight.shadow.map.dispose(); keyLight.shadow.map = null; }
-      keyLight.intensity = on ? 1.4 : 1.15;
-      ambient.intensity = on ? 0.42 : 0.55;
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, on ? 3 : 2));
+      keyLight.intensity = on ? 1.2 : 1.15;
+      // the environment map below adds its own ambient fill once IBL is on,
+      // so the flat AmbientLight comes down a bit to leave room for it
+      // rather than the two stacking on top of each other.
+      ambient.intensity = on ? 0.32 : 0.55;
+      // Postprocessing (AO/bloom/DOF) already costs several extra
+      // full-screen passes, so realistic mode keeps the same pixel ratio
+      // cap as normal rather than also pushing supersampling higher --
+      // stacking both would be the difference between "smooth" and
+      // "unusable" on a mobile GPU.
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      composer.setPixelRatio(renderer.getPixelRatio());
+      composer.setSize(width, height);
+      scene.environment = on ? realisticEnvMap : null;
+      gtaoPass.enabled = on;
+      bloomPass.enabled = on;
+      bokehPass.enabled = on;
     }
     ultraRealisticApiRef.current = applyUltraRealistic;
 
@@ -3218,6 +3316,7 @@ export default function RoomBuilder() {
       camera.updateProjectionMatrix();
       applyViewShift(camera, width, height);
       renderer.setSize(width, height);
+      composer.setSize(width, height);
       updateCamera();
     }
     const ro = new ResizeObserver(onResize);
@@ -4068,7 +4167,7 @@ export default function RoomBuilder() {
         } else {
           updateWalkMovement(dt);
         }
-        renderer.render(scene, camera);
+        renderActive(camera);
         // editing (wall drags, height changes, measurements) works the same
         // while walking, so keep their live overlays working too.
         updateHeightLabel();
@@ -4109,7 +4208,7 @@ export default function RoomBuilder() {
         // orbit view benefits from shadows, so switch them off otherwise.
         renderer.shadowMap.enabled = viewMode === "orbit";
         scene.fog = viewMode === "orbit" ? sceneFog : null;
-        renderer.render(scene, activeCamera);
+        renderActive(activeCamera);
         updateHeightLabel();
         updateMeasureLabels();
         if (dividerHandleRef.current) dividerHandleRef.current.style.display = "none";
@@ -4151,6 +4250,11 @@ export default function RoomBuilder() {
       wallRoughTex.dispose();
       floorGrainTex.dispose();
       floorRoughTex.dispose();
+      realisticEnvMap.dispose();
+      composer.dispose();
+      gtaoPass.dispose();
+      bloomPass.dispose();
+      bokehPass.dispose();
       renderer.dispose();
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
     };
