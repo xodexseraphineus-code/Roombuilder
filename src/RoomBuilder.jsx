@@ -4170,12 +4170,11 @@ export default function RoomBuilder() {
   const [renameInputValue, setRenameInputValue] = useState("");
 
   // ---------- voice command: speech -> Claude -> actions ----------
-  // askClaude is the ONE function that changes when this moves out of the
-  // artifact sandbox: here, calling the Anthropic API needs no key at all.
-  // Outside the sandbox (e.g. in Claude Code), this function's body is the
-  // only thing that needs to change -- point it at your own backend route
-  // instead, with that route attaching the real API key server-side. Every
-  // other piece (mic UI, action execution) stays exactly as-is.
+  // Interpretation runs through a local backend (server/voice-server.js)
+  // that shells out to the `claude` CLI on this machine, so it rides
+  // whatever the CLI is already logged into (a subscription or an API key)
+  // instead of the browser needing its own Anthropic API key.
+  const VOICE_SERVER_URL = "http://localhost:8787/api/voice-command";
   async function askClaude(transcript) {
     const systemPrompt =
       "You control a 3D room-builder app by translating one spoken instruction into a list of actions. " +
@@ -4187,19 +4186,17 @@ export default function RoomBuilder() {
       'add_windows_to_wall {wall, count} -- evenly spaces that many windows along the named wall. ' +
       'add_windows_all_walls {count_per_wall} -- windows on all four walls at once. ' +
       "If the instruction is unclear or asks for something with no matching action, respond with an empty array [].";
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    const resp = await fetch(VOICE_SERVER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1000,
-        system: systemPrompt,
-        messages: [{ role: "user", content: transcript }],
-      }),
+      body: JSON.stringify({ transcript, systemPrompt }),
     });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Voice server error (${resp.status}). Is \`npm run voice-server\` running?`);
+    }
     const data = await resp.json();
-    const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-    const clean = text.replace(/```json|```/g, "").trim();
+    const clean = (data.text || "").replace(/```json|```/g, "").trim();
     try {
       const parsed = JSON.parse(clean);
       return Array.isArray(parsed) ? parsed : [];
@@ -4252,7 +4249,7 @@ export default function RoomBuilder() {
       setVoiceStatus("error");
       const reason = e && e.error;
       const hint = reason === "not-allowed" || reason === "service-not-allowed"
-        ? "Microphone access was blocked -- this can happen inside the artifact preview's sandbox, which may not grant mic permission at all."
+        ? "Microphone access was blocked -- check the browser's site permissions and allow the mic for this page."
         : reason === "no-speech" ? "No speech detected."
         : reason === "network" ? "Speech service network error."
         : `Speech recognition error: ${reason || "unknown"}.`;
