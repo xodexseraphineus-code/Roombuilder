@@ -238,7 +238,7 @@ export default function RoomBuilder() {
   const addFloorRef = useRef(() => {});
   const toggleIsolateRef = useRef(() => {});
   const toggleHideRef = useRef(() => {});
-  const [isolatedFloorIdState, setIsolatedFloorIdState] = useState(null);
+  const [isolatedFloorIdsState, setIsolatedFloorIdsState] = useState([]);
   const [hiddenIds, setHiddenIds] = useState([]);
   const pushUndoRef = useRef(() => {});
   const undoRef = useRef(() => {});
@@ -676,7 +676,7 @@ export default function RoomBuilder() {
     let activeRoomId = null; // id of the room (within the active floor) currently focused for editing, or null for the floor itself
     let buildingRoomId = null; // which room's data we're currently building geometry for (null = the floor's own content)
     let buildingFloorEntry = null; // the floor entry currently being built (so its .rooms list is reachable while rendering)
-    let isolatedFloorId = null;
+    const isolatedFloorIds = new Set();
     const hiddenFloorIds = new Set();
     const floorGroups = new Map();
     const roomGroups = new Map(); // roomId -> THREE.Group
@@ -690,7 +690,13 @@ export default function RoomBuilder() {
     floorGroups.set(1, firstFloorGroup);
     let sceneGroup = firstFloorGroup;
     let buildingActiveFloor = true; // true while building geometry that belongs to the active floor (its own content, or any of its rooms)
-    let isActiveTarget = true;      // true only for the ONE thing currently focused for wall edits (the floor itself, or one specific room in it)
+    // true for whatever wall edits (Wall/Window/Door/Stairs tools) can currently
+    // land on: every floor's own content is pickable regardless of which one
+    // is "active" (active only controls height/isolate/hide), but within the
+    // active floor specifically, a room pulled out of it and the floor's own
+    // walls are still mutually exclusive -- only one of them is picked at a
+    // time, exactly as before. Rooms on OTHER floors stay out of scope here.
+    let isPickableTarget = true;
     let state = floors[0].data;
 
     function restackFloors() {
@@ -755,6 +761,7 @@ export default function RoomBuilder() {
       activeRoomId = null;
       restackFloors();
       dragState = null;
+      dragCrossFloorRestore = null;
       orbiting = null;
       pinchState = null;
       previewSelection = null;
@@ -1102,11 +1109,11 @@ export default function RoomBuilder() {
       const hmesh = new THREE.Mesh(hgeo, hotspotMat);
       if (lengthAxis === "x") hmesh.position.set((c.u0 + c.u1) / 2, (y0 + y1) / 2, coord);
       else hmesh.position.set(coord, (y0 + y1) / 2, (c.u0 + c.u1) / 2);
-      hmesh.userData = { kind: "opening", id: c.id, ownerRoomId: buildingRoomId };
+      hmesh.userData = { kind: "opening", id: c.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
       sceneGroup.add(hmesh);
-      if (isActiveTarget) pickList.push(hmesh);
+      if (isPickableTarget) pickList.push(hmesh);
 
-      if (isActiveTarget && selectedOpeningIdRef.current === c.id) {
+      if (isPickableTarget && selectedOpeningIdRef.current === c.id) {
         const hlGeo = new THREE.PlaneGeometry(len, h);
         const hlMesh = new THREE.Mesh(hlGeo, selMat);
         if (lengthAxis === "x") {
@@ -1203,7 +1210,7 @@ export default function RoomBuilder() {
     function disposeObject(obj) {
       obj.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
-        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== selMat && o.material !== selMatPreview && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && !Object.values(propMats).includes(o.material)) {
+        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== pillarMat && o.material !== pillarMatSelected && o.material !== ceilingMat && o.material !== selMat && o.material !== selMatPreview && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && !Object.values(propMats).includes(o.material)) {
           if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
           else o.material.dispose();
         }
@@ -1363,18 +1370,18 @@ export default function RoomBuilder() {
 
       function addSeg(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
-        const isSelectedWall = isActiveTarget && selectedPanelRef.current === panelKey;
+        const isSelectedWall = isPickableTarget && selectedPanelRef.current === panelKey;
         const seg = makePanel(lengthAxis, coord, a, b, T, yb, yt, isSelectedWall ? wallMatSelected : currentWallMat);
-        seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId };
+        seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
-        if (isActiveTarget) pickList.push(seg);
+        if (isPickableTarget) pickList.push(seg);
       }
       // window mullions read as slender frame bars, not a second wall --
       // kept thinner than the wall itself rather than matching it.
       function addMullion(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
         const seg = makePanel(lengthAxis, coord, a, b, T * 0.7, yb, yt, currentWallMat);
-        seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId };
+        seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
       }
 
@@ -1423,9 +1430,9 @@ export default function RoomBuilder() {
         else { posZ = (u0 + u1) / 2; posX = coord + normal.x * offset; }
         mesh.position.set(posX, H / 2, posZ);
         mesh.lookAt(mesh.position.clone().add(normal));
-        mesh.userData = { kind: "selection", id: sel.id, panel: panelKey, ownerRoomId: buildingRoomId };
+        mesh.userData = { kind: "selection", id: sel.id, panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(mesh);
-        if (sel.id !== "__preview__" && isActiveTarget) pickList.push(mesh);
+        if (sel.id !== "__preview__" && isPickableTarget) pickList.push(mesh);
       });
     }
 
@@ -1446,16 +1453,16 @@ export default function RoomBuilder() {
 
       function addSeg(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
-        const isSelectedWall = isActiveTarget && selectedPanelRef.current === "pt:" + p.id;
+        const isSelectedWall = isPickableTarget && selectedPanelRef.current === "pt:" + p.id;
         const seg = makePanel(lengthAxis, p.u, a, b, T, yb, yt, isSelectedWall ? wallMatSelected : currentWallMat);
-        seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId };
+        seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
-        if (isActiveTarget) pickList.push(seg);
+        if (isPickableTarget) pickList.push(seg);
       }
       function addMullion(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
         const seg = makePanel(lengthAxis, p.u, a, b, T * 0.7, yb, yt, currentWallMat);
-        seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId };
+        seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
       }
 
@@ -1699,6 +1706,12 @@ export default function RoomBuilder() {
       clearGroup(sceneGroup);
       const fp = state.footprint;
       const bumpoutFloorPieces = [];
+      // every floor piece mesh created below gets pushed here so the
+      // ceiling (if enabled) can be built from exact copies of them,
+      // shifted up to wall height -- so it always matches the room's real
+      // footprint (bumpouts, notches, curved corners and all) instead of a
+      // plain rectangle, and updates automatically on every rebuild.
+      const floorMeshesForCeiling = [];
 
       const panelKeys = ["north", "south", "east", "west"];
       state.bumpouts.forEach((b) => {
@@ -1748,8 +1761,9 @@ export default function RoomBuilder() {
           floor.rotation.x = Math.PI / 2;
           floor.position.y = 0;
           floor.receiveShadow = true;
-          floor.userData = { kind: "floor", ownerRoomId: buildingRoomId };
+          floor.userData = { kind: "floor", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(floor);
+          floorMeshesForCeiling.push(floor);
           if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props")) pickList.push(floor);
           builtCurvedFloor = true;
         }
@@ -1769,8 +1783,9 @@ export default function RoomBuilder() {
         const floor = new THREE.Mesh(new THREE.BoxGeometry(fw, 0.08, fd), currentFloorMat);
         floor.position.set((r.x0 + r.x1) / 2, -0.04, (r.z0 + r.z1) / 2);
         floor.receiveShadow = true;
-        floor.userData = { kind: "floor", ownerRoomId: buildingRoomId };
+        floor.userData = { kind: "floor", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(floor);
+        floorMeshesForCeiling.push(floor);
         const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2;
         const coveredByRoom = buildingRoomId == null && buildingFloorEntry && (buildingFloorEntry.rooms || []).some((rm) => {
           const rf = rm.data.footprint, ox = rm.offsetX || 0, oz = rm.offsetZ || 0;
@@ -1788,8 +1803,9 @@ export default function RoomBuilder() {
         const fmesh = new THREE.Mesh(new THREE.BoxGeometry(fw, 0.08, fd), currentFloorMat);
         fmesh.position.set(px, -0.04, pz);
         fmesh.receiveShadow = true;
-        fmesh.userData = { kind: "floor", ownerRoomId: buildingRoomId };
+        fmesh.userData = { kind: "floor", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(fmesh);
+        floorMeshesForCeiling.push(fmesh);
         if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props")) pickList.push(fmesh);
       });
 
@@ -1822,22 +1838,29 @@ export default function RoomBuilder() {
       renderStairs();
       renderProps();
       renderBalconies();
-      renderCeiling();
+      renderCeiling(floorMeshesForCeiling);
     }
 
     // a purely decorative slab at wall height -- intentionally never added
     // to pickList and never edge-outlined, so it can't become a raycast
-    // target for any tool (picking, dragging, selection).
-    function renderCeiling() {
+    // target for any tool (picking, dragging, selection). Built from exact
+    // copies of the actual floor pieces (shifted up to wall height) rather
+    // than a plain rectangle, so a U-shaped room, one with bumpouts, or one
+    // with curved corners gets a ceiling that matches its real footprint --
+    // and since it's rebuilt from those same pieces every time, editing the
+    // walls updates it automatically.
+    function renderCeiling(floorMeshes) {
       if (!state.ceilingEnabled) return;
-      const fp = state.footprint;
-      const w = fp.xMax - fp.xMin, d = fp.zMax - fp.zMin;
-      if (w < 0.05 || d < 0.05) return;
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.1, d), ceilingMat);
-      mesh.position.set((fp.xMin + fp.xMax) / 2, state.height - 0.05, (fp.zMin + fp.zMax) / 2);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      sceneGroup.add(mesh);
+      const ceilingY = state.height - 0.05;
+      floorMeshes.forEach((floorMesh) => {
+        const mesh = new THREE.Mesh(floorMesh.geometry, ceilingMat);
+        mesh.position.copy(floorMesh.position);
+        mesh.position.y = ceilingY;
+        mesh.rotation.copy(floorMesh.rotation);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        sceneGroup.add(mesh);
+      });
     }
 
     // a staircase is a stack of solid steps, each a flat-bottomed box sitting
@@ -1853,7 +1876,7 @@ export default function RoomBuilder() {
         const n = Math.max(1, Math.round(st.steps) || 1);
         const stepH = H / n;
         const stepSpan = span / n;
-        const isSelected = isActiveTarget && selectedStairIdRef.current === st.id;
+        const isSelected = isPickableTarget && selectedStairIdRef.current === st.id;
         const mat = isSelected ? wallMatSelected : stairMat;
         for (let i = 0; i < n; i++) {
           const a = st.start + i * stepSpan;
@@ -1873,12 +1896,12 @@ export default function RoomBuilder() {
           mesh.castShadow = true;
           mesh.receiveShadow = true;
           addEdges(mesh);
-          mesh.userData = { kind: "stair", id: st.id, ownerRoomId: buildingRoomId };
+          mesh.userData = { kind: "stair", id: st.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(mesh);
-          if (isActiveTarget) pickList.push(mesh);
+          if (isPickableTarget) pickList.push(mesh);
         }
       });
-      if (previewStair && isActiveTarget) {
+      if (previewStair && isPickableTarget) {
         const w = previewStair.x1 - previewStair.x0;
         const d = previewStair.z1 - previewStair.z0;
         if (w > 0.02 && d > 0.02 && previewStair.axis) {
@@ -1930,7 +1953,7 @@ export default function RoomBuilder() {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         addEdges(mesh);
-        mesh.userData = { kind: "prop", id: p.id, ownerRoomId: buildingRoomId };
+        mesh.userData = { kind: "prop", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(mesh);
       });
     }
@@ -1977,7 +2000,7 @@ export default function RoomBuilder() {
         const side = bal.side || 1;
         const nx = info.normal.x * side, nz = info.normal.z * side;
         const axis = info.lengthAxis;
-        const isSelected = isActiveTarget && selectedBalconyIdRef.current === bal.id;
+        const isSelected = isPickableTarget && selectedBalconyIdRef.current === bal.id;
         const part = selectedBalconyPartRef.current;
         const wholeSelected = isSelected && part == null;
         const pillarsSelected = isSelected && part === "pillars";
@@ -2001,9 +2024,9 @@ export default function RoomBuilder() {
           mesh.castShadow = true;
           mesh.receiveShadow = true;
           addEdges(mesh);
-          mesh.userData = { kind: kindOverride || "balcony", id: bal.id, ownerRoomId: buildingRoomId };
+          mesh.userData = { kind: kindOverride || "balcony", id: bal.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(mesh);
-          if (isActiveTarget) pickList.push(mesh);
+          if (isPickableTarget) pickList.push(mesh);
         }
         // connects two fence-path points with a box running between them --
         // shared by the handrail (thin, at pillarTop) and the glass infill
@@ -2058,18 +2081,18 @@ export default function RoomBuilder() {
             mesh.castShadow = true;
             mesh.receiveShadow = true;
             addEdges(mesh);
-            mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId };
+            mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
             sceneGroup.add(mesh);
-            if (isActiveTarget) pickList.push(mesh);
+            if (isPickableTarget) pickList.push(mesh);
           });
           // top handrail, capping every pillar like a fence rail
           for (let i = 0; i < points.length - 1; i++) {
             const mesh = addRailSeg(points[i], points[i + 1], pillarTop, pillarTop + RAIL_H, PILLAR_SIZE, pillarMatActive, true);
             if (!mesh) continue;
             addEdges(mesh);
-            mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId };
+            mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
             sceneGroup.add(mesh);
-            if (isActiveTarget) pickList.push(mesh);
+            if (isPickableTarget) pickList.push(mesh);
           }
           // optional glass infill, filling each fence bay below the rail
           if (bal.glassInfill) {
@@ -2093,9 +2116,9 @@ export default function RoomBuilder() {
             const hmesh = new THREE.Mesh(hgeo, hotspotMat);
             const hw2 = toWorld((u0 + u1) / 2, PLATFORM_D / 2);
             hmesh.position.set(hw2.x, (platformHeight + pillarTop) / 2, hw2.z);
-            hmesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId };
+            hmesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
             sceneGroup.add(hmesh);
-            if (isActiveTarget) pickList.push(hmesh);
+            if (isPickableTarget) pickList.push(hmesh);
           }
         }
         // covered ceiling, a fixed drop below the room's own default height
@@ -2147,21 +2170,26 @@ export default function RoomBuilder() {
           mesh.castShadow = true;
           mesh.receiveShadow = true;
           addEdges(mesh);
-          mesh.userData = { kind: "wall", panel: "cc:" + c.key, ownerRoomId: buildingRoomId };
+          mesh.userData = { kind: "wall", panel: "cc:" + c.key, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(mesh);
-          if (isActiveTarget) pickList.push(mesh);
+          if (isPickableTarget) pickList.push(mesh);
         }
       });
     }
 
-    // renders one floor's data into its own group. Only the active floor's
-    // geometry is added to pickList, so only it responds to taps/drags --
-    // other floors stay visible but read-only, like inactive Photoshop layers.
+    // renders one floor's data into its own group. Every floor's own top-
+    // level content (walls/openings/stairs -- not any room pulled out of
+    // it) is added to pickList and stays editable with Wall/Window/Door/
+    // Stairs regardless of which floor is "active" -- active only decides
+    // height/isolate/hide, plus which floor a click on the bare floor
+    // itself (to extract or move a room) affects. Hidden or non-isolated
+    // floors are still excluded automatically, since Three.js's raycaster
+    // skips invisible objects on its own.
     function rebuildFloorEntry(entry, isActive) {
       const savedState = state;
       const savedGroup = sceneGroup;
       const savedActive = buildingActiveFloor;
-      const savedTarget = isActiveTarget;
+      const savedTarget = isPickableTarget;
       const savedWallMat = currentWallMat;
       const savedFloorMat = currentFloorMat;
       const savedRoomId = buildingRoomId;
@@ -2169,7 +2197,12 @@ export default function RoomBuilder() {
       state = entry.data;
       sceneGroup = floorGroups.get(entry.id);
       buildingActiveFloor = isActive;
-      isActiveTarget = isActive && activeRoomId == null;
+      // the active floor's own top-level walls are only pickable while no
+      // room within it is focused (a pulled-out room and the floor's own
+      // walls are mutually exclusive); every other floor's top-level
+      // content is always pickable, since rooms-within-other-floors aren't
+      // part of this yet.
+      isPickableTarget = isActive ? activeRoomId == null : true;
       buildingRoomId = null;
       buildingFloorEntry = entry;
       currentWallMat = isActive ? wallMat : wallMatDim;
@@ -2191,7 +2224,7 @@ export default function RoomBuilder() {
       state = savedState;
       sceneGroup = savedGroup;
       buildingActiveFloor = savedActive;
-      isActiveTarget = savedTarget;
+      isPickableTarget = savedTarget;
       currentWallMat = savedWallMat;
       currentFloorMat = savedFloorMat;
       buildingRoomId = savedRoomId;
@@ -2205,7 +2238,7 @@ export default function RoomBuilder() {
       const savedState = state;
       const savedGroup = sceneGroup;
       const savedActive = buildingActiveFloor;
-      const savedTarget = isActiveTarget;
+      const savedTarget = isPickableTarget;
       const savedWallMat = currentWallMat;
       const savedFloorMat = currentFloorMat;
       const savedRoomId = buildingRoomId;
@@ -2229,7 +2262,7 @@ export default function RoomBuilder() {
       sceneGroup = rg;
       buildingActiveFloor = floorIsActive;
       const isSelectedRoom = floorIsActive && activeRoomId === room.id;
-      isActiveTarget = isSelectedRoom;
+      isPickableTarget = isSelectedRoom;
       buildingRoomId = room.id;
       buildingFloorEntry = floorEntry;
       currentWallMat = !floorIsActive ? wallMatDim : wallMat;
@@ -2239,7 +2272,7 @@ export default function RoomBuilder() {
       state = savedState;
       sceneGroup = savedGroup;
       buildingActiveFloor = savedActive;
-      isActiveTarget = savedTarget;
+      isPickableTarget = savedTarget;
       currentWallMat = savedWallMat;
       currentFloorMat = savedFloorMat;
       buildingRoomId = savedRoomId;
@@ -2407,6 +2440,7 @@ export default function RoomBuilder() {
     function setViewMode(mode) {
       viewMode = mode;
       dragState = null;
+      dragCrossFloorRestore = null;
       orbiting = null;
       pinchState = null;
       if (mode !== "orbit") {
@@ -2549,6 +2583,7 @@ export default function RoomBuilder() {
       const entry = floors.find((f) => f.id === activeFloorId);
       if (!entry) return;
       dragState = null;
+      dragCrossFloorRestore = null;
       orbiting = null;
       pinchState = null;
       previewSelection = null;
@@ -2773,6 +2808,15 @@ export default function RoomBuilder() {
     }
 
     let dragState = null;
+    // when a gesture starts on a non-active floor, this holds what to put
+    // the shared editing context (state/sceneGroup/etc.) back to once the
+    // gesture ends -- see the cross-floor retargeting in onPointerDown.
+    let dragCrossFloorRestore = null;
+    function restoreCrossFloorContext() {
+      if (!dragCrossFloorRestore) return;
+      ({ state, sceneGroup, buildingFloorEntry, buildingRoomId, currentWallMat, currentFloorMat } = dragCrossFloorRestore);
+      dragCrossFloorRestore = null;
+    }
     let orbiting = null;
     const activePointers = new Map();
     let pinchState = null;
@@ -2826,6 +2870,7 @@ export default function RoomBuilder() {
           // drop whatever single-finger gesture was in progress
           if (dragState && dragState.holdTimer) clearTimeout(dragState.holdTimer);
           dragState = null;
+          restoreCrossFloorContext();
           orbiting = null;
           previewSelection = null;
           previewOpening = null;
@@ -2860,6 +2905,39 @@ export default function RoomBuilder() {
       }
       const obj = hit.object;
       const kind = obj.userData.kind;
+
+      // A tap can now land on any visible floor, not just the active one --
+      // retarget the shared editing context (state/sceneGroup/etc.) to
+      // whichever floor actually owns the thing that was hit, before any
+      // tool-specific logic below runs. Every handler just reads/writes
+      // these ambient variables, so this one retarget is all it takes for
+      // them to transparently edit the right floor's data. Restored back
+      // to the active floor once the gesture ends (onPointerUp), so active
+      // stays reserved for height/isolate/hide as intended -- and rooms
+      // stay out of this (ownerRoomId != null never reaches here for a
+      // non-active floor to begin with, since rooms are only ever pickable
+      // on the active floor's currently-focused one).
+      // Applied as a function (not inlined once) because switchActiveRoom
+      // -- called a few lines below for wall/partition hits -- resets
+      // `state` back to the active floor whenever a room was previously
+      // focused there, which would silently undo this; re-applying right
+      // after that call makes this retarget the actual last word.
+      function applyCrossFloorRetarget(hitFloorId) {
+        if (hitFloorId == null || hitFloorId === activeFloorId) return;
+        const targetEntry = floors.find((f) => f.id === hitFloorId);
+        if (!targetEntry) return;
+        if (!dragCrossFloorRestore) {
+          dragCrossFloorRestore = { state, sceneGroup, buildingFloorEntry, buildingRoomId, currentWallMat, currentFloorMat };
+        }
+        state = targetEntry.data;
+        sceneGroup = floorGroups.get(hitFloorId);
+        buildingFloorEntry = targetEntry;
+        buildingRoomId = null;
+        currentWallMat = wallMat;
+        currentFloorMat = floorMat;
+      }
+      const hitFloorId = obj.userData.ownerFloorId ?? null;
+      if (obj.userData.ownerRoomId == null) applyCrossFloorRetarget(hitFloorId);
 
       // Tapping a staircase selects it and exposes its step-count/delete
       // controls, regardless of which tool is currently active.
@@ -3015,6 +3093,10 @@ export default function RoomBuilder() {
       if (kind === "wall" || kind === "partition" || kind === "selection") {
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        // switchActiveRoom resets `state` to the active floor when it
+        // clears room focus -- reassert the cross-floor retarget so the
+        // drag that's about to start still lands on the right floor.
+        if (ownerRoomId == null) applyCrossFloorRetarget(hitFloorId);
       }
 
       // grabbing an existing partition directly (outside the cut tool) always
@@ -3527,9 +3609,11 @@ export default function RoomBuilder() {
           // headroom opening now too -- not just when a new layer is
           // created after the fact. Only handled for stairs on the floor
           // itself (not inside an extracted room), since a room's offset
-          // would need to be folded into the hole's world position.
-          if (activeRoomId == null) {
-            const idx = floors.findIndex((f) => f.id === activeFloorId);
+          // would need to be folded into the hole's world position. Uses
+          // buildingFloorEntry rather than activeFloorId, since the stair
+          // may have just been drawn on a different (non-active) floor.
+          if (buildingRoomId == null && buildingFloorEntry) {
+            const idx = floors.findIndex((f) => f.id === buildingFloorEntry.id);
             const aboveEntry = idx !== -1 ? floors[idx + 1] : null;
             if (aboveEntry) {
               if (!aboveEntry.data.floorHoles) aboveEntry.data.floorHoles = [];
@@ -3545,6 +3629,7 @@ export default function RoomBuilder() {
       dragState = null;
       renderer.domElement.style.cursor = "grab";
       rebuild();
+      restoreCrossFloorContext();
     }
 
     function onWheel(e) {
@@ -3613,6 +3698,7 @@ export default function RoomBuilder() {
       previewSelection = null;
       previewOpening = null;
       dragState = null;
+      dragCrossFloorRestore = null;
       rebuild();
       syncFloorsToReact();
     }
@@ -3634,7 +3720,8 @@ export default function RoomBuilder() {
       floors = [{ id: newFloorId, data: makeFloorData(), rooms: [] }];
       activeFloorId = newFloorId;
       activeRoomId = null;
-      isolatedFloorId = null;
+      isolatedFloorIds.clear();
+      setIsolatedFloorIdsState([]);
       hiddenFloorIds.clear();
       roomClipboard = null;
       roomPasteCount = 0;
@@ -3645,6 +3732,7 @@ export default function RoomBuilder() {
       restackFloors();
       state = floors[0].data;
       dragState = null;
+      dragCrossFloorRestore = null;
       orbiting = null;
       pinchState = null;
       setSelectedPanel(null);
@@ -4025,6 +4113,7 @@ export default function RoomBuilder() {
       activeRoomId = null;
       state = entry.data;
       dragState = null;
+      dragCrossFloorRestore = null;
       orbiting = null;
       pinchState = null;
       setSelectedPanel(null);
@@ -4062,7 +4151,7 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      if (isolatedFloorId != null) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      if (isolatedFloorIds.size) { isolatedFloorIds.clear(); setIsolatedFloorIdsState([]); }
       selectFloorById(newId);
       applyVisibility();
     }
@@ -4086,7 +4175,7 @@ export default function RoomBuilder() {
       if (rc) { clearGroup(rc); scene.remove(rc); }
       roomContainers.delete(removed.id);
       hiddenFloorIds.delete(removed.id);
-      if (isolatedFloorId === removed.id) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      if (isolatedFloorIds.delete(removed.id)) setIsolatedFloorIdsState(Array.from(isolatedFloorIds));
       restackFloors();
       const newIdx = Math.min(idx, floors.length - 1);
       selectFloorById(floors[newIdx].id);
@@ -4097,7 +4186,7 @@ export default function RoomBuilder() {
 
     function applyVisibility() {
       floorGroups.forEach((g, fid) => {
-        g.visible = isolatedFloorId != null ? fid === isolatedFloorId : !hiddenFloorIds.has(fid);
+        g.visible = isolatedFloorIds.size > 0 ? isolatedFloorIds.has(fid) : !hiddenFloorIds.has(fid);
       });
     }
 
@@ -4121,7 +4210,7 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      if (isolatedFloorId != null) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      if (isolatedFloorIds.size) { isolatedFloorIds.clear(); setIsolatedFloorIdsState([]); }
       selectFloorById(newId);
       applyVisibility();
     }
@@ -4174,17 +4263,46 @@ export default function RoomBuilder() {
       radius = Math.max(9.5, Math.max(maxX - minX, maxZ - minZ, maxY - minY) * 1.4);
     }
 
+    // frames the union of several floors at once (same bounds logic as
+    // frameAllContent, just restricted to a subset) -- used when more than
+    // one layer is isolated together.
+    function frameFloorEntries(entries) {
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, minY = Infinity, maxY = -Infinity;
+      entries.forEach((f) => {
+        const g = floorGroups.get(f.id);
+        if (!g) return;
+        const fp = f.data.footprint;
+        minX = Math.min(minX, fp.xMin); maxX = Math.max(maxX, fp.xMax);
+        minZ = Math.min(minZ, fp.zMin); maxZ = Math.max(maxZ, fp.zMax);
+        minY = Math.min(minY, g.position.y); maxY = Math.max(maxY, g.position.y + f.data.height);
+        (f.rooms || []).forEach((r) => {
+          const ox = r.offsetX || 0, oz = r.offsetZ || 0;
+          const rfp = r.data.footprint;
+          minX = Math.min(minX, rfp.xMin + ox); maxX = Math.max(maxX, rfp.xMax + ox);
+          minZ = Math.min(minZ, rfp.zMin + oz); maxZ = Math.max(maxZ, rfp.zMax + oz);
+        });
+      });
+      if (minX === Infinity) return;
+      target.x = (minX + maxX) / 2;
+      target.z = (minZ + maxZ) / 2;
+      target.y = (minY + maxY) / 2;
+      radius = Math.max(4, Math.max(maxX - minX, maxZ - minZ, maxY - minY) * 1.3);
+    }
+
+    // multiple layers can be isolated together -- toggling one adds/removes
+    // it from the set rather than replacing whatever was isolated before.
     function toggleIsolateFloor(id) {
-      isolatedFloorId = isolatedFloorId === id ? null : id;
+      if (isolatedFloorIds.has(id)) isolatedFloorIds.delete(id);
+      else isolatedFloorIds.add(id);
       applyVisibility();
-      if (isolatedFloorId != null) {
-        const entry = floors.find((f) => f.id === isolatedFloorId);
-        if (entry) frameFloorEntry(entry);
+      if (isolatedFloorIds.size > 0) {
+        const entries = floors.filter((f) => isolatedFloorIds.has(f.id));
+        frameFloorEntries(entries);
       } else {
         frameAllContent();
       }
       updateCamera();
-      setIsolatedFloorIdState(isolatedFloorId);
+      setIsolatedFloorIdsState(Array.from(isolatedFloorIds));
     }
     toggleIsolateRef.current = toggleIsolateFloor;
 
@@ -4231,7 +4349,7 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      if (isolatedFloorId != null) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      if (isolatedFloorIds.size) { isolatedFloorIds.clear(); setIsolatedFloorIdsState([]); }
       selectFloorById(newId);
       applyVisibility();
     }
@@ -5066,9 +5184,9 @@ export default function RoomBuilder() {
                       Iso
                       <input
                         type="checkbox"
-                        checked={isolatedFloorIdState === id}
+                        checked={isolatedFloorIdsState.includes(id)}
                         onChange={() => toggleIsolateRef.current(id)}
-                        title="Isolate this layer"
+                        title="Isolate this layer (multiple can be isolated together)"
                         style={{ width: 11, height: 11, cursor: "pointer", accentColor: "#FF6B1A" }}
                       />
                     </label>
