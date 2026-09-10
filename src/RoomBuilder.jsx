@@ -27,6 +27,8 @@ const DEFAULT_ROOM_HALF_X = 12.5; // default room is 25m x 15m
 const DEFAULT_ROOM_HALF_Z = 7.5;
 const MIN_STAIR_SIZE = FT;         // smallest footprint that commits as a staircase
 const VIEW_SHIFT = 1.28;          // widen the virtual frame this much to push the model right, clear of the side panel
+const BALCONY_CEILING_DROP = 2 * FT;   // the balcony ceiling/roof sits this far below the room's own default height
+const BALCONY_CEILING_THICKNESS = 0.45; // roof slab thickness
 
 const COLORS = {
   bg: 0x14171c,
@@ -42,6 +44,33 @@ const COLORS = {
 // keyboard" collab palette specifically, so this uses their well-known
 // saturated accent-color approach instead.
 const TE_SWATCHES = [0xff6b1a, 0x4caf6d, 0x4a90d9, 0xf2c230, 0xe5484d];
+
+// a short synthesized click (Web Audio, no audio file to fetch) for wall/
+// partition contact feedback -- one shared AudioContext, created lazily on
+// first use since browsers refuse to start one before a user gesture.
+let clickAudioCtx = null;
+function playClickSound() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!clickAudioCtx) clickAudioCtx = new AC();
+    if (clickAudioCtx.state === "suspended") clickAudioCtx.resume();
+    const ctx = clickAudioCtx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(1200, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(400, ctx.currentTime + 0.04);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.06);
+  } catch {
+    // audio is a nice-to-have here -- never let it break editing
+  }
+}
 
 function SingleViewIcon() {
   return (
@@ -79,7 +108,7 @@ export default function RoomBuilder() {
   const [openingHeight, setOpeningHeight] = useState(DEFAULT_OPENING_HEIGHT);
   const openingHeightRef = useRef(openingHeight);
   useEffect(() => { openingHeightRef.current = openingHeight; }, [openingHeight]);
-  const [openingDividers, setOpeningDividers] = useState(0);
+  const [openingDividers, setOpeningDividers] = useState(3);
   const openingDividersRef = useRef(openingDividers);
   useEffect(() => { openingDividersRef.current = openingDividers; }, [openingDividers]);
   const [openingAxisVertical, setOpeningAxisVertical] = useState(true);
@@ -94,7 +123,9 @@ export default function RoomBuilder() {
   const [propsShape, setPropsShape] = useState("cube");
   const propsShapeRef = useRef(propsShape);
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
-  const [wallThickness, setWallThickness] = useState(0.12);
+  const [wallThickness, setWallThickness] = useState(0.35);
+  const [ceilingOn, setCeilingOn] = useState(false);
+  const ceilingApiRef = useRef({ setEnabled: () => {} });
   const wallThicknessApiRef = useRef({ setThickness: () => {} });
   const [selectedPanel, setSelectedPanel] = useState(null);
   const selectedPanelRef = useRef(selectedPanel);
@@ -125,6 +156,12 @@ export default function RoomBuilder() {
   const balconyHeightApiRef = useRef({ setHeight: () => {} });
   const [balconyPlatformWidth, setBalconyPlatformWidth] = useState(10 * FT);
   const balconyWidthApiRef = useRef({ setWidth: () => {} });
+  const [balconyPillarCount, setBalconyPillarCount] = useState(8);
+  const balconyPillarCountApiRef = useRef({ setCount: () => {} });
+  const [balconyPillarHeight, setBalconyPillarHeight] = useState(3 * FT);
+  const balconyPillarHeightApiRef = useRef({ setHeight: () => {} });
+  const [balconyGlassInfill, setBalconyGlassInfill] = useState(false);
+  const balconyGlassApiRef = useRef({ setEnabled: () => {} });
   const deleteBalconyRef = useRef(() => {});
   const deleteOpeningRef = useRef(() => {});
   const voiceActionsRef = useRef({});
@@ -280,7 +317,9 @@ export default function RoomBuilder() {
     // wall's shadow reads as a clean 45-degree diagonal across the floor,
     // exactly as long as the wall is tall, rather than the near-overhead
     // angle a small x/y/z position gives.
-    const keyLight = new THREE.DirectionalLight(0xffa457, 1.2);
+    // blended 30% toward white so lit walls read closer to their true
+    // color instead of a strong orange cast -- still warm, just subtler.
+    const keyLight = new THREE.DirectionalLight(new THREE.Color(0xffa457).lerp(new THREE.Color(0xffffff), 0.3), 1.2);
     keyLight.position.set(20, 28.3, 20);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(1024, 1024);
@@ -297,7 +336,9 @@ export default function RoomBuilder() {
     scene.add(keyLight);
     // cool blue skylight fill, complementing the warm sun (the classic
     // magic-hour palette: warm key, cool ambient/fill)
-    const fillLight = new THREE.DirectionalLight(0x5f8fff, 0.4);
+    // same 30%-toward-white blend as the key light, so shadow areas read
+    // less strongly blue.
+    const fillLight = new THREE.DirectionalLight(new THREE.Color(0x5f8fff).lerp(new THREE.Color(0xffffff), 0.3), 0.4);
     fillLight.position.set(-6, 4, -5);
     scene.add(fillLight);
     // fixed, non-shadow-casting fill lights aligned with each orthographic
@@ -359,7 +400,12 @@ export default function RoomBuilder() {
       const envScene = new THREE.Scene();
       const skyRadius = 40;
       const skyGeo = new THREE.SphereGeometry(skyRadius, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
-      paintVerticalGradient(skyGeo, skyRadius, new THREE.Color(0xff9d5c).multiplyScalar(0.55), new THREE.Color(0x4a7fdb).multiplyScalar(0.5));
+      // same 30%-toward-white blend as the key/fill lights, so the sky's
+      // IBL contribution matches the subtler direct lighting instead of
+      // reintroducing a strong orange/blue cast of its own.
+      const horizonTone = new THREE.Color(0xff9d5c).lerp(new THREE.Color(0xffffff), 0.3).multiplyScalar(0.55);
+      const zenithTone = new THREE.Color(0x4a7fdb).lerp(new THREE.Color(0xffffff), 0.3).multiplyScalar(0.5);
+      paintVerticalGradient(skyGeo, skyRadius, horizonTone, zenithTone);
       const sky = new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide }));
       envScene.add(sky);
       const ground = new THREE.Mesh(
@@ -582,7 +628,7 @@ export default function RoomBuilder() {
       return {
         footprint: { xMin: -DEFAULT_ROOM_HALF_X, xMax: DEFAULT_ROOM_HALF_X, zMin: -DEFAULT_ROOM_HALF_Z, zMax: DEFAULT_ROOM_HALF_Z },
         height: WALL_HEIGHT,
-        thickness: 0.12,
+        thickness: 0.35,
         selections: [],   // {id, panel, u0, u1}
         bumpouts: [],     // {id, panel, u0, u1, depth}
         partitions: [],   // {id, panel, u, ext}  -- ext signed: negative=inward, positive=outward
@@ -593,6 +639,7 @@ export default function RoomBuilder() {
         props: [],        // {id, kind, x, z} -- decorative sphere/cube/cone/cylinder placed on the floor
         curvedCorners: { enabled: false, radius: 0 }, // rounds the 4 corners of the base footprint's external walls
         balconies: [], // {id, panel, u0, u1, dividerAxis} -- a staircase+platform+pillars assembly with a window/door cutout in the wall behind it
+        ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target
       };
     }
     let idSeq = 1;
@@ -931,6 +978,14 @@ export default function RoomBuilder() {
     // selected, so it's obvious which whole room you're about to drag
     const wallMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02, envMapIntensity: 0.35 });
     const floorMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.95, metalness: 0.0, envMapIntensity: 0.35 });
+    // balcony pillars/handrail get their own material (30% darker than the
+    // wall color) rather than reusing wallMat directly, so darkening them
+    // doesn't also darken every actual wall.
+    const pillarMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.7), roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.7).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02, envMapIntensity: 0.35 });
+    // decorative room ceiling -- 10% transparent (90% opaque) so it doesn't
+    // block editing visibility from above; never added to pickList.
+    const ceilingMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.9, envMapIntensity: 0.35 });
     // swapped to the dimmed pair whenever we're building a non-active floor,
     // so every other floor reads as 30% darker while it's not the one you're editing
     let currentWallMat = wallMat;
@@ -1037,10 +1092,19 @@ export default function RoomBuilder() {
       }
     }
 
-    function renderOpeningCutout(c, lengthAxis, coord, H, addSeg) {
+    function renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion) {
+      // bottomOverride lets an opening start above floor level (e.g. a
+      // balcony door/window off a raised platform instead of the ground).
+      // For a balcony opening, re-resolve it from the balcony's current
+      // platformHeight every rebuild rather than trusting the value
+      // snapshotted when the opening was first drawn -- otherwise raising
+      // or lowering the platform height slider afterward leaves the door
+      // floating at its original height instead of following the platform.
+      if (c.fromBalcony != null) {
+        const bal = (state.balconies || []).find((b) => b.id === c.fromBalcony);
+        if (bal) c = { ...c, bottomOverride: bal.platformHeight || c.bottomOverride };
+      }
       if (c.isDoor) {
-        // bottomOverride lets a door start above floor level (e.g. a
-        // balcony door opening off a raised platform instead of the ground)
         const doorBottom = Math.max(0, Math.min(H - 0.1, c.bottomOverride || 0));
         const h = Math.min(c.height ?? DEFAULT_OPENING_HEIGHT, H - doorBottom);
         const doorTop = doorBottom + h;
@@ -1078,7 +1142,7 @@ export default function RoomBuilder() {
         uSpans.push({ lo: uCursor, hi });
         uCursor = hi;
         if (i < uCols - 1) {
-          addSeg(uCursor, uCursor + mullionWidth, bottomY, topY);
+          addMullion(uCursor, uCursor + mullionWidth, bottomY, topY);
           uCursor += mullionWidth;
         }
       }
@@ -1096,7 +1160,7 @@ export default function RoomBuilder() {
         ySpans.push({ lo: yCursor, hi });
         yCursor = hi;
         if (j < yRows - 1) {
-          addSeg(c.u0, c.u1, yCursor, yCursor + mullionWidth);
+          addMullion(c.u0, c.u1, yCursor, yCursor + mullionWidth);
           yCursor += mullionWidth;
         }
       }
@@ -1278,6 +1342,14 @@ export default function RoomBuilder() {
         sceneGroup.add(seg);
         if (isActiveTarget) pickList.push(seg);
       }
+      // window mullions read as slender frame bars, not a second wall --
+      // kept thinner than the wall itself rather than matching it.
+      function addMullion(a, b, yb, yt) {
+        if (b - a < 0.02 || yt - yb < 0.02) return;
+        const seg = makePanel(lengthAxis, coord, a, b, T * 0.7, yb, yt, currentWallMat);
+        seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId };
+        sceneGroup.add(seg);
+      }
 
       const cuts = [
         ...openingsFor(panelKey).map((o) => ({ ...o, _t: "open" })),
@@ -1291,7 +1363,7 @@ export default function RoomBuilder() {
       cuts.forEach((c) => {
         if (c.u0 > cursor + 0.001) addSeg(cursor, c.u0, 0, H);
         if (c._t === "open") {
-          renderOpeningCutout(c, lengthAxis, coord, H, addSeg);
+          renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion);
         } else if (Math.abs(c.depth) > 0.02) {
           // the far wall AND the two connector (side) walls are each rendered
           // by their own panel pass below ("bf:"/"bs0:"/"bs1:"+c.id) so every
@@ -1353,6 +1425,12 @@ export default function RoomBuilder() {
         sceneGroup.add(seg);
         if (isActiveTarget) pickList.push(seg);
       }
+      function addMullion(a, b, yb, yt) {
+        if (b - a < 0.02 || yt - yb < 0.02) return;
+        const seg = makePanel(lengthAxis, p.u, a, b, T * 0.7, yb, yt, currentWallMat);
+        seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId };
+        sceneGroup.add(seg);
+      }
 
       const opens = openingsFor(panelKey)
         .map((o) => ({ ...o, u0: Math.max(lo, Math.min(o.u0, hi)), u1: Math.max(lo, Math.min(o.u1, hi)) }))
@@ -1362,7 +1440,7 @@ export default function RoomBuilder() {
       let cursor = lo;
       opens.forEach((op) => {
         if (op.u0 > cursor + 0.001) addSeg(cursor, op.u0, 0, H);
-        renderOpeningCutout(op, lengthAxis, p.u, H, addSeg);
+        renderOpeningCutout(op, lengthAxis, p.u, H, addSeg, addMullion);
         cursor = op.u1;
       });
       if (cursor < hi - 0.001) addSeg(cursor, hi, 0, H);
@@ -1717,6 +1795,22 @@ export default function RoomBuilder() {
       renderStairs();
       renderProps();
       renderBalconies();
+      renderCeiling();
+    }
+
+    // a purely decorative slab at wall height -- intentionally never added
+    // to pickList and never edge-outlined, so it can't become a raycast
+    // target for any tool (picking, dragging, selection).
+    function renderCeiling() {
+      if (!state.ceilingEnabled) return;
+      const fp = state.footprint;
+      const w = fp.xMax - fp.xMin, d = fp.zMax - fp.zMin;
+      if (w < 0.05 || d < 0.05) return;
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.1, d), ceilingMat);
+      mesh.position.set((fp.xMin + fp.xMax) / 2, state.height - 0.05, (fp.zMin + fp.zMax) / 2);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      sceneGroup.add(mesh);
     }
 
     // a staircase is a stack of solid steps, each a flat-bottomed box sitting
@@ -1824,27 +1918,31 @@ export default function RoomBuilder() {
       const STEP_D = 3 * FT;
       const DEFAULT_PLATFORM_D = 10 * FT;
       const PILLAR_SIZE = 0.09;
-      const PILLAR_SPACING = 3 * FT;
-      const CEILING_THICKNESS = 0.15;
-      const CEILING_DROP = 2 * FT; // the ceiling sits this far below the room's own default height
-      // evenly spaced points around a rectangle's full perimeter (both the
-      // "width" edges and the "length" edges), spaced ~PILLAR_SPACING apart
-      // and always including the 4 corners.
-      function perimeterPositions(pu0, pu1, pd0, pd1, spacing) {
-        const positions = [];
-        const uCount = Math.max(1, Math.round((pu1 - pu0) / spacing));
-        for (let i = 0; i <= uCount; i++) {
-          const u = pu0 + (i / uCount) * (pu1 - pu0);
-          positions.push([u, pd0]);
-          positions.push([u, pd1]);
+      const DEFAULT_PILLAR_SPACING = 3 * FT;
+      const CEILING_THICKNESS = BALCONY_CEILING_THICKNESS;
+      const CEILING_DROP = BALCONY_CEILING_DROP;
+      const RAIL_H = 0.08; // top handrail bar thickness
+      // evenly spaced points (by arc length) walking an open, 3-sided fence
+      // path: up the near side, across the outer edge, back down the far
+      // side. The wall-side edge is skipped -- a fence doesn't need a rail
+      // against the house wall that's already there. Returned in walking
+      // order so consecutive pairs are the fence bays for the handrail and
+      // glass infill.
+      function fencePath(pu0, pu1, pd0, pd1, count) {
+        const sideLen = pd1 - pd0;
+        const outerLen = pu1 - pu0;
+        const totalLen = Math.max(0.01, sideLen * 2 + outerLen);
+        const n = Math.max(2, Math.round(count));
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const t = (i / n) * totalLen;
+          let u, d;
+          if (t <= sideLen) { u = pu0; d = pd0 + t; }
+          else if (t <= sideLen + outerLen) { u = pu0 + (t - sideLen); d = pd1; }
+          else { u = pu1; d = pd1 - (t - sideLen - outerLen); }
+          pts.push([u, d]);
         }
-        const dCount = Math.max(1, Math.round((pd1 - pd0) / spacing));
-        for (let j = 1; j < dCount; j++) {
-          const d = pd0 + (j / dCount) * (pd1 - pd0);
-          positions.push([pu0, d]);
-          positions.push([pu1, d]);
-        }
-        return positions;
+        return pts;
       }
       (state.balconies || []).forEach((bal) => {
         const info = getPanelInfo(bal.panel);
@@ -1858,7 +1956,7 @@ export default function RoomBuilder() {
         const pillarsSelected = isSelected && part === "pillars";
         const ceilingSelected = isSelected && part === "ceiling";
         const floorLikeMat = wholeSelected ? floorMatSelected : currentFloorMat;
-        const pillarMat = (wholeSelected || pillarsSelected) ? wallMatSelected : currentWallMat;
+        const pillarMatActive = (wholeSelected || pillarsSelected) ? pillarMatSelected : pillarMat;
         const ceilingMat = (wholeSelected || ceilingSelected) ? wallMatSelected : currentWallMat;
         function toWorld(u, d) {
           if (axis === "x") return { x: u, z: info.coord + nz * d };
@@ -1880,6 +1978,22 @@ export default function RoomBuilder() {
           sceneGroup.add(mesh);
           if (isActiveTarget) pickList.push(mesh);
         }
+        // connects two fence-path points with a box running between them --
+        // shared by the handrail (thin, at pillarTop) and the glass infill
+        // (a shorter pane filling the bay below it).
+        function addRailSeg(pa, pb, y0, y1, thickness, mat, castsShadow) {
+          const wa = toWorld(pa[0], pa[1]), wb = toWorld(pb[0], pb[1]);
+          const dx = wb.x - wa.x, dz = wb.z - wa.z;
+          const len = Math.hypot(dx, dz);
+          if (len < 0.02 || y1 - y0 < 0.02) return null;
+          const geo = new THREE.BoxGeometry(len, y1 - y0, thickness);
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set((wa.x + wb.x) / 2, (y0 + y1) / 2, (wa.z + wb.z) / 2);
+          mesh.rotation.y = Math.atan2(-dz, dx);
+          mesh.castShadow = castsShadow;
+          mesh.receiveShadow = true;
+          return mesh;
+        }
         const u0 = bal.u0, u1 = bal.u1;
         const platformHeight = bal.platformHeight || 3 * FT;
         const PLATFORM_D = bal.platformWidth || DEFAULT_PLATFORM_D;
@@ -1895,16 +2009,25 @@ export default function RoomBuilder() {
           const topH = (numLevels - 1 - i) * stepH;
           addBox(u0, u1, PLATFORM_D + i * STEP_D, PLATFORM_D + (i + 1) * STEP_D, 0, topH, floorLikeMat);
         }
-        // pillars are locked to never poke through the room's own default
-        // height -- they run from the platform surface up to just under a
-        // ceiling slab, positioned a fixed drop below the room height.
-        const pillarTop = Math.max(platformHeight + 0.3, state.height - CEILING_DROP - CEILING_THICKNESS);
+        // pillar height is user-controlled (bal.pillarHeight, "height above
+        // the platform"), defaulting to a full connection just under the
+        // ceiling slab the first time a balcony is drawn. Lowering the
+        // slider shortens the pillars and opens a visible gap below the
+        // ceiling -- rendering clamps the *top* end only, so they can never
+        // poke through it.
+        const ceilingAttachY = state.height - CEILING_DROP - CEILING_THICKNESS;
+        const defaultPillarHeight = Math.max(0.3, ceilingAttachY - platformHeight);
+        const pillarHeight = bal.pillarHeight != null ? bal.pillarHeight : defaultPillarHeight;
+        const pillarTop = Math.max(platformHeight + 0.3, Math.min(platformHeight + pillarHeight, ceilingAttachY));
         if (!bal.pillarsRemoved) {
           const half = PILLAR_SIZE / 2;
-          perimeterPositions(u0 + half, u1 - half, half, PLATFORM_D - half, PILLAR_SPACING).forEach(([cu, cd]) => {
+          const perimeterLen = PLATFORM_D * 2 + (u1 - u0);
+          const count = bal.pillarCount || Math.max(2, Math.round(perimeterLen / DEFAULT_PILLAR_SPACING));
+          const points = fencePath(u0 + half, u1 - half, half, PLATFORM_D - half, count);
+          points.forEach(([cu, cd]) => {
             const w = toWorld(cu, cd);
             const geo = new THREE.BoxGeometry(PILLAR_SIZE, pillarTop - platformHeight, PILLAR_SIZE);
-            const mesh = new THREE.Mesh(geo, pillarMat);
+            const mesh = new THREE.Mesh(geo, pillarMatActive);
             mesh.position.set(w.x, (platformHeight + pillarTop) / 2, w.z);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
@@ -1913,6 +2036,24 @@ export default function RoomBuilder() {
             sceneGroup.add(mesh);
             if (isActiveTarget) pickList.push(mesh);
           });
+          // top handrail, capping every pillar like a fence rail
+          for (let i = 0; i < points.length - 1; i++) {
+            const mesh = addRailSeg(points[i], points[i + 1], pillarTop, pillarTop + RAIL_H, PILLAR_SIZE, pillarMatActive, true);
+            if (!mesh) continue;
+            addEdges(mesh);
+            mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId };
+            sceneGroup.add(mesh);
+            if (isActiveTarget) pickList.push(mesh);
+          }
+          // optional glass infill, filling each fence bay below the rail
+          if (bal.glassInfill) {
+            for (let i = 0; i < points.length - 1; i++) {
+              const mesh = addRailSeg(points[i], points[i + 1], platformHeight + 0.03, pillarTop - 0.03, 0.02, glassMat, false);
+              if (!mesh) continue;
+              mesh.userData = { kind: "glass" };
+              sceneGroup.add(mesh);
+            }
+          }
           // the pillars themselves are thin and easy to miss with a tap --
           // an invisible box spanning the whole pillar zone makes tapping
           // anywhere in that space (not just exactly on a pillar) select
@@ -1933,7 +2074,7 @@ export default function RoomBuilder() {
         }
         // covered ceiling, a fixed drop below the room's own default height
         if (!bal.ceilingRemoved) {
-          addBox(u0, u1, 0, PLATFORM_D, state.height - CEILING_DROP - CEILING_THICKNESS, state.height - CEILING_DROP, ceilingMat, "balcony-ceiling");
+          addBox(u0, u1, 0, PLATFORM_D, ceilingAttachY, state.height - CEILING_DROP, ceilingMat, "balcony-ceiling");
         }
       });
     }
@@ -2724,8 +2865,14 @@ export default function RoomBuilder() {
         setSelectedBalconyId(obj.userData.id);
         setSelectedBalconyPart(kind === "balcony-pillar" ? "pillars" : kind === "balcony-ceiling" ? "ceiling" : null);
         if (bal) {
-          setBalconyStairHeight(bal.platformHeight || 3 * FT);
+          const ph = bal.platformHeight || 3 * FT;
+          setBalconyStairHeight(ph);
           setBalconyPlatformWidth(bal.platformWidth || 10 * FT);
+          const defaultPillarH = Math.max(0.3, (state.height - BALCONY_CEILING_DROP - BALCONY_CEILING_THICKNESS) - ph);
+          setBalconyPillarHeight(bal.pillarHeight != null ? bal.pillarHeight : defaultPillarH);
+          const perimeterLen = (bal.platformWidth || 10 * FT) * 2 + (bal.u1 - bal.u0);
+          setBalconyPillarCount(bal.pillarCount || Math.max(2, Math.round(perimeterLen / (3 * FT))));
+          setBalconyGlassInfill(!!bal.glassInfill);
         }
         return;
       }
@@ -3080,18 +3227,35 @@ export default function RoomBuilder() {
         previewSelection = { id: "__preview__", panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u) };
         rebuild();
       } else if (dragState.type === "partition-draw" || dragState.type === "partition-redrag") {
-        const pt = new THREE.Vector3();
-        if (!ray.intersectPlane(dragState.plane, pt)) return;
-        const t = pt.clone().sub(dragState.start).dot(dragState.normal);
-        const p = state.partitions.find((pp) => pp.id === dragState.id);
-        const parent = p ? getPanelInfo(p.panel) : null;
-        if (p && parent) {
-          const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
-          const rawExt = (dragState.baseExt || 0) + t;
-          const farSnapped = snapValue(parent.coord + axisSign * rawExt);
-          p.ext = clampPartitionExt(p.panel, (farSnapped - parent.coord) * axisSign);
+        const now = performance.now();
+        if (dragState.snapHoldUntil && now < dragState.snapHoldUntil) {
+          // holding at the hard-snapped connection -- ignore pointer
+          // movement for a moment so touching the opposite wall reads as a
+          // definite "click stop" rather than a value that keeps sliding.
+          rebuild();
+        } else {
+          const pt = new THREE.Vector3();
+          if (!ray.intersectPlane(dragState.plane, pt)) return;
+          const t = pt.clone().sub(dragState.start).dot(dragState.normal);
+          const p = state.partitions.find((pp) => pp.id === dragState.id);
+          const parent = p ? getPanelInfo(p.panel) : null;
+          if (p && parent) {
+            const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+            const rawExt = (dragState.baseExt || 0) + t;
+            const farSnapped = snapValue(parent.coord + axisSign * rawExt);
+            const newExt = clampPartitionExt(p.panel, (farSnapped - parent.coord) * axisSign);
+            const wallSpan = wallDefs[p.panel]
+              ? (parent.thickAxis === "z" ? state.footprint.zMax - state.footprint.zMin : state.footprint.xMax - state.footprint.xMin)
+              : null;
+            const isFullSpan = (ext) => wallSpan != null && ext <= -wallSpan + 0.001;
+            if (isFullSpan(newExt) && !isFullSpan(p.ext)) {
+              playClickSound();
+              dragState.snapHoldUntil = now + 500;
+            }
+            p.ext = newExt;
+          }
+          rebuild();
         }
-        rebuild();
       } else if (dragState.type === "opening-draw") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
@@ -3133,6 +3297,9 @@ export default function RoomBuilder() {
           let oz = dragState.startOffsetZ + dz;
           if (snapEnabledRef.current) {
             const snapped = snapRoomOffset(room, ox, oz);
+            const justTouched = (snapped.ox !== ox || snapped.oz !== oz) && !dragState.wasSnapped;
+            dragState.wasSnapped = snapped.ox !== ox || snapped.oz !== oz;
+            if (justTouched) playClickSound();
             ox = snapped.ox; oz = snapped.oz;
           }
           room.offsetX = ox;
@@ -3148,7 +3315,7 @@ export default function RoomBuilder() {
         // past the wall even though the wall visually hid the preview,
         // and the built staircase would poke out through it.
         const fp = state.footprint;
-        const margin = (state.thickness || 0.12) / 2 + 0.02;
+        const margin = (state.thickness || 0.35) / 2 + 0.02;
         const clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, pt.x));
         const clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, pt.z));
         dragState.x1 = snapValue(clampedX);
@@ -3277,7 +3444,9 @@ export default function RoomBuilder() {
           state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0: doorU0, u1: doorU1, height: doorHeightRef.current, isDoor: true, bottomOverride: platformHeight, fromBalcony: bid });
           if (!state.balconies) state.balconies = [];
           state.balconies.push({ id: bid, panel: dragState.panelKey, u0, u1, dividerAxis, side: dragState.side || 1, platformHeight });
-          setSelectedBalconyId(bid);
+          // deliberately not auto-selected -- the magenta selection
+          // highlight right after drawing one is more distracting than
+          // useful; tap it afterward if you want to edit it.
           setBalconyStairHeight(platformHeight);
         }
         previewOpening = null;
@@ -3441,6 +3610,7 @@ export default function RoomBuilder() {
       if (entry) {
         setFloorHeight(entry.data.height);
         setWallThickness(entry.data.thickness);
+        setCeilingOn(!!entry.data.ceilingEnabled);
       }
     }
 
@@ -3632,6 +3802,40 @@ export default function RoomBuilder() {
       rebuild();
     }
     balconyWidthApiRef.current = { setWidth: setActiveBalconyPlatformWidth };
+
+    function setActiveBalconyPillarCount(n) {
+      const id = selectedBalconyIdRef.current;
+      if (id == null) return;
+      const bal = (state.balconies || []).find((b) => b.id === id);
+      if (!bal) return;
+      bal.pillarCount = Math.max(2, Math.min(60, Math.round(n)));
+      rebuild();
+    }
+    balconyPillarCountApiRef.current = { setCount: setActiveBalconyPillarCount };
+
+    // the slider's max is generous on purpose -- rendering clamps the
+    // *actual* pillar top to never exceed the ceiling, so sliding past
+    // "fully connected" just has no further visible effect, while sliding
+    // below it opens the gap that disconnects the pillars from the roof.
+    function setActiveBalconyPillarHeight(h) {
+      const id = selectedBalconyIdRef.current;
+      if (id == null) return;
+      const bal = (state.balconies || []).find((b) => b.id === id);
+      if (!bal) return;
+      bal.pillarHeight = Math.max(0.3, h);
+      rebuild();
+    }
+    balconyPillarHeightApiRef.current = { setHeight: setActiveBalconyPillarHeight };
+
+    function setActiveBalconyGlassInfill(on) {
+      const id = selectedBalconyIdRef.current;
+      if (id == null) return;
+      const bal = (state.balconies || []).find((b) => b.id === id);
+      if (!bal) return;
+      bal.glassInfill = on;
+      rebuild();
+    }
+    balconyGlassApiRef.current = { setEnabled: setActiveBalconyGlassInfill };
 
     function deleteActiveBalcony() {
       const id = selectedBalconyIdRef.current;
@@ -4115,6 +4319,14 @@ export default function RoomBuilder() {
     }
     wallThicknessApiRef.current = { setThickness: setActiveFloorThickness };
 
+    function setActiveFloorCeiling(enabled) {
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (!entry) return;
+      entry.data.ceilingEnabled = enabled;
+      rebuild();
+    }
+    ceilingApiRef.current = { setEnabled: setActiveFloorCeiling };
+
     function updateHeightLabel() {
       const el = heightLabelRef.current;
       if (!el) return;
@@ -4292,6 +4504,9 @@ export default function RoomBuilder() {
       floorMatDim.dispose();
       wallMatSelected.dispose();
       floorMatSelected.dispose();
+      pillarMat.dispose();
+      pillarMatSelected.dispose();
+      ceilingMat.dispose();
       selMat.dispose();
       selMatPreview.dispose();
       glassMat.dispose();
@@ -4832,6 +5047,18 @@ export default function RoomBuilder() {
               floorHeightApiRef.current.setHeight(v);
             }}
           />
+          <label style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 7, fontSize: 9, color: "#ABABAB", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={ceilingOn}
+              onChange={(e) => {
+                pushUndoRef.current();
+                setCeilingOn(e.target.checked);
+                ceilingApiRef.current.setEnabled(e.target.checked);
+              }}
+            />
+            Ceiling
+          </label>
         </div>
       </div>
 
@@ -4859,6 +5086,9 @@ export default function RoomBuilder() {
               setSelectedOpeningId(null);
               setBalconyStairHeight(3 * FT);
               setBalconyPlatformWidth(10 * FT);
+              setBalconyPillarCount(8);
+              setBalconyPillarHeight(3 * FT);
+              setBalconyGlassInfill(false);
               setViewMode("orbit");
               setViewLayout("single");
               if (walkMode) setWalkMode(false);
@@ -5203,6 +5433,59 @@ export default function RoomBuilder() {
                   balconyWidthApiRef.current.setWidth(ft * FT);
                 }}
               />
+            </div>
+          )}
+          {selectedBalconyId != null && (
+            <div className="ribbon-group" style={{ minWidth: 200 }}>
+              <span className="ribbon-label">Pillars &middot; {balconyPillarCount}</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={2}
+                max={60}
+                step={1}
+                value={balconyPillarCount}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  setBalconyPillarCount(n);
+                  balconyPillarCountApiRef.current.setCount(n);
+                }}
+              />
+            </div>
+          )}
+          {selectedBalconyId != null && (
+            <div className="ribbon-group" style={{ minWidth: 200 }}>
+              <span className="ribbon-label">Pillar height &middot; {(balconyPillarHeight / FT).toFixed(2)} ft</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={1}
+                max={50}
+                step={0.1}
+                value={balconyPillarHeight / FT}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setBalconyPillarHeight(ft * FT);
+                  balconyPillarHeightApiRef.current.setHeight(ft * FT);
+                }}
+              />
+            </div>
+          )}
+          {selectedBalconyId != null && (
+            <div className="ribbon-group" style={{ minWidth: 80 }}>
+              <button
+                className={`rb-btn ${balconyGlassInfill ? "active" : ""}`}
+                onClick={() => {
+                  pushUndoRef.current();
+                  const on = !balconyGlassInfill;
+                  setBalconyGlassInfill(on);
+                  balconyGlassApiRef.current.setEnabled(on);
+                }}
+              >
+                Glass
+              </button>
             </div>
           )}
           {selectedOpeningId != null && (
