@@ -1026,6 +1026,11 @@ export default function RoomBuilder() {
     let currentFloorMat = floorMat;
     const selMat = new THREE.MeshBasicMaterial({ color: COLORS.highlight, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false });
     const selMatPreview = new THREE.MeshBasicMaterial({ color: COLORS.highlight, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false });
+    // resize-handle bars drawn along the edges of a selected opening or
+    // balcony platform -- a distinct orange (not the magenta selection fill
+    // they sit on top of, which they'd otherwise blend into) and unlit /
+    // depth-tested off so they always read clearly and stay easy to grab.
+    const handleMat = new THREE.MeshBasicMaterial({ color: 0xff6b1a, transparent: true, opacity: 1, depthTest: false });
     // window glass: a thin, mostly-transparent, faintly blue-tinted pane
     // that's noticeably more specular (lower roughness) than the matte
     // wall surface it sits inside. Never added to pickList -- it's purely
@@ -1123,7 +1128,35 @@ export default function RoomBuilder() {
           hlMesh.position.set(coord, (y0 + y1) / 2, (c.u0 + c.u1) / 2);
         }
         sceneGroup.add(hlMesh);
+        addOpeningResizeHandles(c, lengthAxis, coord, y0, y1);
       }
+    }
+
+    // draggable edge bars around a selected opening -- left/right resize its
+    // width (u0/u1), top resizes its height, and bottom (windows only --
+    // doors are floor-anchored) resizes it from below. Poke slightly proud
+    // of both wall faces and render on top (handleMat has depthTest off) so
+    // they're always visible and easy to grab regardless of viewing angle.
+    function addOpeningResizeHandles(c, lengthAxis, coord, y0, y1) {
+      const T = state.thickness;
+      const barU = Math.min(0.22, Math.max(0.1, (c.u1 - c.u0) * 0.35));
+      const barY = Math.min(0.22, Math.max(0.1, (y1 - y0) * 0.35));
+      function addHandle(edge, uCenter, yCenter, uLen, yLen) {
+        const geo = lengthAxis === "x"
+          ? new THREE.BoxGeometry(uLen, yLen, T + 0.05)
+          : new THREE.BoxGeometry(T + 0.05, yLen, uLen);
+        const mesh = new THREE.Mesh(geo, handleMat);
+        mesh.renderOrder = 10;
+        if (lengthAxis === "x") mesh.position.set(uCenter, yCenter, coord);
+        else mesh.position.set(coord, yCenter, uCenter);
+        mesh.userData = { kind: "resize-handle", target: "opening", id: c.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+        sceneGroup.add(mesh);
+        if (isPickableTarget) pickList.push(mesh);
+      }
+      addHandle("left", c.u0, (y0 + y1) / 2, barU, y1 - y0);
+      addHandle("right", c.u1, (y0 + y1) / 2, barU, y1 - y0);
+      addHandle("top", (c.u0 + c.u1) / 2, y1, c.u1 - c.u0, barY);
+      if (!c.isDoor) addHandle("bottom", (c.u0 + c.u1) / 2, y0, c.u1 - c.u0, barY);
     }
 
     function renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion) {
@@ -1210,7 +1243,7 @@ export default function RoomBuilder() {
     function disposeObject(obj) {
       obj.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
-        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== pillarMat && o.material !== pillarMatSelected && o.material !== ceilingMat && o.material !== selMat && o.material !== selMatPreview && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && !Object.values(propMats).includes(o.material)) {
+        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== pillarMat && o.material !== pillarMatSelected && o.material !== ceilingMat && o.material !== selMat && o.material !== selMatPreview && o.material !== handleMat && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && !Object.values(propMats).includes(o.material)) {
           if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
           else o.material.dispose();
         }
@@ -1227,6 +1260,15 @@ export default function RoomBuilder() {
     function rangesOverlap(a0, a1, b0, b1) { return a0 < b1 && b0 < a1; }
     function wouldOverlapOpening(panelKey, u0, u1) {
       return state.openings.some((o) => o.panel === panelKey && rangesOverlap(u0, u1, o.u0, o.u1));
+    }
+    // resizing an opening/balcony by its own edge handle must not count its
+    // own (or, for a balcony, its own door+windows') existing span as an
+    // overlap with itself.
+    function wouldOverlapOpeningExcluding(panelKey, u0, u1, excludeId) {
+      return state.openings.some((o) => o.id !== excludeId && o.panel === panelKey && rangesOverlap(u0, u1, o.u0, o.u1));
+    }
+    function wouldOverlapOpeningExcludingBalcony(panelKey, u0, u1, balconyId) {
+      return state.openings.some((o) => o.fromBalcony !== balconyId && o.panel === panelKey && rangesOverlap(u0, u1, o.u0, o.u1));
     }
     function wouldOverlapSelection(panelKey, u0, u1) {
       return state.selections.some((s) => s.panel === panelKey && rangesOverlap(u0, u1, s.u0, s.u1));
@@ -1958,6 +2000,37 @@ export default function RoomBuilder() {
       });
     }
 
+    // rebuilds a balcony's door+flanking-windows openings from scratch off
+    // its current u0/u1/platformHeight -- the exact same subdivision the
+    // initial balcony-draw commit uses (fixed-width centered door, a solid
+    // mullion gap on each side, dividers scaled to whatever's left).
+    // Called both there and whenever a platform edge handle is dragged, so
+    // resizing a balcony keeps the door centered and the windows correctly
+    // re-spanned instead of just stretching the original three openings.
+    function regenerateBalconyOpenings(bal) {
+      state.openings = state.openings.filter((o) => o.fromBalcony !== bal.id);
+      const doorW = 3 * FT;
+      const mid = (bal.u0 + bal.u1) / 2;
+      const doorU0 = mid - doorW / 2, doorU1 = mid + doorW / 2;
+      const winHeight = 7 * FT;
+      const doorMullion = 0.2;
+      const leftWinU1 = doorU0 - doorMullion;
+      const rightWinU0 = doorU1 + doorMullion;
+      function dividersForSpan(span) {
+        const segs = Math.max(1, Math.round(span / (3 * FT)));
+        return Math.max(0, segs - 1);
+      }
+      const leftSpan = leftWinU1 - bal.u0;
+      if (leftSpan > 0.3) {
+        state.openings.push({ id: idSeq++, panel: bal.panel, u0: bal.u0, u1: leftWinU1, height: winHeight, dividers: dividersForSpan(leftSpan), dividerAxis: bal.dividerAxis, bottomOverride: bal.platformHeight, fromBalcony: bal.id });
+      }
+      const rightSpan = bal.u1 - rightWinU0;
+      if (rightSpan > 0.3) {
+        state.openings.push({ id: idSeq++, panel: bal.panel, u0: rightWinU0, u1: bal.u1, height: winHeight, dividers: dividersForSpan(rightSpan), dividerAxis: bal.dividerAxis, bottomOverride: bal.platformHeight, fromBalcony: bal.id });
+      }
+      state.openings.push({ id: idSeq++, panel: bal.panel, u0: doorU0, u1: doorU1, height: doorHeightRef.current, isDoor: true, bottomOverride: bal.platformHeight, fromBalcony: bal.id });
+    }
+
     // the staircase-balcony assembly: a low 3-step stair leading up to a
     // wide platform (4x a normal tread's depth) against the wall, with
     // corner pillars enclosing the platform. The window/door cutout in the
@@ -2124,6 +2197,26 @@ export default function RoomBuilder() {
         // covered ceiling, a fixed drop below the room's own default height
         if (!bal.ceilingRemoved) {
           addBox(u0, u1, 0, PLATFORM_D, ceilingAttachY, state.height - CEILING_DROP, ceilingMat, "balcony-ceiling");
+        }
+        // draggable edge bars at the platform's two side edges (u0/u1) --
+        // only while the whole assembly (not just a pillar or the ceiling)
+        // is selected, spanning corner-post-style from the ground to the
+        // rail top so they're easy to spot and grab from any angle.
+        if (isPickableTarget && wholeSelected) {
+          const barU = Math.max(0.08, Math.min(0.16, (u1 - u0) * 0.15));
+          const barD = 0.16;
+          function addHandle(edge, uCenter) {
+            const geo = axis === "x" ? new THREE.BoxGeometry(barU, pillarTop, barD) : new THREE.BoxGeometry(barD, pillarTop, barU);
+            const mesh = new THREE.Mesh(geo, handleMat);
+            mesh.renderOrder = 10;
+            const w = toWorld(uCenter, PLATFORM_D / 2);
+            mesh.position.set(w.x, pillarTop / 2, w.z);
+            mesh.userData = { kind: "resize-handle", target: "balcony", id: bal.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          addHandle("left", u0);
+          addHandle("right", u1);
         }
       });
     }
@@ -2972,6 +3065,33 @@ export default function RoomBuilder() {
       const hitFloorId = obj.userData.ownerFloorId ?? null;
       if (obj.userData.ownerRoomId == null) applyCrossFloorRetarget(hitFloorId);
 
+      // Grabbing an edge handle on a selected window, door, or balcony
+      // platform starts an interactive resize -- available regardless of
+      // which tool is active, same as selecting the opening/balcony itself.
+      if (kind === "resize-handle") {
+        const rh = obj.userData;
+        const ownerRoomId = rh.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        if (ownerRoomId == null) applyCrossFloorRetarget(hitFloorId);
+        if (rh.target === "opening") {
+          const o = state.openings.find((oo) => oo.id === rh.id);
+          if (!o) return;
+          const info = getPanelInfo(o.panel);
+          if (!info) return;
+          pushUndo();
+          dragState = { type: "resize-opening", id: rh.id, edge: rh.edge, panelKey: o.panel, plane: panelFacePlane(info, hit.point) };
+        } else if (rh.target === "balcony") {
+          const bal = (state.balconies || []).find((b) => b.id === rh.id);
+          if (!bal) return;
+          const info = getPanelInfo(bal.panel);
+          if (!info) return;
+          pushUndo();
+          dragState = { type: "resize-balcony", id: rh.id, edge: rh.edge, panelKey: bal.panel, plane: panelFacePlane(info, hit.point) };
+        }
+        capture(e);
+        return;
+      }
+
       // Tapping a staircase selects it and exposes its step-count/delete
       // controls, regardless of which tool is currently active.
       if (kind === "stair") {
@@ -3446,6 +3566,74 @@ export default function RoomBuilder() {
         dragState.u1 = u;
         previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
         rebuild();
+      } else if (dragState.type === "resize-opening") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const o = state.openings.find((oo) => oo.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!o || !info) { dragState = null; return; }
+        const MIN_OPENING_H = 0.3; // smallest opening you can resize to vertically
+        if (dragState.edge === "left" || dragState.edge === "right") {
+          const u = snapValue(panelU(info, pt));
+          if (dragState.edge === "left") {
+            const newU0 = Math.max(info.u0, Math.min(u, o.u1 - MIN_OPENING));
+            if (!wouldOverlapOpeningExcluding(o.panel, newU0, o.u1, o.id) && !wouldOverlapBumpout(o.panel, newU0, o.u1)) o.u0 = newU0;
+          } else {
+            const newU1 = Math.min(info.u1, Math.max(u, o.u0 + MIN_OPENING));
+            if (!wouldOverlapOpeningExcluding(o.panel, o.u0, newU1, o.id) && !wouldOverlapBumpout(o.panel, o.u0, newU1)) o.u1 = newU1;
+          }
+        } else {
+          const H = state.height;
+          const y = snapValue(pt.y);
+          if (o.isDoor) {
+            // doors are floor-anchored (or platform-anchored, off a
+            // balcony) -- only the top edge moves, changing height alone.
+            const bottom = o.bottomOverride || 0;
+            o.height = Math.max(MIN_OPENING_H, Math.min(H - 0.05 - bottom, y - bottom));
+            if (selectedOpeningIdRef.current === o.id) setDoorHeight(o.height);
+          } else {
+            // a plain window starts centered (bottomOverride null, height
+            // split evenly around the middle) -- the first drag of either
+            // edge pins the OTHER edge in place by recording bottomOverride,
+            // so top and bottom move independently from then on, like a
+            // real window frame rather than always staying centered.
+            const curBottom = o.bottomOverride != null ? o.bottomOverride : Math.max(0, (H - (o.height ?? DEFAULT_OPENING_HEIGHT)) / 2);
+            const curTop = curBottom + (o.height ?? DEFAULT_OPENING_HEIGHT);
+            if (dragState.edge === "top") {
+              const newTop = Math.max(curBottom + MIN_OPENING_H, Math.min(H - 0.05, y));
+              o.bottomOverride = curBottom;
+              o.height = newTop - curBottom;
+            } else {
+              const newBottom = Math.max(0, Math.min(curTop - MIN_OPENING_H, y));
+              o.bottomOverride = newBottom;
+              o.height = curTop - newBottom;
+            }
+            if (selectedOpeningIdRef.current === o.id) setOpeningHeight(o.height);
+          }
+        }
+        rebuild();
+      } else if (dragState.type === "resize-balcony") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const bal = (state.balconies || []).find((b) => b.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!bal || !info) { dragState = null; return; }
+        const MIN_BALCONY = 6 * FT;
+        const u = snapValue(panelU(info, pt));
+        if (dragState.edge === "left") {
+          const newU0 = Math.max(info.u0, Math.min(u, bal.u1 - MIN_BALCONY));
+          if (!wouldOverlapOpeningExcludingBalcony(bal.panel, newU0, bal.u1, bal.id) && !wouldOverlapBumpout(bal.panel, newU0, bal.u1)) {
+            bal.u0 = newU0;
+            regenerateBalconyOpenings(bal);
+          }
+        } else {
+          const newU1 = Math.min(info.u1, Math.max(u, bal.u0 + MIN_BALCONY));
+          if (!wouldOverlapOpeningExcludingBalcony(bal.panel, bal.u0, newU1, bal.id) && !wouldOverlapBumpout(bal.panel, bal.u0, newU1)) {
+            bal.u1 = newU1;
+            regenerateBalconyOpenings(bal);
+          }
+        }
+        rebuild();
       } else if (dragState.type === "room-move") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
@@ -3586,36 +3774,12 @@ export default function RoomBuilder() {
         if (u1 - u0 >= MIN_BALCONY && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
           const bid = idSeq++;
-          const doorW = 3 * FT;
-          const mid = (u0 + u1) / 2;
-          const doorU0 = mid - doorW / 2, doorU1 = mid + doorW / 2;
           const dividerAxis = openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical";
-          const winHeight = 7 * FT;
           const platformHeight = 3 * FT;
-          // always leave a solid mullion gap flanking the door -- a
-          // deliberate architectural break between window and door, present
-          // no matter what the divider slider is set to.
-          const doorMullion = 0.2;
-          const leftWinU1 = doorU0 - doorMullion;
-          const rightWinU0 = doorU1 + doorMullion;
-          // a divider roughly every 3ft along whichever window section --
-          // "2 dividers by default" for a typical-width section, scaling
-          // up for a longer drag.
-          function dividersForSpan(span) {
-            const segs = Math.max(1, Math.round(span / (3 * FT)));
-            return Math.max(0, segs - 1);
-          }
-          const leftSpan = leftWinU1 - u0;
-          if (leftSpan > 0.3) {
-            state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1: leftWinU1, height: winHeight, dividers: dividersForSpan(leftSpan), dividerAxis, bottomOverride: platformHeight, fromBalcony: bid });
-          }
-          const rightSpan = u1 - rightWinU0;
-          if (rightSpan > 0.3) {
-            state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0: rightWinU0, u1, height: winHeight, dividers: dividersForSpan(rightSpan), dividerAxis, bottomOverride: platformHeight, fromBalcony: bid });
-          }
-          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0: doorU0, u1: doorU1, height: doorHeightRef.current, isDoor: true, bottomOverride: platformHeight, fromBalcony: bid });
+          const bal = { id: bid, panel: dragState.panelKey, u0, u1, dividerAxis, side: dragState.side || 1, platformHeight };
           if (!state.balconies) state.balconies = [];
-          state.balconies.push({ id: bid, panel: dragState.panelKey, u0, u1, dividerAxis, side: dragState.side || 1, platformHeight });
+          state.balconies.push(bal);
+          regenerateBalconyOpenings(bal);
           // deliberately not auto-selected -- the magenta selection
           // highlight right after drawing one is more distracting than
           // useful; tap it afterward if you want to edit it.
