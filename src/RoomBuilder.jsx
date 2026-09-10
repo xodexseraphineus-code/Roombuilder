@@ -126,6 +126,8 @@ export default function RoomBuilder() {
   const [wallThickness, setWallThickness] = useState(0.35);
   const [ceilingOn, setCeilingOn] = useState(false);
   const ceilingApiRef = useRef({ setEnabled: () => {} });
+  const [groundOn, setGroundOn] = useState(false);
+  const groundApiRef = useRef({ setEnabled: () => {} });
   const wallThicknessApiRef = useRef({ setThickness: () => {} });
   const [selectedPanel, setSelectedPanel] = useState(null);
   const selectedPanelRef = useRef(selectedPanel);
@@ -164,6 +166,8 @@ export default function RoomBuilder() {
   const balconyGlassApiRef = useRef({ setEnabled: () => {} });
   const deleteBalconyRef = useRef(() => {});
   const deleteOpeningRef = useRef(() => {});
+  const openingEditApiRef = useRef({ setHeight: () => {}, setDividers: () => {}, setAxis: () => {} });
+  const [selectedOpeningIsDoor, setSelectedOpeningIsDoor] = useState(false);
   const voiceActionsRef = useRef({});
   const voiceRoomContextRef = useRef(() => "");
   const [stairSteps, setStairSteps] = useState(20);
@@ -361,15 +365,38 @@ export default function RoomBuilder() {
     // a 50x50m site ground plane under the room, so a building smaller than
     // that (like the 25x15 default) reads as sitting on a lawn rather than
     // floating in the void -- sits just below the room floor slab (which
-    // spans y=-0.08 to y=0) so the two never z-fight.
-    const groundPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(50, 50),
-      new THREE.MeshStandardMaterial({ color: 0x8fbf6a, roughness: 0.95, metalness: 0, envMapIntensity: 0.35 })
-    );
+    // spans y=-0.08 to y=0) so the two never z-fight. Off by default (a
+    // toggle in the Layers panel); a radial alpha map fades it to fully
+    // transparent over the outer ~30% of its radius instead of ending in a
+    // hard square edge.
+    function makeRadialFadeTexture(size) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const r = size / 2;
+      const grad = ctx.createRadialGradient(r, r, r * 0.7, r, r, r);
+      grad.addColorStop(0, "rgba(255,255,255,1)");
+      grad.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+      return new THREE.CanvasTexture(canvas);
+    }
+    const groundFadeTex = makeRadialFadeTexture(256);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0x8fbf6a).multiplyScalar(0.6),
+      roughness: 0.95,
+      metalness: 0,
+      envMapIntensity: 0.35,
+      transparent: true,
+      alphaMap: groundFadeTex,
+    });
+    const groundPlane = new THREE.Mesh(new THREE.PlaneGeometry(50, 50), groundMat);
     groundPlane.rotation.x = -Math.PI / 2;
     groundPlane.position.y = -0.1;
     groundPlane.receiveShadow = true;
+    groundPlane.visible = false;
     scene.add(groundPlane);
+    groundApiRef.current = { setEnabled: (on) => { groundPlane.visible = on; } };
 
     // ---------- "Realistic" mode: image-based lighting + postprocessing ----------
     let ultraRealisticOn = false;
@@ -2010,13 +2037,12 @@ export default function RoomBuilder() {
           addBox(u0, u1, PLATFORM_D + i * STEP_D, PLATFORM_D + (i + 1) * STEP_D, 0, topH, floorLikeMat);
         }
         // pillar height is user-controlled (bal.pillarHeight, "height above
-        // the platform"), defaulting to a full connection just under the
-        // ceiling slab the first time a balcony is drawn. Lowering the
-        // slider shortens the pillars and opens a visible gap below the
-        // ceiling -- rendering clamps the *top* end only, so they can never
-        // poke through it.
+        // the platform"), defaulting to a 3ft fence rail the first time a
+        // balcony is drawn -- raising the slider all the way reconnects
+        // them to the ceiling slab; rendering clamps the *top* end only, so
+        // they can never poke through it.
         const ceilingAttachY = state.height - CEILING_DROP - CEILING_THICKNESS;
-        const defaultPillarHeight = Math.max(0.3, ceilingAttachY - platformHeight);
+        const defaultPillarHeight = 3 * FT;
         const pillarHeight = bal.pillarHeight != null ? bal.pillarHeight : defaultPillarHeight;
         const pillarTop = Math.max(platformHeight + 0.3, Math.min(platformHeight + pillarHeight, ceilingAttachY));
         if (!bal.pillarsRemoved) {
@@ -2868,8 +2894,7 @@ export default function RoomBuilder() {
           const ph = bal.platformHeight || 3 * FT;
           setBalconyStairHeight(ph);
           setBalconyPlatformWidth(bal.platformWidth || 10 * FT);
-          const defaultPillarH = Math.max(0.3, (state.height - BALCONY_CEILING_DROP - BALCONY_CEILING_THICKNESS) - ph);
-          setBalconyPillarHeight(bal.pillarHeight != null ? bal.pillarHeight : defaultPillarH);
+          setBalconyPillarHeight(bal.pillarHeight != null ? bal.pillarHeight : 3 * FT);
           const perimeterLen = (bal.platformWidth || 10 * FT) * 2 + (bal.u1 - bal.u0);
           setBalconyPillarCount(bal.pillarCount || Math.max(2, Math.round(perimeterLen / (3 * FT))));
           setBalconyGlassInfill(!!bal.glassInfill);
@@ -2889,6 +2914,19 @@ export default function RoomBuilder() {
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
         setSelectedOpeningId(obj.userData.id);
+        // sync the height/dividers/direction controls to whichever opening
+        // was just tapped, so they read (and edit) its actual values
+        // instead of whatever was left over from drawing the last one.
+        const o = state.openings.find((oo) => oo.id === obj.userData.id);
+        setSelectedOpeningIsDoor(!!(o && o.isDoor));
+        if (o && !o.isDoor) {
+          setOpeningHeight(o.height ?? DEFAULT_OPENING_HEIGHT);
+          setOpeningDividers(o.dividers || 0);
+          setOpeningAxisVertical(o.dividerAxis === "vertical" || o.dividerAxis === "both");
+          setOpeningAxisHorizontal(o.dividerAxis === "horizontal" || o.dividerAxis === "both");
+        } else if (o && o.isDoor) {
+          setDoorHeight(o.height ?? DEFAULT_OPENING_HEIGHT);
+        }
         return;
       }
 
@@ -2909,6 +2947,25 @@ export default function RoomBuilder() {
           dragState = {
             type: "room-drag", roomId: ownerRoomId, plane, start: hit.point.clone(),
             startOffsetX: room.offsetX || 0, startOffsetZ: room.offsetZ || 0,
+          };
+          capture(e);
+          return;
+        }
+        // with no partitions yet, the whole floor already IS the "room" --
+        // there's nothing distinct to extract. commitRoomFromFound would
+        // still clone the floor's entire data into a brand-new room object
+        // and switch editing focus onto that clone; from that point on the
+        // clone and the floor silently diverge, so a Layer height change
+        // afterward stops visibly affecting anything (the floor's own data
+        // changed, but what's on screen is now the clone) until you
+        // deselect and the two disagree. So a tap-drag here just moves the
+        // floor itself instead.
+        if (!state.partitions || state.partitions.length === 0) {
+          pushUndo();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = {
+            type: "room-move", plane, start: hit.point.clone(),
+            startOffsetX: floorEntry.offsetX || 0, startOffsetZ: floorEntry.offsetZ || 0,
           };
           capture(e);
           return;
@@ -3873,6 +3930,35 @@ export default function RoomBuilder() {
     }
     deleteOpeningRef.current = deleteActiveOpening;
 
+    // live-edits whichever opening is currently selected, so the height/
+    // dividers/direction controls act on that specific window (or door)
+    // instead of only ever setting the default for the next one drawn.
+    function setActiveOpeningHeight(h) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o) return;
+      o.height = Math.max(0, h);
+      rebuild();
+    }
+    function setActiveOpeningDividers(n) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o || o.isDoor) return;
+      o.dividers = Math.max(0, n);
+      rebuild();
+    }
+    function setActiveOpeningAxis(vertical, horizontal) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o || o.isDoor) return;
+      o.dividerAxis = vertical && horizontal ? "both" : horizontal ? "horizontal" : "vertical";
+      rebuild();
+    }
+    openingEditApiRef.current = { setHeight: setActiveOpeningHeight, setDividers: setActiveOpeningDividers, setAxis: setActiveOpeningAxis };
+
     // ---------- voice command actions ----------
     // A small, deliberately isolated set of actions a voice command can
     // drive, each just calling straight into the same state + rebuild()
@@ -4518,7 +4604,8 @@ export default function RoomBuilder() {
       floorGrainTex.dispose();
       floorRoughTex.dispose();
       groundPlane.geometry.dispose();
-      groundPlane.material.dispose();
+      groundMat.dispose();
+      groundFadeTex.dispose();
       realisticEnvMap.dispose();
       composer.dispose();
       gtaoPass.dispose();
@@ -5047,18 +5134,31 @@ export default function RoomBuilder() {
               floorHeightApiRef.current.setHeight(v);
             }}
           />
-          <label style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 7, fontSize: 9, color: "#ABABAB", cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={ceilingOn}
-              onChange={(e) => {
-                pushUndoRef.current();
-                setCeilingOn(e.target.checked);
-                ceilingApiRef.current.setEnabled(e.target.checked);
-              }}
-            />
-            Ceiling
-          </label>
+          <div style={{ display: "flex", gap: 12, marginTop: 7 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "#ABABAB", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={ceilingOn}
+                onChange={(e) => {
+                  pushUndoRef.current();
+                  setCeilingOn(e.target.checked);
+                  ceilingApiRef.current.setEnabled(e.target.checked);
+                }}
+              />
+              Ceiling
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "#ABABAB", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={groundOn}
+                onChange={(e) => {
+                  setGroundOn(e.target.checked);
+                  groundApiRef.current.setEnabled(e.target.checked);
+                }}
+              />
+              Ground
+            </label>
+          </div>
         </div>
       </div>
 
@@ -5102,7 +5202,7 @@ export default function RoomBuilder() {
               setShowMeasurements(false);
               setFloorNames({});
               setOpeningHeight(DEFAULT_OPENING_HEIGHT);
-              setOpeningDividers(0);
+              setOpeningDividers(3);
               setOpeningAxisVertical(true);
               setOpeningAxisHorizontal(false);
               setDoorHeight(7 * FT);
@@ -5300,9 +5400,11 @@ export default function RoomBuilder() {
               />
             </div>
           )}
-          {tool === "cut" && (
+          {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
             <div className="ribbon-group">
-              <span className="ribbon-label">Opening height &middot; {(openingHeight / FT).toFixed(2)} ft</span>
+              <span className="ribbon-label">
+                {selectedOpeningId != null ? "Selected window height" : "Opening height"} &middot; {(openingHeight / FT).toFixed(2)} ft
+              </span>
               <input
                 className="rb-range"
                 type="range"
@@ -5310,14 +5412,17 @@ export default function RoomBuilder() {
                 max={Math.max(0.2, (floorHeight - 0.1) / FT)}
                 step={0.05}
                 value={openingHeight / FT}
+                onPointerDown={() => pushUndoRef.current()}
                 onChange={(e) => {
                   const ft = parseFloat(e.target.value);
-                  setOpeningHeight(Math.max(0, ft * FT));
+                  const h = Math.max(0, ft * FT);
+                  setOpeningHeight(h);
+                  if (selectedOpeningId != null) openingEditApiRef.current.setHeight(h);
                 }}
               />
             </div>
           )}
-          {tool === "cut" && (
+          {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
             <div className="ribbon-group">
               <span className="ribbon-label">Dividers &middot; {openingDividers}</span>
               <input
@@ -5327,22 +5432,49 @@ export default function RoomBuilder() {
                 max={6}
                 step={1}
                 value={openingDividers}
-                onChange={(e) => setOpeningDividers(parseInt(e.target.value, 10))}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  setOpeningDividers(n);
+                  if (selectedOpeningId != null) openingEditApiRef.current.setDividers(n);
+                }}
               />
             </div>
           )}
-          {tool === "cut" && (
+          {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
             <div className="ribbon-group">
               <span className="ribbon-label">Divider direction</span>
               <div style={{ display: "flex", gap: 6 }}>
-                <button className={`rb-btn ${openingAxisVertical ? "active" : ""}`} onClick={() => setOpeningAxisVertical((v) => !v)}>Vertical</button>
-                <button className={`rb-btn ${openingAxisHorizontal ? "active" : ""}`} onClick={() => setOpeningAxisHorizontal((v) => !v)}>Horizontal</button>
+                <button
+                  className={`rb-btn ${openingAxisVertical ? "active" : ""}`}
+                  onClick={() => {
+                    pushUndoRef.current();
+                    const v = !openingAxisVertical;
+                    setOpeningAxisVertical(v);
+                    if (selectedOpeningId != null) openingEditApiRef.current.setAxis(v, openingAxisHorizontal);
+                  }}
+                >
+                  Vertical
+                </button>
+                <button
+                  className={`rb-btn ${openingAxisHorizontal ? "active" : ""}`}
+                  onClick={() => {
+                    pushUndoRef.current();
+                    const h = !openingAxisHorizontal;
+                    setOpeningAxisHorizontal(h);
+                    if (selectedOpeningId != null) openingEditApiRef.current.setAxis(openingAxisVertical, h);
+                  }}
+                >
+                  Horizontal
+                </button>
               </div>
             </div>
           )}
-          {tool === "door" && (
+          {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
             <div className="ribbon-group">
-              <span className="ribbon-label">Door height &middot; {(doorHeight / FT).toFixed(2)} ft</span>
+              <span className="ribbon-label">
+                {selectedOpeningId != null ? "Selected door height" : "Door height"} &middot; {(doorHeight / FT).toFixed(2)} ft
+              </span>
               <input
                 className="rb-range"
                 type="range"
@@ -5350,7 +5482,12 @@ export default function RoomBuilder() {
                 max={Math.max(3.2, (floorHeight - 0.05) / FT)}
                 step={0.05}
                 value={doorHeight / FT}
-                onChange={(e) => setDoorHeight(Math.max(0, parseFloat(e.target.value) * FT))}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const h = Math.max(0, parseFloat(e.target.value) * FT);
+                  setDoorHeight(h);
+                  if (selectedOpeningId != null) openingEditApiRef.current.setHeight(h);
+                }}
               />
             </div>
           )}
