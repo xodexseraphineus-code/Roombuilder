@@ -1,0 +1,5129 @@
+import { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic } from "lucide-react";
+
+const WALL_HEIGHT = 3.6576; // 12 ft
+const MIN_WALL_HEIGHT = 0.5;
+const MAX_WALL_HEIGHT = 8;
+const MIN_SIZE = 1.0;             // smallest a room dimension can shrink to
+const MAX_COORD = 40;             // how far any base wall can travel from center
+const MAX_DEPTH = 30;             // how far a pulled-out section can extrude
+const OUTWARD_PARTITION_MAX = 20; // how far a partition can reach when there's no opposite wall to meet
+const MIN_RADIUS = 4;             // closest the camera can zoom in
+const MAX_RADIUS = 70;            // farthest the camera can zoom out
+const MIN_OPENING = 0.5;          // smallest opening you can cut
+const MIN_HIGHLIGHT = 0.15;       // smallest highlight worth keeping
+const HOLD_MS = 420;              // press-and-hold duration to arm a partition/cut
+const MOVE_PX = 6;                // pixels of movement that resolves a quick drag
+const DEFAULT_OPENING_HEIGHT = +(WALL_HEIGHT * 0.8).toFixed(2);
+const FT = 0.3048;                // grid/measurement units are shown in feet
+const DEFAULT_ROOM_HALF_X = 12.5; // default room is 25m x 15m
+const DEFAULT_ROOM_HALF_Z = 7.5;
+const MIN_STAIR_SIZE = FT;         // smallest footprint that commits as a staircase
+const VIEW_SHIFT = 1.28;          // widen the virtual frame this much to push the model right, clear of the side panel
+
+const COLORS = {
+  bg: 0x14171c,
+  wall: 0xf2f0ea,
+  wallEdge: 0x2a271f,
+  floor: 0xe6e4dc,
+  accent: 0xbd6640,
+  highlight: 0xff2d6e,
+};
+
+// a representative Teenage Engineering-style palette (orange, green, blue,
+// yellow, red) for the tint swatches -- couldn't find a documented "Apple
+// keyboard" collab palette specifically, so this uses their well-known
+// saturated accent-color approach instead.
+const TE_SWATCHES = [0xff6b1a, 0x4caf6d, 0x4a90d9, 0xf2c230, 0xe5484d];
+
+function SingleViewIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <rect x="1.5" y="1.5" width="13" height="13" rx="1" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+function QuadViewIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <rect x="1.5" y="1.5" width="13" height="13" rx="1" stroke="currentColor" strokeWidth="1.4" />
+      <line x1="8" y1="1.5" x2="8" y2="14.5" stroke="currentColor" strokeWidth="1.4" />
+      <line x1="1.5" y1="8" x2="14.5" y2="8" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+export default function RoomBuilder() {
+  const mountRef = useRef(null);
+  const hudRef = useRef(null);
+  const heightLabelRef = useRef(null);
+  const dividerHandleRef = useRef(null);
+  const dividerVLineRef = useRef(null);
+  const dividerHLineRef = useRef(null);
+  const measureLayerRef = useRef(null);
+  const resetFnRef = useRef(null);
+  const panelHeightApiRef = useRef({ setHeight: () => {}, getHeight: () => WALL_HEIGHT });
+  const rebuildGridRef = useRef(() => {});
+  const rebuildModelRef = useRef(() => {});
+  const setViewModeApiRef = useRef(() => {});
+  const [tool, setTool] = useState("move");
+  const toolRef = useRef(tool);
+  useEffect(() => { toolRef.current = tool; rebuildModelRef.current(); }, [tool]);
+  const [openingHeight, setOpeningHeight] = useState(DEFAULT_OPENING_HEIGHT);
+  const openingHeightRef = useRef(openingHeight);
+  useEffect(() => { openingHeightRef.current = openingHeight; }, [openingHeight]);
+  const [openingDividers, setOpeningDividers] = useState(0);
+  const openingDividersRef = useRef(openingDividers);
+  useEffect(() => { openingDividersRef.current = openingDividers; }, [openingDividers]);
+  const [openingAxisVertical, setOpeningAxisVertical] = useState(true);
+  const openingAxisVerticalRef = useRef(openingAxisVertical);
+  useEffect(() => { openingAxisVerticalRef.current = openingAxisVertical; }, [openingAxisVertical]);
+  const [openingAxisHorizontal, setOpeningAxisHorizontal] = useState(false);
+  const openingAxisHorizontalRef = useRef(openingAxisHorizontal);
+  useEffect(() => { openingAxisHorizontalRef.current = openingAxisHorizontal; }, [openingAxisHorizontal]);
+  const [doorHeight, setDoorHeight] = useState(7 * FT);
+  const doorHeightRef = useRef(doorHeight);
+  useEffect(() => { doorHeightRef.current = doorHeight; }, [doorHeight]);
+  const [propsShape, setPropsShape] = useState("cube");
+  const propsShapeRef = useRef(propsShape);
+  useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
+  const [wallThickness, setWallThickness] = useState(0.12);
+  const wallThicknessApiRef = useRef({ setThickness: () => {} });
+  const [selectedPanel, setSelectedPanel] = useState(null);
+  const selectedPanelRef = useRef(selectedPanel);
+  useEffect(() => { selectedPanelRef.current = selectedPanel; rebuildModelRef.current(); }, [selectedPanel]);
+  const [selectedHeight, setSelectedHeight] = useState(WALL_HEIGHT);
+  const [selectedRoomId, setSelectedRoomId] = useState(null);
+  const selectedRoomIdRef = useRef(selectedRoomId);
+  useEffect(() => { selectedRoomIdRef.current = selectedRoomId; rebuildModelRef.current(); }, [selectedRoomId]);
+  const cutRoomRef = useRef(() => {});
+  const copyRoomRef = useRef(() => {});
+  const pasteRoomRef = useRef(() => {});
+  const duplicateRoomRef = useRef(() => {});
+  const deleteRoomRef = useRef(() => {});
+  const [hasRoomClipboard, setHasRoomClipboard] = useState(false);
+  const [selectedStairId, setSelectedStairId] = useState(null);
+  const selectedStairIdRef = useRef(selectedStairId);
+  useEffect(() => { selectedStairIdRef.current = selectedStairId; rebuildModelRef.current(); }, [selectedStairId]);
+  const [selectedBalconyId, setSelectedBalconyId] = useState(null);
+  const selectedBalconyIdRef = useRef(selectedBalconyId);
+  useEffect(() => { selectedBalconyIdRef.current = selectedBalconyId; rebuildModelRef.current(); }, [selectedBalconyId]);
+  const [selectedBalconyPart, setSelectedBalconyPart] = useState(null); // "pillars" | "ceiling" | null (whole assembly)
+  const selectedBalconyPartRef = useRef(selectedBalconyPart);
+  useEffect(() => { selectedBalconyPartRef.current = selectedBalconyPart; }, [selectedBalconyPart]);
+  const [selectedOpeningId, setSelectedOpeningId] = useState(null); // a window or door cutout in a wall
+  const selectedOpeningIdRef = useRef(selectedOpeningId);
+  useEffect(() => { selectedOpeningIdRef.current = selectedOpeningId; rebuildModelRef.current(); }, [selectedOpeningId]);
+  const [balconyStairHeight, setBalconyStairHeight] = useState(3 * FT);
+  const balconyHeightApiRef = useRef({ setHeight: () => {} });
+  const [balconyPlatformWidth, setBalconyPlatformWidth] = useState(10 * FT);
+  const balconyWidthApiRef = useRef({ setWidth: () => {} });
+  const deleteBalconyRef = useRef(() => {});
+  const deleteOpeningRef = useRef(() => {});
+  const voiceActionsRef = useRef({});
+  const voiceRoomContextRef = useRef(() => "");
+  const [stairSteps, setStairSteps] = useState(20);
+  const stairStepsApiRef = useRef({ setSteps: () => {} });
+  const deleteStairRef = useRef(() => {});
+  const switchActiveRoomRef = useRef(() => {});
+  const [roomHeight, setRoomHeight] = useState(WALL_HEIGHT);
+  const roomHeightApiRef = useRef({ setHeight: () => {} });
+  const [curvedCornersOn, setCurvedCornersOn] = useState(false);
+  const curvedCornersOnRef = useRef(curvedCornersOn);
+  useEffect(() => { curvedCornersOnRef.current = curvedCornersOn; }, [curvedCornersOn]);
+  const [curvedCornersRadius, setCurvedCornersRadius] = useState(0.6);
+  const curvedCornersRadiusRef = useRef(curvedCornersRadius);
+  useEffect(() => { curvedCornersRadiusRef.current = curvedCornersRadius; }, [curvedCornersRadius]);
+  const curvedCornersApiRef = useRef({ setEnabled: () => {}, setRadius: () => {} });
+  const resetEverythingRef = useRef(() => {});
+  const [gridSizeFt, setGridSizeFt] = useState(10);
+  const gridSizeRef = useRef(gridSizeFt * FT);
+  useEffect(() => { gridSizeRef.current = gridSizeFt * FT; rebuildGridRef.current(); }, [gridSizeFt]);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const snapEnabledRef = useRef(snapEnabled);
+  useEffect(() => { snapEnabledRef.current = snapEnabled; }, [snapEnabled]);
+  const [showMeasurements, setShowMeasurements] = useState(false);
+  const showMeasurementsRef = useRef(showMeasurements);
+  useEffect(() => { showMeasurementsRef.current = showMeasurements; rebuildModelRef.current(); }, [showMeasurements]);
+  const [viewMode, setViewMode] = useState("orbit");
+  useEffect(() => { setViewModeApiRef.current(viewMode); }, [viewMode]);
+  const [hiddenLineMode, setHiddenLineMode] = useState(false);
+  const hiddenLineApiRef = useRef(() => {});
+  useEffect(() => { hiddenLineApiRef.current(hiddenLineMode); }, [hiddenLineMode]);
+  const [transparentInactive, setTransparentInactive] = useState(false);
+  const transparentInactiveApiRef = useRef(() => {});
+  useEffect(() => { transparentInactiveApiRef.current(transparentInactive); }, [transparentInactive]);
+  const [wireframeMode, setWireframeMode] = useState(false);
+  const wireframeApiRef = useRef(() => {});
+  useEffect(() => { wireframeApiRef.current(wireframeMode); }, [wireframeMode]);
+  const [ultraRealistic, setUltraRealistic] = useState(false);
+  const ultraRealisticApiRef = useRef(() => {});
+  useEffect(() => { ultraRealisticApiRef.current(ultraRealistic); }, [ultraRealistic]);
+  const [tintInactiveOn, setTintInactiveOn] = useState(false);
+  const [tintInactiveColor, setTintInactiveColor] = useState(0xff6b1a);
+  const tintInactiveApiRef = useRef(() => {});
+  useEffect(() => { tintInactiveApiRef.current(tintInactiveOn, tintInactiveColor); }, [tintInactiveOn, tintInactiveColor]);
+  const [tintActiveOn, setTintActiveOn] = useState(false);
+  const [tintActiveColor, setTintActiveColor] = useState(0xff6b1a);
+  const tintActiveApiRef = useRef(() => {});
+  useEffect(() => { tintActiveApiRef.current(tintActiveOn, tintActiveColor); }, [tintActiveOn, tintActiveColor]);
+  const [viewLayout, setViewLayout] = useState("single");
+  const viewLayoutRef = useRef(viewLayout);
+  useEffect(() => { viewLayoutRef.current = viewLayout; }, [viewLayout]);
+  const [walkMode, setWalkMode] = useState(false);
+  const walkModeRef = useRef(walkMode);
+  const walkModeApiRef = useRef(() => {});
+  useEffect(() => { walkModeRef.current = walkMode; walkModeApiRef.current(walkMode); }, [walkMode]);
+  const walkInputRef = useRef({ fwd: false, back: false, left: false, right: false });
+  const [floorIds, setFloorIds] = useState([1]);
+  const [activeFloorIdState, setActiveFloorIdState] = useState(1);
+  const thumbCanvasMapRef = useRef(new Map());
+  const refreshThumbnailApiRef = useRef(() => {});
+  const duplicateFloorRef = useRef(() => {});
+  const deleteFloorRef = useRef(() => {});
+  const selectFloorRef = useRef(() => {});
+  const reorderFloorsRef = useRef(() => {});
+  const floorRowRefs = useRef(new Map());
+  const floorDragRef = useRef(null);
+  const [dragFloorId, setDragFloorId] = useState(null);
+  const [dropInfo, setDropInfo] = useState(null);
+  const addFloorRef = useRef(() => {});
+  const toggleIsolateRef = useRef(() => {});
+  const toggleHideRef = useRef(() => {});
+  const [isolatedFloorIdState, setIsolatedFloorIdState] = useState(null);
+  const [hiddenIds, setHiddenIds] = useState([]);
+  const pushUndoRef = useRef(() => {});
+  const undoRef = useRef(() => {});
+  const redoRef = useRef(() => {});
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState(""); // "", "listening", "thinking", "done", "error"
+  const [voiceTranscript, setVoiceTranscript] = useState("");
+  const voiceRecognitionRef = useRef(null);
+  const copyFloorRef = useRef(() => {});
+  const cutFloorRef = useRef(() => {});
+  const pasteFloorRef = useRef(() => {});
+  const [hasClipboard, setHasClipboard] = useState(false);
+  const [floorHeight, setFloorHeight] = useState(WALL_HEIGHT);
+  const floorHeightApiRef = useRef({ setHeight: () => {}, getHeight: () => WALL_HEIGHT });
+  useEffect(() => {
+    floorIds.forEach((id) => refreshThumbnailApiRef.current(id));
+  }, [floorIds]);
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    let width = mount.clientWidth || 1;
+    let height = mount.clientHeight || 1;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(COLORS.bg);
+    scene.fog = new THREE.Fog(COLORS.bg, 35, 220);
+    const sceneFog = scene.fog;
+
+    const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 500);
+    const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
+    const orthoTopCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
+    const orthoFrontCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
+    const orthoLeftCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
+    let activeCamera = camera;
+    // quad-view state: splitX/splitY are the divider's fractional position
+    // (0-1) across the canvas; interactionCamera/interactionRect are locked
+    // in at the start of each pointer gesture so a drag stays mapped to
+    // whichever pane it began in even if the pointer wanders into another.
+    let splitX = 0.5;
+    let splitY = 0.5;
+    let interactionCamera = camera;
+    let interactionRect = null;
+    let currentGestureIsOrtho = false;
+    let dividerDragActive = false;
+    // independent camera state per quad-view pane, so orbiting/zooming one
+    // pane never moves the other three -- each fixed ortho pane gets its
+    // own pan target + zoom radius, and the orbit pane gets its own full
+    // target/theta/phi/radius, all separate from the single-view state.
+    let currentGesturePaneDir = null; // "orbit" | "top" | "front" | "left" | null (single-view / no gesture)
+    let quadPaneState = {
+      orbit: { target: new THREE.Vector3(0, 0, 0), radius: 9.5, theta: 0.7, phi: 1.1 },
+      top: { target: new THREE.Vector3(0, 0, 0), radius: 8 },
+      front: { target: new THREE.Vector3(0, 0, 0), radius: 8 },
+      left: { target: new THREE.Vector3(0, 0, 0), radius: 8 },
+    };
+    let quadPaneStateReady = false;
+    function applyViewShift(cam, w, h) {
+      cam.clearViewOffset();
+      cam.setViewOffset(w * VIEW_SHIFT, h, 0, 0, w, h);
+    }
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(width, height);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.domElement.style.touchAction = "none";
+    renderer.domElement.style.cursor = "grab";
+    mount.appendChild(renderer.domElement);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    scene.add(ambient);
+    const keyLight = new THREE.DirectionalLight(0xfff3e0, 1.15);
+    keyLight.position.set(6, 10, 4);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(1024, 1024);
+    keyLight.shadow.camera.left = -10;
+    keyLight.shadow.camera.right = 10;
+    keyLight.shadow.camera.top = 10;
+    keyLight.shadow.camera.bottom = -10;
+    keyLight.shadow.radius = 3; // softer penumbra on shadow edges
+    keyLight.shadow.bias = -0.0004; // reduces shadow acne without visible peter-panning
+    keyLight.shadow.normalBias = 0.02;
+    scene.add(keyLight);
+    const fillLight = new THREE.DirectionalLight(0x8fb8ff, 0.35);
+    fillLight.position.set(-6, 4, -5);
+    scene.add(fillLight);
+    // fixed, non-shadow-casting fill lights aligned with each orthographic
+    // viewing direction, so the top/front/left/right drafting views are
+    // always evenly lit head-on regardless of the key light's fixed angle
+    // (which otherwise leaves whichever face is turned away from it dark).
+    const orthoFillTop = new THREE.DirectionalLight(0xffffff, 0.16);
+    orthoFillTop.position.set(0, 30, 0.01);
+    scene.add(orthoFillTop);
+    const orthoFillFront = new THREE.DirectionalLight(0xffffff, 0.15);
+    orthoFillFront.position.set(0, 2, 30);
+    scene.add(orthoFillFront);
+    const orthoFillLeft = new THREE.DirectionalLight(0xffffff, 0.15);
+    orthoFillLeft.position.set(-30, 2, 0);
+    scene.add(orthoFillLeft);
+    const orthoFillRight = new THREE.DirectionalLight(0xffffff, 0.15);
+    orthoFillRight.position.set(30, 2, 0);
+    scene.add(orthoFillRight);
+
+    // ---------- procedural placeholder character (no external assets --
+    // built from primitives, animated with simple sine-wave limb swings) ----------
+    function buildCharacter() {
+      const skin = new THREE.MeshStandardMaterial({ color: 0xd9a679, roughness: 0.85 });
+      const shirt = new THREE.MeshStandardMaterial({ color: 0x3b6ea8, roughness: 0.8 });
+      const pants = new THREE.MeshStandardMaterial({ color: 0x2b2b33, roughness: 0.85 });
+
+      const group = new THREE.Group();
+
+      const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.23, 0.52, 12), shirt);
+      torso.position.y = 1.06;
+      torso.castShadow = true;
+      group.add(torso);
+
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 16), skin);
+      head.position.y = 1.56;
+      head.castShadow = true;
+      group.add(head);
+
+      function makeLimb(radiusTop, radiusBottom, length, mat, pivotPos) {
+        const pivot = new THREE.Group();
+        pivot.position.copy(pivotPos);
+        const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radiusTop, radiusBottom, length, 8), mat);
+        mesh.position.y = -length / 2;
+        mesh.castShadow = true;
+        pivot.add(mesh);
+        group.add(pivot);
+        return pivot;
+      }
+
+      const leftArmPivot = makeLimb(0.055, 0.05, 0.44, skin, new THREE.Vector3(0.26, 1.34, 0));
+      const rightArmPivot = makeLimb(0.055, 0.05, 0.44, skin, new THREE.Vector3(-0.26, 1.34, 0));
+      const leftLegPivot = makeLimb(0.09, 0.07, 0.52, pants, new THREE.Vector3(0.1, 0.8, 0));
+      const rightLegPivot = makeLimb(0.09, 0.07, 0.52, pants, new THREE.Vector3(-0.1, 0.8, 0));
+
+      group.visible = false;
+      scene.add(group);
+      return { group, leftArmPivot, rightArmPivot, leftLegPivot, rightLegPivot };
+    }
+    const character = buildCharacter();
+    let characterYaw = 0;
+    let walkCyclePhase = 0;
+    let walkCycleAmp = 0;
+
+    // ---------- procedural grain textures (no external image assets) ----------
+    // breaks up the flat single-color CG look on walls/floors with subtle
+    // per-pixel noise, plus a matching roughness map so the specular
+    // highlight isn't perfectly uniform either.
+    function makeGrainTexture(size, [r, g, b], variation) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(size, size);
+      for (let i = 0; i < size * size; i++) {
+        const n = (Math.random() - 0.5) * variation;
+        img.data[i * 4 + 0] = Math.min(255, Math.max(0, r + n));
+        img.data[i * 4 + 1] = Math.min(255, Math.max(0, g + n));
+        img.data[i * 4 + 2] = Math.min(255, Math.max(0, b + n));
+        img.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(6, 6);
+      return tex;
+    }
+    function makeRoughnessTexture(size, base, variation) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(size, size);
+      for (let i = 0; i < size * size; i++) {
+        const v = Math.min(255, Math.max(0, base + (Math.random() - 0.5) * variation));
+        img.data[i * 4 + 0] = v; img.data[i * 4 + 1] = v; img.data[i * 4 + 2] = v; img.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(6, 6);
+      return tex;
+    }
+    const wallGrainTex = makeGrainTexture(128, [242, 240, 234], 10);
+    const wallRoughTex = makeRoughnessTexture(128, 210, 40);
+    const floorGrainTex = makeGrainTexture(128, [230, 228, 220], 14);
+    const floorRoughTex = makeRoughnessTexture(128, 195, 50);
+
+    let minorGrid = null;
+    let majorGrid = null;
+    // built from real thin quads (not GL_LINES via GridHelper) -- line-based
+    // grids can't reliably control thickness across browsers and shimmer at
+    // a distance; flat merged quads render like any other mesh and don't.
+    // `plane` picks which two axes the grid spans: "xz" (horizontal, the
+    // floor grid), "xy" (a vertical backdrop for the front view), or "zy"
+    // (a vertical backdrop for the left/right views).
+    function buildGridMesh(size, spacing, colorHex, opacity, thicknessWorld, plane = "xz") {
+      const half = size / 2;
+      const count = Math.max(1, Math.round(size / spacing));
+      const positions = [];
+      const indices = [];
+      let vi = 0;
+      const halfT = thicknessWorld / 2;
+      function toXYZ(a, b) {
+        if (plane === "xz") return [a, 0, b];
+        if (plane === "xy") return [a, b, 0];
+        return [0, b, a]; // "zy"
+      }
+      function addQuad(a0, b0, a1, b1) {
+        const p0 = toXYZ(a0, b0), p1 = toXYZ(a1, b0), p2 = toXYZ(a1, b1), p3 = toXYZ(a0, b1);
+        positions.push(...p0, ...p1, ...p2, ...p3);
+        indices.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
+        vi += 4;
+      }
+      for (let i = 0; i <= count; i++) {
+        const p = -half + i * spacing;
+        addQuad(-half, p - halfT, half, p + halfT);
+        addQuad(p - halfT, -half, p + halfT, half);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      geo.setIndex(indices);
+      const mat = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide });
+      return new THREE.Mesh(geo, mat);
+    }
+    function rebuildGrids() {
+      if (minorGrid) { scene.remove(minorGrid); minorGrid.geometry.dispose(); minorGrid.material.dispose(); }
+      if (majorGrid) { scene.remove(majorGrid); majorGrid.geometry.dispose(); majorGrid.material.dispose(); }
+      const major = Math.max(0.02, gridSizeRef.current);
+      const minor = major / 10;
+      const majorDivisions = Math.min(300, Math.max(8, Math.round(220 / major)));
+      const minorDivisions = Math.min(400, Math.max(8, Math.round(220 / minor)));
+      const minorSize = minorDivisions * minor;
+      const majorSize = majorDivisions * major;
+      minorGrid = buildGridMesh(minorSize, minor, 0x33383f, 0.3, Math.max(0.008, minor * 0.03));
+      minorGrid.position.y = -0.011;
+      scene.add(minorGrid);
+      majorGrid = buildGridMesh(majorSize, major, 0x565e68, 0.55, Math.max(0.018, major * 0.018));
+      majorGrid.position.y = -0.0105;
+      scene.add(majorGrid);
+    }
+    rebuildGridRef.current = rebuildGrids;
+    rebuildGrids();
+
+    // ---------- multi-floor management ----------
+    // every cut feature stores a `panel` key: 'north'|'south'|'east'|'west' for
+    // the four original walls, 'bf:<id>' for a pulled-out section's outer wall
+    // (which can itself be cut/highlighted/pulled further), or 'pt:<id>' for a partition.
+    // a "room" (an enclosed area detected within a floor) reuses this exact
+    // same shape for its own walls/cuts/partitions -- it's a fully independent
+    // mini floor, just parented under the floor it was pulled from.
+    function makeFloorData() {
+      return {
+        footprint: { xMin: -DEFAULT_ROOM_HALF_X, xMax: DEFAULT_ROOM_HALF_X, zMin: -DEFAULT_ROOM_HALF_Z, zMax: DEFAULT_ROOM_HALF_Z },
+        height: WALL_HEIGHT,
+        thickness: 0.12,
+        selections: [],   // {id, panel, u0, u1}
+        bumpouts: [],     // {id, panel, u0, u1, depth}
+        partitions: [],   // {id, panel, u, ext}  -- ext signed: negative=inward, positive=outward
+        openings: [],     // {id, panel, u0, u1, height}
+        panelHeights: {}, // panelKey -> height override (defaults to state.height)
+        stairs: [],       // {id, axis, start, end, widthMin, widthMax, steps} -- a parametric staircase footprint
+        floorHoles: [],   // {id, xMin, xMax, zMin, zMax} -- stairwell cutouts, usually auto-added above a stair on the floor below
+        props: [],        // {id, kind, x, z} -- decorative sphere/cube/cone/cylinder placed on the floor
+        curvedCorners: { enabled: false, radius: 0 }, // rounds the 4 corners of the base footprint's external walls
+        balconies: [], // {id, panel, u0, u1, dividerAxis} -- a staircase+platform+pillars assembly with a window/door cutout in the wall behind it
+      };
+    }
+    let idSeq = 1;
+    let nextFloorId = 2;
+    let floors = [{ id: 1, data: makeFloorData(), rooms: [] }];
+    let activeFloorId = 1;
+    let activeRoomId = null; // id of the room (within the active floor) currently focused for editing, or null for the floor itself
+    let buildingRoomId = null; // which room's data we're currently building geometry for (null = the floor's own content)
+    let buildingFloorEntry = null; // the floor entry currently being built (so its .rooms list is reachable while rendering)
+    let isolatedFloorId = null;
+    const hiddenFloorIds = new Set();
+    const floorGroups = new Map();
+    const roomGroups = new Map(); // roomId -> THREE.Group
+    // rooms live in their own container per floor, added directly to the
+    // scene (a sibling of the floor's own group, not a child of it) --
+    // otherwise clearing the floor's own geometry on every rebuild would
+    // also destroy every room nested inside it.
+    const roomContainers = new Map(); // floorId -> THREE.Group
+    const firstFloorGroup = new THREE.Group();
+    scene.add(firstFloorGroup);
+    floorGroups.set(1, firstFloorGroup);
+    let sceneGroup = firstFloorGroup;
+    let buildingActiveFloor = true; // true while building geometry that belongs to the active floor (its own content, or any of its rooms)
+    let isActiveTarget = true;      // true only for the ONE thing currently focused for wall edits (the floor itself, or one specific room in it)
+    let state = floors[0].data;
+
+    function restackFloors() {
+      let y = 0;
+      floors.forEach((f) => {
+        const g = floorGroups.get(f.id);
+        if (g) { g.position.y = y; g.position.x = f.offsetX || 0; g.position.z = f.offsetZ || 0; }
+        const rc = roomContainers.get(f.id);
+        if (rc) { rc.position.y = y; rc.position.x = f.offsetX || 0; rc.position.z = f.offsetZ || 0; }
+        y += f.data.height;
+      });
+    }
+
+    // ---------- undo / redo ----------
+    // the whole `floors` array (each floor's room data plus its horizontal
+    // offset) is plain JSON, so a full deep-clone snapshot before every
+    // committed edit is cheap and simple -- no per-field diffing needed.
+    const MAX_UNDO = 60;
+    let undoStack = [];
+    let redoStack = [];
+    function snapshotFloors() {
+      return { floors: JSON.parse(JSON.stringify(floors)), activeFloorId };
+    }
+    function syncUndoRedoAvailability() {
+      setCanUndo(undoStack.length > 0);
+      setCanRedo(redoStack.length > 0);
+    }
+    function pushUndo() {
+      undoStack.push(snapshotFloors());
+      if (undoStack.length > MAX_UNDO) undoStack.shift();
+      redoStack = [];
+      syncUndoRedoAvailability();
+    }
+    function applySnapshot(snap) {
+      pickList = [];
+      const wantedIds = new Set(snap.floors.map((f) => f.id));
+      Array.from(floorGroups.keys()).forEach((id) => {
+        if (!wantedIds.has(id)) {
+          const g = floorGroups.get(id);
+          if (g) { clearGroup(g); scene.remove(g); }
+          floorGroups.delete(id);
+        }
+      });
+      const wantedRoomIds = new Set();
+      snap.floors.forEach((f) => (f.rooms || []).forEach((r) => wantedRoomIds.add(r.id)));
+      Array.from(roomGroups.keys()).forEach((id) => {
+        if (!wantedRoomIds.has(id)) {
+          const rg = roomGroups.get(id);
+          if (rg) { clearGroup(rg); if (rg.parent) rg.parent.remove(rg); }
+          roomGroups.delete(id);
+        }
+      });
+      snap.floors.forEach((f) => {
+        if (!floorGroups.has(f.id)) {
+          const g = new THREE.Group();
+          scene.add(g);
+          floorGroups.set(f.id, g);
+        }
+      });
+      floors = JSON.parse(JSON.stringify(snap.floors));
+      activeFloorId = floors.find((f) => f.id === snap.activeFloorId) ? snap.activeFloorId : (floors[0] ? floors[0].id : 1);
+      activeRoomId = null;
+      restackFloors();
+      dragState = null;
+      orbiting = null;
+      pinchState = null;
+      previewSelection = null;
+      previewOpening = null;
+      setSelectedPanel(null);
+      setSelectedRoomId(null);
+      const activeEntry = floors.find((f) => f.id === activeFloorId);
+      if (activeEntry) state = activeEntry.data;
+      floors.forEach((f) => rebuildFloorEntry(f, f.id === activeFloorId));
+      const g = floorGroups.get(activeFloorId);
+      if (g && activeEntry) target.y = g.position.y + activeEntry.data.height * 0.32;
+      updateCamera();
+      applyVisibility();
+      syncFloorsToReact();
+    }
+    function performUndo() {
+      if (undoStack.length === 0) return;
+      const current = snapshotFloors();
+      const prev = undoStack.pop();
+      redoStack.push(current);
+      applySnapshot(prev);
+      syncUndoRedoAvailability();
+    }
+    function performRedo() {
+      if (redoStack.length === 0) return;
+      const current = snapshotFloors();
+      const next = redoStack.pop();
+      undoStack.push(current);
+      applySnapshot(next);
+      syncUndoRedoAvailability();
+    }
+    pushUndoRef.current = pushUndo;
+    undoRef.current = performUndo;
+    redoRef.current = performRedo;
+
+    const wallDefs = {
+      north: { normal: new THREE.Vector3(0, 0, -1), thickAxis: "z", lengthAxis: "x", get coord() { return state.footprint.zMin; }, set coord(v) { state.footprint.zMin = v; } },
+      south: { normal: new THREE.Vector3(0, 0, 1), thickAxis: "z", lengthAxis: "x", get coord() { return state.footprint.zMax; }, set coord(v) { state.footprint.zMax = v; } },
+      west: { normal: new THREE.Vector3(-1, 0, 0), thickAxis: "x", lengthAxis: "z", get coord() { return state.footprint.xMin; }, set coord(v) { state.footprint.xMin = v; } },
+      east: { normal: new THREE.Vector3(1, 0, 0), thickAxis: "x", lengthAxis: "z", get coord() { return state.footprint.xMax; }, set coord(v) { state.footprint.xMax = v; } },
+    };
+
+    function wallSpan(wallId) {
+      const fp = state.footprint;
+      return wallId === "north" || wallId === "south" ? [fp.xMin, fp.xMax] : [fp.zMin, fp.zMax];
+    }
+    function getPanelHeight(panelKey) {
+      return state.panelHeights[panelKey] ?? state.height;
+    }
+    function setPanelHeightValue(panelKey, h) {
+      state.panelHeights[panelKey] = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      rebuild();
+    }
+    panelHeightApiRef.current = { setHeight: setPanelHeightValue, getHeight: getPanelHeight };
+    function selectPanelForHeight(panelKey) {
+      setSelectedPanel(panelKey);
+      setSelectedHeight(getPanelHeight(panelKey));
+    }
+
+    // When a pulled-in section on one base wall reaches all the way to a
+    // corner, the perpendicular wall sharing that corner should stop short
+    // too, instead of standing there unaffected -- this is what actually
+    // forms an L-shaped room instead of a floating notch inside a still-
+    // rectangular one. Each entry maps a wall's edge to the wall+edge that
+    // shares that corner and can clip it.
+    const CORNER_MAP = {
+      "north:min": ["west", "min"], "north:max": ["east", "min"],
+      "south:min": ["west", "max"], "south:max": ["east", "max"],
+      "west:min": ["north", "min"], "west:max": ["south", "min"],
+      "east:min": ["north", "max"], "east:max": ["south", "max"],
+    };
+    function findCornerClip(adjWallId, adjEdge) {
+      const [aMin, aMax] = wallSpan(adjWallId);
+      const notch = state.bumpouts.find((b) => b.panel === adjWallId && b.depth < -0.02 &&
+        (adjEdge === "min" ? Math.abs(b.u0 - aMin) < 0.05 : Math.abs(b.u1 - aMax) < 0.05));
+      if (!notch) return null;
+      const adjDef = wallDefs[adjWallId];
+      const axisSign = adjDef.thickAxis === "z" ? adjDef.normal.z : adjDef.normal.x;
+      return adjDef.coord + axisSign * notch.depth;
+    }
+    // the span actually used for rendering/interaction, after any corner clips
+    function effectiveWallSpan(wallId) {
+      let [uMin, uMax] = wallSpan(wallId);
+      ["min", "max"].forEach((edge) => {
+        const mapping = CORNER_MAP[wallId + ":" + edge];
+        if (!mapping) return;
+        const clip = findCornerClip(mapping[0], mapping[1]);
+        if (clip === null) return;
+        if (edge === "min") uMin = Math.max(uMin, clip);
+        else uMax = Math.min(uMax, clip);
+      });
+      return [uMin, uMax];
+    }
+
+    // resolves ANY panel key (base wall, pulled-out section, or partition) into
+    // a uniform geometric description, recursively following parents.
+    function getPanelInfo(panelKey) {
+      if (wallDefs[panelKey]) {
+        const def = wallDefs[panelKey];
+        const [u0, u1] = effectiveWallSpan(panelKey);
+        return { normal: def.normal, lengthAxis: def.lengthAxis, thickAxis: def.thickAxis, coord: def.coord, u0, u1 };
+      }
+      if (panelKey.startsWith("bf:")) {
+        const bo = state.bumpouts.find((b) => "bf:" + b.id === panelKey);
+        if (!bo) return null;
+        const parent = getPanelInfo(bo.panel);
+        if (!parent) return null;
+        const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+        const coord = parent.coord + axisSign * bo.depth;
+        return { normal: parent.normal, lengthAxis: parent.lengthAxis, thickAxis: parent.thickAxis, coord, u0: bo.u0, u1: bo.u1 };
+      }
+      if (panelKey.startsWith("pt:")) {
+        const p = state.partitions.find((x) => "pt:" + x.id === panelKey);
+        if (!p) return null;
+        const parent = getPanelInfo(p.panel);
+        if (!parent) return null;
+        const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+        const far = parent.coord + axisSign * p.ext;
+        const lo = Math.min(parent.coord, far);
+        const hi = Math.max(parent.coord, far);
+        const faceNormal = parent.lengthAxis === "x" ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+        return { normal: faceNormal, lengthAxis: parent.thickAxis, thickAxis: parent.lengthAxis, coord: p.u, u0: lo, u1: hi };
+      }
+      if (panelKey.startsWith("bs0:") || panelKey.startsWith("bs1:")) {
+        // a bump-out's connector wall: geometrically the same shape as a
+        // partition (perpendicular to the origin wall, spanning origin-to-far)
+        const isMax = panelKey.startsWith("bs1:");
+        const bo = state.bumpouts.find((b) => b.id === Number(panelKey.slice(4)));
+        if (!bo) return null;
+        const parent = getPanelInfo(bo.panel);
+        if (!parent) return null;
+        const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+        const farCoord = parent.coord + axisSign * bo.depth;
+        const lo = Math.min(parent.coord, farCoord);
+        const hi = Math.max(parent.coord, farCoord);
+        const faceNormal = parent.lengthAxis === "x" ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+        return { normal: faceNormal, lengthAxis: parent.thickAxis, thickAxis: parent.lengthAxis, coord: isMax ? bo.u1 : bo.u0, u0: lo, u1: hi };
+      }
+      return null;
+    }
+
+    function applyPanelExtrude(panelKey, newCoord) {
+      newCoord = snapValue(newCoord);
+      if (wallDefs[panelKey]) {
+        wallDefs[panelKey].coord = clampWallCoord(panelKey, newCoord);
+        return;
+      }
+      if (panelKey.startsWith("bf:")) {
+        const id = Number(panelKey.slice(3));
+        const bo = state.bumpouts.find((b) => b.id === id);
+        if (!bo) return;
+        const parent = getPanelInfo(bo.panel);
+        if (!parent) return;
+        const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+        const newDepth = (newCoord - parent.coord) * axisSign;
+        bo.depth = clampBumpDepth(bo.panel, newDepth);
+        return;
+      }
+      if (panelKey.startsWith("bs0:") || panelKey.startsWith("bs1:")) {
+        // dragging a connector wall sideways resizes the bump-out it belongs to
+        const isMax = panelKey.startsWith("bs1:");
+        const bo = state.bumpouts.find((b) => b.id === Number(panelKey.slice(4)));
+        if (!bo) return;
+        const parent = getPanelInfo(bo.panel);
+        if (!parent) return;
+        if (isMax) bo.u1 = Math.max(bo.u0 + 0.3, Math.min(parent.u1, newCoord));
+        else bo.u0 = Math.min(bo.u1 - 0.3, Math.max(parent.u0, newCoord));
+      }
+    }
+    // a pulled section can grow outward (positive depth, a new protrusion) or
+    // inward (negative depth, a notch carved out of the room) -- outward is
+    // capped at MAX_DEPTH, inward is capped so at least MIN_SIZE of room remains.
+    function clampBumpDepth(parentPanelKey, depth) {
+      if (depth >= 0) return Math.min(MAX_DEPTH, depth);
+      if (wallDefs[parentPanelKey]) {
+        const def = wallDefs[parentPanelKey];
+        const fp = state.footprint;
+        const span = def.thickAxis === "z" ? fp.zMax - fp.zMin : fp.xMax - fp.xMin;
+        return Math.max(-(span - MIN_SIZE), depth);
+      }
+      return Math.max(-3, depth);
+    }
+
+    // soft snapping: pulls a coordinate onto the nearest grid or microgrid
+    // line only while it's already close to one; drag further past it and it
+    // releases, so it never fights a deliberate large move.
+    function snapValue(v) {
+      if (!snapEnabledRef.current) return v;
+      const major = Math.max(0.02, gridSizeRef.current);
+      const minor = major / 10;
+      let best = v;
+      let bestDist = Infinity;
+      [major, minor].forEach((g) => {
+        const nearest = Math.round(v / g) * g;
+        const dist = Math.abs(v - nearest);
+        if (dist < g * 0.286 && dist < bestDist) { best = nearest; bestDist = dist; }
+      });
+      return best;
+    }
+
+    // when dragging an extracted room, magnetically align its edges with
+    // any other extracted room's edges, or the original floor's footprint,
+    // once they're within CLOSE_SNAP_DIST -- makes it easy to butt rooms up
+    // against each other into a new layout.
+    function roomBounds(room, ox, oz) {
+      const fp = room.data.footprint;
+      return { x0: fp.xMin + ox, x1: fp.xMax + ox, z0: fp.zMin + oz, z1: fp.zMax + oz };
+    }
+    function snapRoomOffset(room, rawOx, rawOz) {
+      const bounds = roomBounds(room, rawOx, rawOz);
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const targets = (floorEntry && floorEntry.rooms || [])
+        .filter((r) => r.id !== room.id)
+        .map((r) => roomBounds(r, r.offsetX || 0, r.offsetZ || 0));
+      if (floorEntry) {
+        const fp = floorEntry.data.footprint;
+        targets.push({ x0: fp.xMin, x1: fp.xMax, z0: fp.zMin, z1: fp.zMax });
+      }
+      let bestDX = CLOSE_SNAP_DIST, bestDZ = CLOSE_SNAP_DIST;
+      targets.forEach((t) => {
+        if (bounds.z0 < t.z1 && t.z0 < bounds.z1) {
+          [t.x0 - bounds.x1, t.x1 - bounds.x0, t.x0 - bounds.x0, t.x1 - bounds.x1].forEach((d) => {
+            if (Math.abs(d) < Math.abs(bestDX)) bestDX = d;
+          });
+        }
+        if (bounds.x0 < t.x1 && t.x0 < bounds.x1) {
+          [t.z0 - bounds.z1, t.z1 - bounds.z0, t.z0 - bounds.z0, t.z1 - bounds.z1].forEach((d) => {
+            if (Math.abs(d) < Math.abs(bestDZ)) bestDZ = d;
+          });
+        }
+      });
+      return {
+        ox: Math.abs(bestDX) < CLOSE_SNAP_DIST ? rawOx + bestDX : rawOx,
+        oz: Math.abs(bestDZ) < CLOSE_SNAP_DIST ? rawOz + bestDZ : rawOz,
+      };
+    }
+
+    // ---------- materials & geometry helpers ----------
+    const wallMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02 });
+    const floorMat = new THREE.MeshStandardMaterial({ color: COLORS.floor, map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0 });
+    const wallMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.5), map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02 });
+    const floorMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).multiplyScalar(0.5), map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0 });
+    // tinted magenta -- used on the active floor while the Move Room tool is
+    // selected, so it's obvious which whole room you're about to drag
+    const wallMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02 });
+    const floorMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.95, metalness: 0.0 });
+    // swapped to the dimmed pair whenever we're building a non-active floor,
+    // so every other floor reads as 30% darker while it's not the one you're editing
+    let currentWallMat = wallMat;
+    let currentFloorMat = floorMat;
+    const selMat = new THREE.MeshBasicMaterial({ color: COLORS.highlight, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false });
+    const selMatPreview = new THREE.MeshBasicMaterial({ color: COLORS.highlight, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false });
+    // window glass: a thin, mostly-transparent, faintly blue-tinted pane
+    // that's noticeably more specular (lower roughness) than the matte
+    // wall surface it sits inside. Never added to pickList -- it's purely
+    // visual and shouldn't intercept taps meant for the floor/room behind it.
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0x9ec8ee, transparent: true, opacity: 0.3, roughness: 0.12, metalness: 0.05, side: THREE.DoubleSide,
+    });
+    // an invisible volume used purely to make thin/hollow things (pillars,
+    // window and door cutouts) much easier to tap -- raycasting still hits
+    // it (unlike setting mesh.visible=false, which Three.js's Raycaster
+    // skips entirely), but it renders as nothing.
+    const hotspotMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+    // staircases get their own light-pink color so they read distinctly
+    // from the walls, rather than blending in as just another wall panel.
+    const stairMat = new THREE.MeshStandardMaterial({ color: 0xf2c6d6, roughness: 0.82, metalness: 0.02 });
+    // prop shapes, each with its own fixed color
+    const propMats = {
+      sphere: new THREE.MeshStandardMaterial({ color: 0xd6453c, roughness: 0.55, metalness: 0.05 }),
+      cone: new THREE.MeshStandardMaterial({ color: 0x3f9d5c, roughness: 0.55, metalness: 0.05 }),
+      cube: new THREE.MeshStandardMaterial({ color: 0x3a6bc9, roughness: 0.55, metalness: 0.05 }),
+      cylinder: new THREE.MeshStandardMaterial({ color: 0xd6453c, roughness: 0.55, metalness: 0.05 }),
+    };
+    const PROP_HEIGHT = 8 * FT;
+
+    let hiddenLineModeOn = false;
+    function addEdges(mesh) {
+      const eg = new THREE.EdgesGeometry(mesh.geometry, 20);
+      const color = hiddenLineModeOn ? 0x000000 : COLORS.wallEdge;
+      const opacity = hiddenLineModeOn ? 1.0 : 0.55;
+      const line = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
+      mesh.add(line);
+    }
+
+    // axis 'x' => panel runs along world X (thickness along Z); axis 'z' => runs along Z (thickness along X)
+    function makePanel(axis, fixedCoord, a, b, thickness, yBase, yTop, material) {
+      const len = Math.max(0.02, b - a);
+      const h = Math.max(0.02, yTop - yBase);
+      const geo = axis === "x" ? new THREE.BoxGeometry(len, h, thickness) : new THREE.BoxGeometry(thickness, h, len);
+      const mesh = new THREE.Mesh(geo, material);
+      const yMid = (yBase + yTop) / 2;
+      if (axis === "x") mesh.position.set((a + b) / 2, yMid, fixedCoord);
+      else mesh.position.set(fixedCoord, yMid, (a + b) / 2);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      addEdges(mesh);
+      return mesh;
+    }
+
+    // a thin glass pane filling a window opening -- same positioning
+    // convention as makePanel, just much thinner and never pickable.
+    function makeGlassPane(axis, fixedCoord, a, b, yBase, yTop) {
+      const len = Math.max(0.02, b - a);
+      const h = Math.max(0.02, yTop - yBase);
+      if (len < 0.05 || h < 0.05) return null;
+      const glassThickness = 0.02;
+      const geo = axis === "x" ? new THREE.BoxGeometry(len, h, glassThickness) : new THREE.BoxGeometry(glassThickness, h, len);
+      const mesh = new THREE.Mesh(geo, glassMat);
+      const yMid = (yBase + yTop) / 2;
+      if (axis === "x") mesh.position.set((a + b) / 2, yMid, fixedCoord);
+      else mesh.position.set(fixedCoord, yMid, (a + b) / 2);
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      return mesh;
+    }
+
+    // shared by both wall-panel and partition rendering: cuts an opening
+    // into the solid wall via addSeg (the caller's segment-filler), then
+    // either leaves a plain floor-to-lintel doorway (no glass) or fills a
+    // window with glass -- split into (dividers+1) panes with thin
+    // wall-colored mullions between them when dividers > 0.
+    // an invisible hit-volume spanning the whole opening (window or door),
+    // so tapping anywhere in that column selects it -- there's no solid
+    // geometry to raycast against otherwise, since an opening is a hole.
+    // Also draws a visible magenta highlight overlay when it's the
+    // currently selected opening.
+    function addOpeningHotspotAndHighlight(c, lengthAxis, coord, y0, y1) {
+      const len = Math.max(0.02, c.u1 - c.u0);
+      const h = Math.max(0.02, y1 - y0);
+      const T = state.thickness;
+      const hgeo = lengthAxis === "x" ? new THREE.BoxGeometry(len, h, T) : new THREE.BoxGeometry(T, h, len);
+      const hmesh = new THREE.Mesh(hgeo, hotspotMat);
+      if (lengthAxis === "x") hmesh.position.set((c.u0 + c.u1) / 2, (y0 + y1) / 2, coord);
+      else hmesh.position.set(coord, (y0 + y1) / 2, (c.u0 + c.u1) / 2);
+      hmesh.userData = { kind: "opening", id: c.id, ownerRoomId: buildingRoomId };
+      sceneGroup.add(hmesh);
+      if (isActiveTarget) pickList.push(hmesh);
+
+      if (isActiveTarget && selectedOpeningIdRef.current === c.id) {
+        const hlGeo = new THREE.PlaneGeometry(len, h);
+        const hlMesh = new THREE.Mesh(hlGeo, selMat);
+        if (lengthAxis === "x") {
+          hlMesh.position.set((c.u0 + c.u1) / 2, (y0 + y1) / 2, coord);
+        } else {
+          hlMesh.rotation.y = Math.PI / 2;
+          hlMesh.position.set(coord, (y0 + y1) / 2, (c.u0 + c.u1) / 2);
+        }
+        sceneGroup.add(hlMesh);
+      }
+    }
+
+    function renderOpeningCutout(c, lengthAxis, coord, H, addSeg) {
+      if (c.isDoor) {
+        // bottomOverride lets a door start above floor level (e.g. a
+        // balcony door opening off a raised platform instead of the ground)
+        const doorBottom = Math.max(0, Math.min(H - 0.1, c.bottomOverride || 0));
+        const h = Math.min(c.height ?? DEFAULT_OPENING_HEIGHT, H - doorBottom);
+        const doorTop = doorBottom + h;
+        if (doorBottom > 0.02) addSeg(c.u0, c.u1, 0, doorBottom);
+        if (doorTop < H - 0.02) addSeg(c.u0, c.u1, doorTop, H);
+        addOpeningHotspotAndHighlight(c, lengthAxis, coord, doorBottom, doorTop);
+        return;
+      }
+      const bottomOverride = c.bottomOverride;
+      const h = bottomOverride != null
+        ? Math.min(c.height ?? DEFAULT_OPENING_HEIGHT, H - 0.05 - bottomOverride)
+        : Math.min(c.height ?? DEFAULT_OPENING_HEIGHT, H - 0.1);
+      const bottomY = bottomOverride != null ? Math.max(0, bottomOverride) : Math.max(0, (H - h) / 2);
+      const topY = Math.min(H, bottomY + h);
+      addSeg(c.u0, c.u1, 0, bottomY);
+      addSeg(c.u0, c.u1, topY, H);
+      addOpeningHotspotAndHighlight(c, lengthAxis, coord, bottomY, topY);
+
+      const n = Math.max(0, Math.round(c.dividers || 0));
+      const axis = c.dividerAxis || "vertical";
+      const doVertical = axis === "vertical" || axis === "both";
+      const doHorizontal = axis === "horizontal" || axis === "both";
+      const mullionWidth = 0.05;
+
+      // vertical dividers split the opening into columns (u-spans); if off,
+      // there's just one column spanning the whole width.
+      const uCols = doVertical ? n + 1 : 1;
+      const uMullions = doVertical ? n : 0;
+      const uAvail = Math.max(0.1, (c.u1 - c.u0) - uMullions * mullionWidth);
+      const uColSpan = uAvail / uCols;
+      let uCursor = c.u0;
+      const uSpans = [];
+      for (let i = 0; i < uCols; i++) {
+        const hi = uCursor + uColSpan;
+        uSpans.push({ lo: uCursor, hi });
+        uCursor = hi;
+        if (i < uCols - 1) {
+          addSeg(uCursor, uCursor + mullionWidth, bottomY, topY);
+          uCursor += mullionWidth;
+        }
+      }
+
+      // horizontal dividers split the opening into rows (y-spans); if off,
+      // there's just one row spanning the whole height.
+      const yRows = doHorizontal ? n + 1 : 1;
+      const yMullions = doHorizontal ? n : 0;
+      const yAvail = Math.max(0.1, (topY - bottomY) - yMullions * mullionWidth);
+      const yRowSpan = yAvail / yRows;
+      let yCursor = bottomY;
+      const ySpans = [];
+      for (let j = 0; j < yRows; j++) {
+        const hi = yCursor + yRowSpan;
+        ySpans.push({ lo: yCursor, hi });
+        yCursor = hi;
+        if (j < yRows - 1) {
+          addSeg(c.u0, c.u1, yCursor, yCursor + mullionWidth);
+          yCursor += mullionWidth;
+        }
+      }
+
+      uSpans.forEach((us) => {
+        ySpans.forEach((ys) => {
+          const glass = makeGlassPane(lengthAxis, coord, us.lo, us.hi, ys.lo, ys.hi);
+          if (glass) { glass.userData = { kind: "glass" }; sceneGroup.add(glass); }
+        });
+      });
+    }
+
+    function disposeObject(obj) {
+      obj.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== selMat && o.material !== selMatPreview && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && !Object.values(propMats).includes(o.material)) {
+          if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+          else o.material.dispose();
+        }
+      });
+    }
+    function clearGroup(group) {
+      while (group.children.length) {
+        const c = group.children[0];
+        group.remove(c);
+        disposeObject(c);
+      }
+    }
+
+    function rangesOverlap(a0, a1, b0, b1) { return a0 < b1 && b0 < a1; }
+    function wouldOverlapOpening(panelKey, u0, u1) {
+      return state.openings.some((o) => o.panel === panelKey && rangesOverlap(u0, u1, o.u0, o.u1));
+    }
+    function wouldOverlapSelection(panelKey, u0, u1) {
+      return state.selections.some((s) => s.panel === panelKey && rangesOverlap(u0, u1, s.u0, s.u1));
+    }
+    function wouldOverlapBumpout(panelKey, u0, u1) {
+      return state.bumpouts.some((b) => b.panel === panelKey && rangesOverlap(u0, u1, b.u0, b.u1));
+    }
+    function panelU(info, p) { return info.lengthAxis === "x" ? p.x : p.z; }
+    function clampWallCoord(wallId, v) {
+      const fp = state.footprint;
+      if (wallId === "north") return Math.max(-MAX_COORD, Math.min(v, fp.zMax - MIN_SIZE));
+      if (wallId === "south") return Math.min(MAX_COORD, Math.max(v, fp.zMin + MIN_SIZE));
+      if (wallId === "west") return Math.max(-MAX_COORD, Math.min(v, fp.xMax - MIN_SIZE));
+      if (wallId === "east") return Math.min(MAX_COORD, Math.max(v, fp.xMin + MIN_SIZE));
+      return v;
+    }
+    // partitions carry a signed extension: negative = grows toward the opposite
+    // wall (and snaps flush once it reaches it), positive = grows outward, away
+    // from the room, capped at a fixed reach since there's nothing to connect to.
+    // a partition (or a wall pulled inward) that comes within CLOSE_SNAP_DIST
+    // of the opposite wall is treated as having reached it -- snapping flush
+    // so the two are considered connected, closing off an enclosed space,
+    // without requiring pixel-perfect dragging.
+    const CLOSE_SNAP_DIST = 2.6 * FT;
+    function clampPartitionExt(parentPanelKey, ext) {
+      if (wallDefs[parentPanelKey]) {
+        const def = wallDefs[parentPanelKey];
+        const fp = state.footprint;
+        const span = def.thickAxis === "z" ? fp.zMax - fp.zMin : fp.xMax - fp.xMin;
+        if (ext < 0) {
+          let v = Math.max(-span, ext);
+          if (v < -(span - CLOSE_SNAP_DIST)) v = -span;
+          return v;
+        }
+        return Math.min(OUTWARD_PARTITION_MAX, ext);
+      }
+      return Math.max(-OUTWARD_PARTITION_MAX, Math.min(OUTWARD_PARTITION_MAX, ext));
+    }
+    function snapToPanelPlane(info, pt) {
+      const p = pt.clone();
+      if (info.thickAxis === "z") p.z = info.coord; else p.x = info.coord;
+      return p;
+    }
+
+    // ---------- rebuild the visible + pickable geometry from state ----------
+    let pickList = [];
+    let previewSelection = null;
+    let previewOpening = null;
+    let previewStair = null; // {x0,x1,z0,z1} while dragging out a new staircase footprint
+    let measureAnchors = []; // {point: Vector3, text} for the length overlay
+
+    function defaultStairSteps(height) {
+      return Math.max(2, Math.round((height / FT) * 2));
+    }
+
+    function openingsFor(panelKey) {
+      const list = state.openings.filter((o) => o.panel === panelKey).map((o) => ({ ...o }));
+      if (previewOpening && previewOpening.panel === panelKey) list.push({ ...previewOpening, id: "__preview__" });
+      return list;
+    }
+    function bumpoutsFor(panelKey) { return state.bumpouts.filter((b) => b.panel === panelKey); }
+    function selectionsFor(panelKey) {
+      const list = state.selections.filter((s) => s.panel === panelKey);
+      if (previewSelection && previewSelection.panel === panelKey) list.push(previewSelection);
+      return list;
+    }
+
+    // determines which of the room's 4 base corners are safe to round -- a
+    // corner next to any bump-out (pushed out OR pulled in) is left sharp,
+    // since the simple 4-corner fillet math assumes a plain rectangle there;
+    // trying to round it too would create the wall "break" that shows up
+    // when a bump-out sits right at a corner.
+    function computeCurvableCorners(cornerR) {
+      const margin = cornerR + 0.4;
+      function bumpNearMinEnd(panelKey) {
+        const info = getPanelInfo(panelKey);
+        if (!info) return false;
+        return state.bumpouts.some((b) => b.panel === panelKey && Math.abs(b.depth) > 0.02 && b.u0 < info.u0 + margin);
+      }
+      function bumpNearMaxEnd(panelKey) {
+        const info = getPanelInfo(panelKey);
+        if (!info) return false;
+        return state.bumpouts.some((b) => b.panel === panelKey && Math.abs(b.depth) > 0.02 && b.u1 > info.u1 - margin);
+      }
+      return {
+        nw: !bumpNearMinEnd("north") && !bumpNearMinEnd("west"),
+        ne: !bumpNearMaxEnd("north") && !bumpNearMinEnd("east"),
+        se: !bumpNearMaxEnd("south") && !bumpNearMaxEnd("east"),
+        sw: !bumpNearMinEnd("south") && !bumpNearMaxEnd("west"),
+      };
+    }
+
+    // traces the room's floor boundary as a THREE.Shape, using a straight
+    // line at any corner that isn't curvable and an arc (matching the wall
+    // fillets exactly) at any corner that is -- so the floor always lines
+    // up with whatever the walls are actually doing.
+    function buildCurvedFloorShape(fp, curvable, R) {
+      const shape = new THREE.Shape();
+      shape.moveTo(curvable.nw ? fp.xMin + R : fp.xMin, fp.zMin);
+      shape.lineTo(curvable.ne ? fp.xMax - R : fp.xMax, fp.zMin);
+      if (curvable.ne) shape.absarc(fp.xMax - R, fp.zMin + R, R, -Math.PI / 2, 0, false);
+      shape.lineTo(fp.xMax, curvable.se ? fp.zMax - R : fp.zMax);
+      if (curvable.se) shape.absarc(fp.xMax - R, fp.zMax - R, R, 0, Math.PI / 2, false);
+      shape.lineTo(curvable.sw ? fp.xMin + R : fp.xMin, fp.zMax);
+      if (curvable.sw) shape.absarc(fp.xMin + R, fp.zMax - R, R, Math.PI / 2, Math.PI, false);
+      shape.lineTo(fp.xMin, curvable.nw ? fp.zMin + R : fp.zMin);
+      if (curvable.nw) shape.absarc(fp.xMin + R, fp.zMin + R, R, Math.PI, Math.PI * 1.5, false);
+      shape.closePath();
+      return shape;
+    }
+
+    function renderPanel(panelKey, bumpoutFloorPieces) {
+      const info = getPanelInfo(panelKey);
+      if (!info) return;
+      const { normal, lengthAxis, thickAxis, coord, u0: uMin, u1: uMax } = info;
+      const H = getPanelHeight(panelKey);
+      const T = state.thickness;
+
+      // curved corners only ever trim the 4 base walls of the room's own
+      // rectangular footprint -- bump-out walls and partitions are left
+      // alone, and this is a purely visual trim (the interactive u0/u1 used
+      // for dragging elsewhere is untouched). Each end is only inset when
+      // that particular corner is curvable (see computeCurvableCorners).
+      const isBaseWall = panelKey === "north" || panelKey === "south" || panelKey === "east" || panelKey === "west";
+      let wallU0 = uMin, wallU1 = uMax;
+      const cc = state.curvedCorners;
+      if (isBaseWall && cc && cc.enabled && cc.radius > 0.05) {
+        const fp = state.footprint;
+        const cornerR = Math.min(cc.radius, (fp.xMax - fp.xMin) / 2 - 0.15, (fp.zMax - fp.zMin) / 2 - 0.15);
+        if (cornerR > 0.05) {
+          const curvable = computeCurvableCorners(cornerR);
+          let minOk, maxOk;
+          if (panelKey === "north") { minOk = curvable.nw; maxOk = curvable.ne; }
+          else if (panelKey === "south") { minOk = curvable.sw; maxOk = curvable.se; }
+          else if (panelKey === "west") { minOk = curvable.nw; maxOk = curvable.sw; }
+          else { minOk = curvable.ne; maxOk = curvable.se; } // east
+          if (minOk) wallU0 = uMin + cornerR;
+          if (maxOk) wallU1 = uMax - cornerR;
+        }
+      }
+
+      function addSeg(a, b, yb, yt) {
+        if (b - a < 0.02 || yt - yb < 0.02) return;
+        const isSelectedWall = isActiveTarget && selectedPanelRef.current === panelKey;
+        const seg = makePanel(lengthAxis, coord, a, b, T, yb, yt, isSelectedWall ? wallMatSelected : currentWallMat);
+        seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId };
+        sceneGroup.add(seg);
+        if (isActiveTarget) pickList.push(seg);
+      }
+
+      const cuts = [
+        ...openingsFor(panelKey).map((o) => ({ ...o, _t: "open" })),
+        ...bumpoutsFor(panelKey).map((b) => ({ ...b, _t: "bump" })),
+      ]
+        .map((c) => ({ ...c, u0: Math.max(wallU0, Math.min(c.u0, wallU1)), u1: Math.max(wallU0, Math.min(c.u1, wallU1)) }))
+        .filter((c) => c.u1 - c.u0 > 0.05)
+        .sort((a, b) => a.u0 - b.u0);
+
+      let cursor = wallU0;
+      cuts.forEach((c) => {
+        if (c.u0 > cursor + 0.001) addSeg(cursor, c.u0, 0, H);
+        if (c._t === "open") {
+          renderOpeningCutout(c, lengthAxis, coord, H, addSeg);
+        } else if (Math.abs(c.depth) > 0.02) {
+          // the far wall AND the two connector (side) walls are each rendered
+          // by their own panel pass below ("bf:"/"bs0:"/"bs1:"+c.id) so every
+          // one of them can carry its own cuts, highlights, and further pulls
+          // -- building any of them again here would duplicate/mask them.
+          if (c.depth > 0.02) {
+            // only an outward pull adds new floor area; an inward pull carves
+            // a notch that gets subtracted from the floor separately below
+            const axisSign = thickAxis === "z" ? normal.z : normal.x;
+            const farCoord = coord + axisSign * c.depth;
+            const lo = Math.min(coord, farCoord);
+            const hi = Math.max(coord, farCoord);
+            bumpoutFloorPieces.push({ axis: lengthAxis, u0: c.u0, u1: c.u1, lo, hi });
+          }
+        }
+        cursor = c.u1;
+      });
+      if (cursor < wallU1 - 0.001) addSeg(cursor, wallU1, 0, H);
+
+      selectionsFor(panelKey).forEach((sel) => {
+        const u0 = Math.max(wallU0, Math.min(sel.u0, wallU1));
+        const u1 = Math.max(wallU0, Math.min(sel.u1, wallU1));
+        if (u1 - u0 < 0.05) return;
+        const geo = new THREE.PlaneGeometry(u1 - u0, H);
+        const mat = sel.id === "__preview__" ? selMatPreview : selMat;
+        const mesh = new THREE.Mesh(geo, mat);
+        const offset = T / 2 + 0.015;
+        let posX, posZ;
+        if (lengthAxis === "x") { posX = (u0 + u1) / 2; posZ = coord + normal.z * offset; }
+        else { posZ = (u0 + u1) / 2; posX = coord + normal.x * offset; }
+        mesh.position.set(posX, H / 2, posZ);
+        mesh.lookAt(mesh.position.clone().add(normal));
+        mesh.userData = { kind: "selection", id: sel.id, panel: panelKey, ownerRoomId: buildingRoomId };
+        sceneGroup.add(mesh);
+        if (sel.id !== "__preview__" && isActiveTarget) pickList.push(mesh);
+      });
+    }
+
+    function renderPartition(p) {
+      const parent = getPanelInfo(p.panel);
+      if (!parent) return;
+      p.u = Math.max(parent.u0, Math.min(parent.u1, p.u));
+      p.ext = clampPartitionExt(p.panel, p.ext);
+      if (Math.abs(p.ext) < 0.03) return;
+      const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+      const far = parent.coord + axisSign * p.ext;
+      const lo = Math.min(parent.coord, far);
+      const hi = Math.max(parent.coord, far);
+      const lengthAxis = parent.thickAxis;
+      const panelKey = "pt:" + p.id;
+      const H = getPanelHeight(panelKey);
+      const T = state.thickness;
+
+      function addSeg(a, b, yb, yt) {
+        if (b - a < 0.02 || yt - yb < 0.02) return;
+        const isSelectedWall = isActiveTarget && selectedPanelRef.current === "pt:" + p.id;
+        const seg = makePanel(lengthAxis, p.u, a, b, T, yb, yt, isSelectedWall ? wallMatSelected : currentWallMat);
+        seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId };
+        sceneGroup.add(seg);
+        if (isActiveTarget) pickList.push(seg);
+      }
+
+      const opens = openingsFor(panelKey)
+        .map((o) => ({ ...o, u0: Math.max(lo, Math.min(o.u0, hi)), u1: Math.max(lo, Math.min(o.u1, hi)) }))
+        .filter((o) => o.u1 - o.u0 > 0.05)
+        .sort((a, b) => a.u0 - b.u0);
+
+      let cursor = lo;
+      opens.forEach((op) => {
+        if (op.u0 > cursor + 0.001) addSeg(cursor, op.u0, 0, H);
+        renderOpeningCutout(op, lengthAxis, p.u, H, addSeg);
+        cursor = op.u1;
+      });
+      if (cursor < hi - 0.001) addSeg(cursor, hi, 0, H);
+    }
+
+    // standard rectangle-minus-rectangle: splits `rect` around `cut`, returning
+    // up to 4 non-overlapping remainder pieces (or [rect] unchanged if no overlap)
+    function subtractRect(rect, cut) {
+      const ix0 = Math.max(rect.x0, cut.x0), ix1 = Math.min(rect.x1, cut.x1);
+      const iz0 = Math.max(rect.z0, cut.z0), iz1 = Math.min(rect.z1, cut.z1);
+      if (ix0 >= ix1 || iz0 >= iz1) return [rect];
+      const pieces = [];
+      if (rect.z0 < iz0) pieces.push({ x0: rect.x0, x1: rect.x1, z0: rect.z0, z1: iz0 });
+      if (rect.z1 > iz1) pieces.push({ x0: rect.x0, x1: rect.x1, z0: iz1, z1: rect.z1 });
+      if (rect.x0 < ix0) pieces.push({ x0: rect.x0, x1: ix0, z0: iz0, z1: iz1 });
+      if (rect.x1 > ix1) pieces.push({ x0: ix1, x1: rect.x1, z0: iz0, z1: iz1 });
+      return pieces;
+    }
+    function subtractAll(rects, cut) {
+      let out = [];
+      rects.forEach((r) => { out = out.concat(subtractRect(r, cut)); });
+      return out;
+    }
+    // stairwell headroom cutout: a rectangle the width of the stair, running
+    // 6ft back from the point where the stair reaches full height (its
+    // "end") toward where it starts climbing -- a simplified stand-in for
+    // a real headroom calculation, sized for one average person's clearance.
+    const STAIR_HEADROOM = 12 * FT;
+    function computeStairHoleCut(stair) {
+      const dir = Math.sign(stair.end - stair.start) || 1;
+      const a = stair.end, b = stair.end - dir * STAIR_HEADROOM;
+      const lo = Math.min(a, b), hi = Math.max(a, b);
+      if (stair.axis === "x") return { x0: lo, x1: hi, z0: stair.widthMin, z1: stair.widthMax };
+      return { x0: stair.widthMin, x1: stair.widthMax, z0: lo, z1: hi };
+    }
+    function notchFloorCut(bump) {
+      const def = wallDefs[bump.panel];
+      if (!def) return null; // only notches on the 4 base walls affect the floor
+      const axisSign = def.thickAxis === "z" ? def.normal.z : def.normal.x;
+      const farCoord = def.coord + axisSign * bump.depth;
+      const lo = Math.min(def.coord, farCoord), hi = Math.max(def.coord, farCoord);
+      return def.lengthAxis === "x"
+        ? { x0: bump.u0, x1: bump.u1, z0: lo, z1: hi }
+        : { x0: lo, x1: hi, z0: bump.u0, z1: bump.u1 };
+    }
+
+    // an inward pull that reaches all the way to a base wall's actual corner
+    // hands that corner off to the perpendicular wall (which effectiveWallSpan
+    // shortens to meet it) instead of also building a connector wall there.
+    function bumpoutCornerTouch(bo) {
+      if (bo.depth >= -0.02 || !wallDefs[bo.panel]) return { min: false, max: false };
+      const raw = wallSpan(bo.panel);
+      return { min: Math.abs(bo.u0 - raw[0]) < 0.05, max: Math.abs(bo.u1 - raw[1]) < 0.05 };
+    }
+
+    // ---------- room detection (flood fill over a fine grid) ----------
+    // Everything in this app is axis-aligned, so a rasterized flood fill is a
+    // simple, robust way to find enclosed sub-areas: mark which grid cells
+    // fall inside the floor's footprint (base rectangle plus any outward
+    // pull, minus any inward notch), treat partitions as walls that block
+    // movement between cells, then flood-fill connected components. Each
+    // component is one enclosed room. This only "sees" straight, axis-aligned
+    // partitions -- it won't detect rooms shaped by anything else.
+    function outwardBumpRect(b) {
+      const parent = getPanelInfo(b.panel);
+      if (!parent || b.depth <= 0.02) return null;
+      const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+      const farCoord = parent.coord + axisSign * b.depth;
+      const lo = Math.min(parent.coord, farCoord), hi = Math.max(parent.coord, farCoord);
+      return parent.lengthAxis === "x" ? { x0: b.u0, x1: b.u1, z0: lo, z1: hi } : { x0: lo, x1: hi, z0: b.u0, z1: b.u1 };
+    }
+    function detectRooms() {
+      const fp = state.footprint;
+      let floorRects = [{ x0: fp.xMin, x1: fp.xMax, z0: fp.zMin, z1: fp.zMax }];
+      state.bumpouts.forEach((b) => {
+        if (b.depth < -0.02) {
+          const cut = notchFloorCut(b);
+          if (cut) floorRects = subtractAll(floorRects, cut);
+        }
+      });
+      const outwardRects = state.bumpouts.map(outwardBumpRect).filter(Boolean);
+      const allRects = floorRects.concat(outwardRects);
+      if (allRects.length === 0) return [];
+
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      allRects.forEach((r) => { minX = Math.min(minX, r.x0); maxX = Math.max(maxX, r.x1); minZ = Math.min(minZ, r.z0); maxZ = Math.max(maxZ, r.z1); });
+      if (!isFinite(minX) || maxX - minX < 0.1 || maxZ - minZ < 0.1) return [];
+
+      let CELL = 0.15;
+      let cols = Math.max(1, Math.ceil((maxX - minX) / CELL));
+      let rows = Math.max(1, Math.ceil((maxZ - minZ) / CELL));
+      while (cols * rows > 40000) {
+        CELL *= 1.3;
+        cols = Math.max(1, Math.ceil((maxX - minX) / CELL));
+        rows = Math.max(1, Math.ceil((maxZ - minZ) / CELL));
+      }
+
+      const inside = new Uint8Array(cols * rows);
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const cx = minX + (i + 0.5) * CELL, cz = minZ + (j + 0.5) * CELL;
+          inside[j * cols + i] = allRects.some((r) => cx >= r.x0 && cx <= r.x1 && cz >= r.z0 && cz <= r.z1) ? 1 : 0;
+        }
+      }
+
+      const partitionSegs = [];
+      state.partitions.forEach((p) => {
+        const parent = getPanelInfo(p.panel);
+        if (!parent || Math.abs(p.ext) < 0.03) return;
+        const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+        const far = parent.coord + axisSign * p.ext;
+        const lo = Math.min(parent.coord, far), hi = Math.max(parent.coord, far);
+        if (parent.thickAxis === "z") partitionSegs.push({ vertical: true, at: p.u, a: lo, b: hi });
+        else partitionSegs.push({ vertical: false, at: p.u, a: lo, b: hi });
+      });
+      function blockedV(edgeX, z0, z1) {
+        return partitionSegs.some((s) => s.vertical && Math.abs(s.at - edgeX) < CELL * 0.5 && s.a <= z1 - 1e-6 && s.b >= z0 + 1e-6);
+      }
+      function blockedH(edgeZ, x0, x1) {
+        return partitionSegs.some((s) => !s.vertical && Math.abs(s.at - edgeZ) < CELL * 0.5 && s.a <= x1 - 1e-6 && s.b >= x0 + 1e-6);
+      }
+
+      const roomOf = new Int32Array(cols * rows).fill(-1);
+      const rooms = [];
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const idx = j * cols + i;
+          if (!inside[idx] || roomOf[idx] !== -1) continue;
+          const id = rooms.length;
+          const cellList = [];
+          const stack = [[i, j]];
+          roomOf[idx] = id;
+          while (stack.length) {
+            const [ci, cj] = stack.pop();
+            cellList.push([ci, cj]);
+            const cx0 = minX + ci * CELL, cx1 = cx0 + CELL, cz0 = minZ + cj * CELL, cz1 = cz0 + CELL;
+            const tryNeighbor = (ni, nj, blocked) => {
+              if (ni < 0 || ni >= cols || nj < 0 || nj >= rows) return;
+              const nIdx = nj * cols + ni;
+              if (inside[nIdx] && roomOf[nIdx] === -1 && !blocked) { roomOf[nIdx] = id; stack.push([ni, nj]); }
+            };
+            tryNeighbor(ci + 1, cj, blockedV(cx1, cz0, cz1));
+            tryNeighbor(ci - 1, cj, blockedV(cx0, cz0, cz1));
+            tryNeighbor(ci, cj + 1, blockedH(cz1, cx0, cx1));
+            tryNeighbor(ci, cj - 1, blockedH(cz0, cx0, cx1));
+          }
+          rooms.push({ cellList });
+        }
+      }
+
+      return rooms.map((room) => {
+        const cellSet = new Set(room.cellList.map(([i, j]) => i + "," + j));
+        // merge cells into floor rectangles: horizontal runs per row, then
+        // stack rows with an identical run into a single taller rectangle
+        const byRow = new Map();
+        room.cellList.forEach(([i, j]) => { if (!byRow.has(j)) byRow.set(j, []); byRow.get(j).push(i); });
+        const rowRuns = [];
+        byRow.forEach((is, j) => {
+          is.sort((a, b) => a - b);
+          let start = is[0], prev = is[0];
+          for (let k = 1; k < is.length; k++) {
+            if (is[k] === prev + 1) { prev = is[k]; continue; }
+            rowRuns.push({ j, i0: start, i1: prev }); start = is[k]; prev = is[k];
+          }
+          rowRuns.push({ j, i0: start, i1: prev });
+        });
+        rowRuns.sort((a, b) => a.j - b.j || a.i0 - b.i0);
+        const used = new Array(rowRuns.length).fill(false);
+        const floorRectsOut = [];
+        for (let a = 0; a < rowRuns.length; a++) {
+          if (used[a]) continue;
+          let j0 = rowRuns[a].j, j1 = rowRuns[a].j;
+          const i0 = rowRuns[a].i0, i1 = rowRuns[a].i1;
+          used[a] = true;
+          let extended = true;
+          while (extended) {
+            extended = false;
+            for (let b = 0; b < rowRuns.length; b++) {
+              if (used[b]) continue;
+              if (rowRuns[b].i0 === i0 && rowRuns[b].i1 === i1 && rowRuns[b].j === j1 + 1) { j1 = rowRuns[b].j; used[b] = true; extended = true; }
+            }
+          }
+          floorRectsOut.push({ x0: minX + i0 * CELL, x1: minX + (i1 + 1) * CELL, z0: minZ + j0 * CELL, z1: minZ + (j1 + 1) * CELL });
+        }
+
+        // perimeter: any cell edge whose neighbor isn't in this room becomes
+        // a wall edge; merge collinear runs along each grid line
+        const vEdges = [], hEdges = [];
+        room.cellList.forEach(([i, j]) => {
+          const cx0 = minX + i * CELL, cx1 = cx0 + CELL, cz0 = minZ + j * CELL, cz1 = cz0 + CELL;
+          if (!cellSet.has((i - 1) + "," + j)) vEdges.push({ x: cx0, z0: cz0, z1: cz1 });
+          if (!cellSet.has((i + 1) + "," + j)) vEdges.push({ x: cx1, z0: cz0, z1: cz1 });
+          if (!cellSet.has(i + "," + (j - 1))) hEdges.push({ z: cz0, x0: cx0, x1: cx1 });
+          if (!cellSet.has(i + "," + (j + 1))) hEdges.push({ z: cz1, x0: cx0, x1: cx1 });
+        });
+        const wallSegs = [];
+        const byX = new Map();
+        vEdges.forEach((e) => { const k = e.x.toFixed(4); if (!byX.has(k)) byX.set(k, []); byX.get(k).push(e); });
+        byX.forEach((edges, k) => {
+          edges.sort((a, b) => a.z0 - b.z0);
+          let s = edges[0].z0, en = edges[0].z1;
+          for (let idx = 1; idx < edges.length; idx++) {
+            if (edges[idx].z0 <= en + 1e-6) en = Math.max(en, edges[idx].z1);
+            else { wallSegs.push({ axis: "z", coord: parseFloat(k), a: s, b: en }); s = edges[idx].z0; en = edges[idx].z1; }
+          }
+          wallSegs.push({ axis: "z", coord: parseFloat(k), a: s, b: en });
+        });
+        const byZ = new Map();
+        hEdges.forEach((e) => { const k = e.z.toFixed(4); if (!byZ.has(k)) byZ.set(k, []); byZ.get(k).push(e); });
+        byZ.forEach((edges, k) => {
+          edges.sort((a, b) => a.x0 - b.x0);
+          let s = edges[0].x0, en = edges[0].x1;
+          for (let idx = 1; idx < edges.length; idx++) {
+            if (edges[idx].x0 <= en + 1e-6) en = Math.max(en, edges[idx].x1);
+            else { wallSegs.push({ axis: "x", coord: parseFloat(k), a: s, b: en }); s = edges[idx].x0; en = edges[idx].x1; }
+          }
+          wallSegs.push({ axis: "x", coord: parseFloat(k), a: s, b: en });
+        });
+
+        const cx = floorRectsOut.reduce((sum, r) => sum + (r.x0 + r.x1) / 2, 0) / floorRectsOut.length;
+        const cz = floorRectsOut.reduce((sum, r) => sum + (r.z0 + r.z1) / 2, 0) / floorRectsOut.length;
+        let bx0 = Infinity, bx1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
+        floorRectsOut.forEach((r) => { bx0 = Math.min(bx0, r.x0); bx1 = Math.max(bx1, r.x1); bz0 = Math.min(bz0, r.z0); bz1 = Math.max(bz1, r.z1); });
+        return { floorRects: floorRectsOut, wallSegs, centroid: { x: cx, z: cz }, bbox: { xMin: bx0, xMax: bx1, zMin: bz0, zMax: bz1 } };
+      });
+    }
+
+    function rebuildCurrentFloorGeometry() {
+      clearGroup(sceneGroup);
+      const fp = state.footprint;
+      const bumpoutFloorPieces = [];
+
+      const panelKeys = ["north", "south", "east", "west"];
+      state.bumpouts.forEach((b) => {
+        if (Math.abs(b.depth) <= 0.02) return;
+        panelKeys.push("bf:" + b.id);
+        const touch = bumpoutCornerTouch(b);
+        if (!touch.min) panelKeys.push("bs0:" + b.id);
+        if (!touch.max) panelKeys.push("bs1:" + b.id);
+      });
+      panelKeys.forEach((pk) => renderPanel(pk, bumpoutFloorPieces));
+      state.partitions.forEach((p) => renderPartition(p));
+      renderCurvedCorners();
+
+      let floorRects = [{ x0: fp.xMin, x1: fp.xMax, z0: fp.zMin, z1: fp.zMax }];
+      const ccFloor = state.curvedCorners;
+      let builtCurvedFloor = false;
+      if (ccFloor && ccFloor.enabled && ccFloor.radius > 0.05) {
+        const R = Math.min(ccFloor.radius, (fp.xMax - fp.xMin) / 2 - 0.15, (fp.zMax - fp.zMin) / 2 - 0.15);
+        if (R > 0.05) {
+          const curvable = computeCurvableCorners(R);
+          const shape = buildCurvedFloorShape(fp, curvable, R);
+          state.bumpouts.forEach((b) => {
+            if (b.depth < -0.02) {
+              const cut = notchFloorCut(b);
+              if (cut) {
+                const hole = new THREE.Path();
+                hole.moveTo(cut.x0, cut.z0);
+                hole.lineTo(cut.x1, cut.z0);
+                hole.lineTo(cut.x1, cut.z1);
+                hole.lineTo(cut.x0, cut.z1);
+                hole.closePath();
+                shape.holes.push(hole);
+              }
+            }
+          });
+          (state.floorHoles || []).forEach((h) => {
+            const hole = new THREE.Path();
+            hole.moveTo(h.xMin, h.zMin);
+            hole.lineTo(h.xMax, h.zMin);
+            hole.lineTo(h.xMax, h.zMax);
+            hole.lineTo(h.xMin, h.zMax);
+            hole.closePath();
+            shape.holes.push(hole);
+          });
+          const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.08, bevelEnabled: false, curveSegments: 8 });
+          const floor = new THREE.Mesh(geo, currentFloorMat);
+          floor.rotation.x = Math.PI / 2;
+          floor.position.y = 0;
+          floor.receiveShadow = true;
+          floor.userData = { kind: "floor", ownerRoomId: buildingRoomId };
+          sceneGroup.add(floor);
+          if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props")) pickList.push(floor);
+          builtCurvedFloor = true;
+        }
+      }
+      if (!builtCurvedFloor) state.bumpouts.forEach((b) => {
+        if (b.depth < -0.02) {
+          const cut = notchFloorCut(b);
+          if (cut) floorRects = subtractAll(floorRects, cut);
+        }
+      });
+      if (!builtCurvedFloor) (state.floorHoles || []).forEach((h) => {
+        floorRects = subtractAll(floorRects, { x0: h.xMin, x1: h.xMax, z0: h.zMin, z1: h.zMax });
+      });
+      if (!builtCurvedFloor) floorRects.forEach((r) => {
+        const fw = r.x1 - r.x0, fd = r.z1 - r.z0;
+        if (fw < 0.02 || fd < 0.02) return;
+        const floor = new THREE.Mesh(new THREE.BoxGeometry(fw, 0.08, fd), currentFloorMat);
+        floor.position.set((r.x0 + r.x1) / 2, -0.04, (r.z0 + r.z1) / 2);
+        floor.receiveShadow = true;
+        floor.userData = { kind: "floor", ownerRoomId: buildingRoomId };
+        sceneGroup.add(floor);
+        const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2;
+        const coveredByRoom = buildingRoomId == null && buildingFloorEntry && (buildingFloorEntry.rooms || []).some((rm) => {
+          const rf = rm.data.footprint, ox = rm.offsetX || 0, oz = rm.offsetZ || 0;
+          return cx >= rf.xMin + ox && cx <= rf.xMax + ox && cz >= rf.zMin + oz && cz <= rf.zMax + oz;
+        });
+        if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props") && !coveredByRoom) pickList.push(floor);
+      });
+
+      const w = fp.xMax - fp.xMin;
+      const d = fp.zMax - fp.zMin;
+      bumpoutFloorPieces.forEach((bp) => {
+        let fw, fd, px, pz;
+        if (bp.axis === "x") { fw = bp.u1 - bp.u0; fd = bp.hi - bp.lo; px = (bp.u0 + bp.u1) / 2; pz = (bp.lo + bp.hi) / 2; }
+        else { fw = bp.hi - bp.lo; fd = bp.u1 - bp.u0; px = (bp.lo + bp.hi) / 2; pz = (bp.u0 + bp.u1) / 2; }
+        const fmesh = new THREE.Mesh(new THREE.BoxGeometry(fw, 0.08, fd), currentFloorMat);
+        fmesh.position.set(px, -0.04, pz);
+        fmesh.receiveShadow = true;
+        fmesh.userData = { kind: "floor", ownerRoomId: buildingRoomId };
+        sceneGroup.add(fmesh);
+        if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props")) pickList.push(fmesh);
+      });
+
+      if (buildingActiveFloor && hudRef.current) {
+        hudRef.current.textContent = `${w.toFixed(1)} m \u00d7 ${d.toFixed(1)} m  \u00b7  ${state.height.toFixed(1)} m high`;
+      }
+
+      if (buildingActiveFloor) {
+        measureAnchors = [];
+        if (showMeasurementsRef.current) {
+          const addAnchor = (pk) => {
+            const info = getPanelInfo(pk);
+            if (!info) return;
+            const len = info.u1 - info.u0;
+            if (len < 0.05) return;
+            const mid = (info.u0 + info.u1) / 2;
+            const H = getPanelHeight(pk);
+            const pt = new THREE.Vector3();
+            if (info.lengthAxis === "x") pt.set(mid, H * 0.55, info.coord);
+            else pt.set(info.coord, H * 0.55, mid);
+            pt.addScaledVector(info.normal, state.thickness / 2 + 0.06);
+            pt.y += sceneGroup.position.y;
+            measureAnchors.push({ point: pt, text: (len / FT).toFixed(2) + " ft" });
+          };
+          panelKeys.forEach(addAnchor);
+          state.partitions.forEach((p) => addAnchor("pt:" + p.id));
+        }
+      }
+
+      renderStairs();
+      renderProps();
+      renderBalconies();
+    }
+
+    // a staircase is a stack of solid steps, each a flat-bottomed box sitting
+    // on the floor: step i spans y=[0,(i+1)*stepHeight] and one depth slice
+    // of the footprint, so the whole run climbs from the floor to the room's
+    // current height -- recomputed live, so raising/lowering the room re-scales it.
+    function renderStairs() {
+      const H = state.height;
+      (state.stairs || []).forEach((st) => {
+        const span = st.end - st.start;
+        const widthSpan = st.widthMax - st.widthMin;
+        if (Math.abs(span) < 0.05 || widthSpan < 0.05) return;
+        const n = Math.max(1, Math.round(st.steps) || 1);
+        const stepH = H / n;
+        const stepSpan = span / n;
+        const isSelected = isActiveTarget && selectedStairIdRef.current === st.id;
+        const mat = isSelected ? wallMatSelected : stairMat;
+        for (let i = 0; i < n; i++) {
+          const a = st.start + i * stepSpan;
+          const b = st.start + (i + 1) * stepSpan;
+          const lo = Math.min(a, b), hi = Math.max(a, b);
+          const topY = (i + 1) * stepH;
+          let geo, px, pz;
+          if (st.axis === "x") {
+            geo = new THREE.BoxGeometry(Math.max(0.02, hi - lo), Math.max(0.02, topY), Math.max(0.02, widthSpan));
+            px = (lo + hi) / 2; pz = (st.widthMin + st.widthMax) / 2;
+          } else {
+            geo = new THREE.BoxGeometry(Math.max(0.02, widthSpan), Math.max(0.02, topY), Math.max(0.02, hi - lo));
+            px = (st.widthMin + st.widthMax) / 2; pz = (lo + hi) / 2;
+          }
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set(px, topY / 2, pz);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: "stair", id: st.id, ownerRoomId: buildingRoomId };
+          sceneGroup.add(mesh);
+          if (isActiveTarget) pickList.push(mesh);
+        }
+      });
+      if (previewStair && isActiveTarget) {
+        const w = previewStair.x1 - previewStair.x0;
+        const d = previewStair.z1 - previewStair.z0;
+        if (w > 0.02 && d > 0.02 && previewStair.axis) {
+          // real stepped preview (not just a flat rectangle) so the axis
+          // and climb direction the drag is about to commit to is visible
+          // live, before you let go -- a fixed small step count just for
+          // the preview, independent of whatever step count gets used once
+          // it's actually committed.
+          const H = state.height;
+          const n = 6;
+          const span = previewStair.end - previewStair.start;
+          const stepSpan = span / n;
+          for (let i = 0; i < n; i++) {
+            const a = previewStair.start + i * stepSpan;
+            const b = previewStair.start + (i + 1) * stepSpan;
+            const lo = Math.min(a, b), hi = Math.max(a, b);
+            const topY = ((i + 1) / n) * H;
+            let geo, px, pz;
+            if (previewStair.axis === "x") {
+              geo = new THREE.BoxGeometry(Math.max(0.02, hi - lo), Math.max(0.02, topY), Math.max(0.02, previewStair.widthMax - previewStair.widthMin));
+              px = (lo + hi) / 2; pz = (previewStair.widthMin + previewStair.widthMax) / 2;
+            } else {
+              geo = new THREE.BoxGeometry(Math.max(0.02, previewStair.widthMax - previewStair.widthMin), Math.max(0.02, topY), Math.max(0.02, hi - lo));
+              px = (previewStair.widthMin + previewStair.widthMax) / 2; pz = (lo + hi) / 2;
+            }
+            const mesh = new THREE.Mesh(geo, selMatPreview);
+            mesh.position.set(px, topY / 2, pz);
+            sceneGroup.add(mesh);
+          }
+        }
+      }
+    }
+
+    // decorative sphere/cube/cone/cylinder props, placed by tapping the
+    // floor with the Props tool -- purely visual for now (not pickable,
+    // so they can't be moved or deleted from the UI yet).
+    function renderProps() {
+      const r = 3 * FT;
+      (state.props || []).forEach((p) => {
+        let geo;
+        switch (p.kind) {
+          case "sphere": geo = new THREE.SphereGeometry(PROP_HEIGHT / 2, 20, 16); break;
+          case "cube": geo = new THREE.BoxGeometry(PROP_HEIGHT, PROP_HEIGHT, PROP_HEIGHT); break;
+          case "cone": geo = new THREE.ConeGeometry(r, PROP_HEIGHT, 24); break;
+          case "cylinder": default: geo = new THREE.CylinderGeometry(r, r, PROP_HEIGHT, 24); break;
+        }
+        const mesh = new THREE.Mesh(geo, propMats[p.kind] || propMats.cube);
+        mesh.position.set(p.x, PROP_HEIGHT / 2, p.z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        addEdges(mesh);
+        mesh.userData = { kind: "prop", id: p.id, ownerRoomId: buildingRoomId };
+        sceneGroup.add(mesh);
+      });
+    }
+
+    // the staircase-balcony assembly: a low 3-step stair leading up to a
+    // wide platform (4x a normal tread's depth) against the wall, with
+    // corner pillars enclosing the platform. The window/door cutout in the
+    // wall itself is handled entirely by the ordinary opening system (see
+    // the balcony-draw commit logic) -- this only builds the exterior
+    // structure standing in front of it.
+    function renderBalconies() {
+      const STEP_D = 3 * FT;
+      const DEFAULT_PLATFORM_D = 10 * FT;
+      const PILLAR_SIZE = 0.09;
+      const PILLAR_SPACING = 3 * FT;
+      const CEILING_THICKNESS = 0.15;
+      const CEILING_DROP = 2 * FT; // the ceiling sits this far below the room's own default height
+      // evenly spaced points around a rectangle's full perimeter (both the
+      // "width" edges and the "length" edges), spaced ~PILLAR_SPACING apart
+      // and always including the 4 corners.
+      function perimeterPositions(pu0, pu1, pd0, pd1, spacing) {
+        const positions = [];
+        const uCount = Math.max(1, Math.round((pu1 - pu0) / spacing));
+        for (let i = 0; i <= uCount; i++) {
+          const u = pu0 + (i / uCount) * (pu1 - pu0);
+          positions.push([u, pd0]);
+          positions.push([u, pd1]);
+        }
+        const dCount = Math.max(1, Math.round((pd1 - pd0) / spacing));
+        for (let j = 1; j < dCount; j++) {
+          const d = pd0 + (j / dCount) * (pd1 - pd0);
+          positions.push([pu0, d]);
+          positions.push([pu1, d]);
+        }
+        return positions;
+      }
+      (state.balconies || []).forEach((bal) => {
+        const info = getPanelInfo(bal.panel);
+        if (!info) return;
+        const side = bal.side || 1;
+        const nx = info.normal.x * side, nz = info.normal.z * side;
+        const axis = info.lengthAxis;
+        const isSelected = isActiveTarget && selectedBalconyIdRef.current === bal.id;
+        const part = selectedBalconyPartRef.current;
+        const wholeSelected = isSelected && part == null;
+        const pillarsSelected = isSelected && part === "pillars";
+        const ceilingSelected = isSelected && part === "ceiling";
+        const floorLikeMat = wholeSelected ? floorMatSelected : currentFloorMat;
+        const pillarMat = (wholeSelected || pillarsSelected) ? wallMatSelected : currentWallMat;
+        const ceilingMat = (wholeSelected || ceilingSelected) ? wallMatSelected : currentWallMat;
+        function toWorld(u, d) {
+          if (axis === "x") return { x: u, z: info.coord + nz * d };
+          return { x: info.coord + nx * d, z: u };
+        }
+        function addBox(u0, u1, d0, d1, y0, y1, mat, kindOverride) {
+          const uLen = Math.max(0.02, u1 - u0);
+          const dLen = Math.max(0.02, d1 - d0);
+          const h = Math.max(0.02, y1 - y0);
+          const geo = axis === "x" ? new THREE.BoxGeometry(uLen, h, dLen) : new THREE.BoxGeometry(dLen, h, uLen);
+          const mesh = new THREE.Mesh(geo, mat);
+          const cU = (u0 + u1) / 2, cD = (d0 + d1) / 2;
+          const w = toWorld(cU, cD);
+          mesh.position.set(w.x, (y0 + y1) / 2, w.z);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: kindOverride || "balcony", id: bal.id, ownerRoomId: buildingRoomId };
+          sceneGroup.add(mesh);
+          if (isActiveTarget) pickList.push(mesh);
+        }
+        const u0 = bal.u0, u1 = bal.u1;
+        const platformHeight = bal.platformHeight || 3 * FT;
+        const PLATFORM_D = bal.platformWidth || DEFAULT_PLATFORM_D;
+        // platform, right against the wall
+        addBox(u0, u1, 0, PLATFORM_D, 0, platformHeight, floorLikeMat);
+        // steps descending away from the platform to the ground -- however
+        // many risers it takes to cover the current platform height at
+        // roughly a 1ft rise each (recomputed so they land exactly on the
+        // platform's actual height, whatever the slider is set to).
+        const numLevels = Math.max(1, Math.round(platformHeight / (1 * FT)));
+        const stepH = platformHeight / numLevels;
+        for (let i = 0; i < numLevels - 1; i++) {
+          const topH = (numLevels - 1 - i) * stepH;
+          addBox(u0, u1, PLATFORM_D + i * STEP_D, PLATFORM_D + (i + 1) * STEP_D, 0, topH, floorLikeMat);
+        }
+        // pillars are locked to never poke through the room's own default
+        // height -- they run from the platform surface up to just under a
+        // ceiling slab, positioned a fixed drop below the room height.
+        const pillarTop = Math.max(platformHeight + 0.3, state.height - CEILING_DROP - CEILING_THICKNESS);
+        if (!bal.pillarsRemoved) {
+          const half = PILLAR_SIZE / 2;
+          perimeterPositions(u0 + half, u1 - half, half, PLATFORM_D - half, PILLAR_SPACING).forEach(([cu, cd]) => {
+            const w = toWorld(cu, cd);
+            const geo = new THREE.BoxGeometry(PILLAR_SIZE, pillarTop - platformHeight, PILLAR_SIZE);
+            const mesh = new THREE.Mesh(geo, pillarMat);
+            mesh.position.set(w.x, (platformHeight + pillarTop) / 2, w.z);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            addEdges(mesh);
+            mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId };
+            sceneGroup.add(mesh);
+            if (isActiveTarget) pickList.push(mesh);
+          });
+          // the pillars themselves are thin and easy to miss with a tap --
+          // an invisible box spanning the whole pillar zone makes tapping
+          // anywhere in that space (not just exactly on a pillar) select
+          // the whole group. Built by hand rather than through addBox,
+          // since addBox always adds visible edge outlines, which would
+          // defeat the point of an invisible hotspot.
+          {
+            const hw = Math.max(0.02, u1 - u0), hd = Math.max(0.02, PLATFORM_D);
+            const hh = Math.max(0.02, pillarTop - platformHeight);
+            const hgeo = axis === "x" ? new THREE.BoxGeometry(hw, hh, hd) : new THREE.BoxGeometry(hd, hh, hw);
+            const hmesh = new THREE.Mesh(hgeo, hotspotMat);
+            const hw2 = toWorld((u0 + u1) / 2, PLATFORM_D / 2);
+            hmesh.position.set(hw2.x, (platformHeight + pillarTop) / 2, hw2.z);
+            hmesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId };
+            sceneGroup.add(hmesh);
+            if (isActiveTarget) pickList.push(hmesh);
+          }
+        }
+        // covered ceiling, a fixed drop below the room's own default height
+        if (!bal.ceilingRemoved) {
+          addBox(u0, u1, 0, PLATFORM_D, state.height - CEILING_DROP - CEILING_THICKNESS, state.height - CEILING_DROP, ceilingMat, "balcony-ceiling");
+        }
+      });
+    }
+
+    // fills the 4 corners of the room's own rectangular footprint with a
+    // rounded fillet (up to 5 straight segments approximating an arc), to
+    // match the inset the base walls already got in renderPanel. First-pass
+    // scope: only the plain 4-corner rectangle -- bump-outs/partitions
+    // aren't accounted for, so combining curved corners with those may
+    // look imperfect at the junction, though it won't break anything.
+    function renderCurvedCorners() {
+      const cc = state.curvedCorners;
+      if (!cc || !cc.enabled || cc.radius <= 0.05) return;
+      const fp = state.footprint;
+      const R = Math.min(cc.radius, (fp.xMax - fp.xMin) / 2 - 0.15, (fp.zMax - fp.zMin) / 2 - 0.15);
+      if (R <= 0.05) return;
+      const H = getPanelHeight("north");
+      const T = state.thickness;
+      const segs = 5;
+      const curvable = computeCurvableCorners(R);
+      const corners = [
+        { key: "nw", cx: fp.xMin + R, cz: fp.zMin + R, a0: 180, a1: 270 },
+        { key: "ne", cx: fp.xMax - R, cz: fp.zMin + R, a0: 270, a1: 360 },
+        { key: "se", cx: fp.xMax - R, cz: fp.zMax - R, a0: 0, a1: 90 },
+        { key: "sw", cx: fp.xMin + R, cz: fp.zMax - R, a0: 90, a1: 180 },
+      ];
+      corners.forEach((c) => {
+        // a corner next to a bump-out is left as its original sharp corner
+        // (renderPanel didn't inset the adjoining walls for it either), so
+        // no arc is built there and the walls simply meet as they always did.
+        if (!curvable[c.key]) return;
+        for (let i = 0; i < segs; i++) {
+          const ang0 = (c.a0 + (c.a1 - c.a0) * (i / segs)) * Math.PI / 180;
+          const ang1 = (c.a0 + (c.a1 - c.a0) * ((i + 1) / segs)) * Math.PI / 180;
+          const x0 = c.cx + R * Math.cos(ang0), z0 = c.cz + R * Math.sin(ang0);
+          const x1 = c.cx + R * Math.cos(ang1), z1 = c.cz + R * Math.sin(ang1);
+          const len = Math.hypot(x1 - x0, z1 - z0);
+          if (len < 0.02) continue;
+          const angle = Math.atan2(z1 - z0, x1 - x0);
+          const geo = new THREE.BoxGeometry(len, Math.max(0.02, H), T);
+          const mesh = new THREE.Mesh(geo, currentWallMat);
+          mesh.position.set((x0 + x1) / 2, H / 2, (z0 + z1) / 2);
+          mesh.rotation.y = -angle;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: "wall", panel: "cc:" + c.key, ownerRoomId: buildingRoomId };
+          sceneGroup.add(mesh);
+          if (isActiveTarget) pickList.push(mesh);
+        }
+      });
+    }
+
+    // renders one floor's data into its own group. Only the active floor's
+    // geometry is added to pickList, so only it responds to taps/drags --
+    // other floors stay visible but read-only, like inactive Photoshop layers.
+    function rebuildFloorEntry(entry, isActive) {
+      const savedState = state;
+      const savedGroup = sceneGroup;
+      const savedActive = buildingActiveFloor;
+      const savedTarget = isActiveTarget;
+      const savedWallMat = currentWallMat;
+      const savedFloorMat = currentFloorMat;
+      const savedRoomId = buildingRoomId;
+      const savedFloorEntry = buildingFloorEntry;
+      state = entry.data;
+      sceneGroup = floorGroups.get(entry.id);
+      buildingActiveFloor = isActive;
+      isActiveTarget = isActive && activeRoomId == null;
+      buildingRoomId = null;
+      buildingFloorEntry = entry;
+      currentWallMat = isActive ? wallMat : wallMatDim;
+      currentFloorMat = isActive ? floorMat : floorMatDim;
+      // if a room's footprint exactly matches this floor's own, that room has
+      // fully replaced the floor's own walls -- skip rendering the floor's
+      // own content there so the two don't visually compete (and to leave
+      // the room as the only clickable thing in that space).
+      const wholeFloorClaimed = (entry.rooms || []).some((rm) => {
+        const rf = rm.data.footprint, fp2 = entry.data.footprint;
+        return Math.abs(rf.xMin - fp2.xMin) < 0.05 && Math.abs(rf.xMax - fp2.xMax) < 0.05 &&
+               Math.abs(rf.zMin - fp2.zMin) < 0.05 && Math.abs(rf.zMax - fp2.zMax) < 0.05;
+      });
+      if (sceneGroup) {
+        if (wholeFloorClaimed) clearGroup(sceneGroup);
+        else rebuildCurrentFloorGeometry();
+      }
+      refreshThumbnail(entry.id);
+      state = savedState;
+      sceneGroup = savedGroup;
+      buildingActiveFloor = savedActive;
+      isActiveTarget = savedTarget;
+      currentWallMat = savedWallMat;
+      currentFloorMat = savedFloorMat;
+      buildingRoomId = savedRoomId;
+      buildingFloorEntry = savedFloorEntry;
+      (entry.rooms || []).forEach((room) => rebuildRoomEntry(entry, room, isActive));
+    }
+
+    // a room reuses the exact same rendering path as a floor (rebuildCurrentFloorGeometry)
+    // -- it's just parented in its own group, offset horizontally within its floor.
+    function rebuildRoomEntry(floorEntry, room, floorIsActive) {
+      const savedState = state;
+      const savedGroup = sceneGroup;
+      const savedActive = buildingActiveFloor;
+      const savedTarget = isActiveTarget;
+      const savedWallMat = currentWallMat;
+      const savedFloorMat = currentFloorMat;
+      const savedRoomId = buildingRoomId;
+      const savedFloorEntry = buildingFloorEntry;
+      state = room.data;
+      let container = roomContainers.get(floorEntry.id);
+      if (!container) {
+        container = new THREE.Group();
+        scene.add(container);
+        roomContainers.set(floorEntry.id, container);
+        const g = floorGroups.get(floorEntry.id);
+        if (g) container.position.copy(g.position);
+      }
+      let rg = roomGroups.get(room.id);
+      if (!rg) {
+        rg = new THREE.Group();
+        container.add(rg);
+        roomGroups.set(room.id, rg);
+      }
+      rg.position.set(room.offsetX || 0, 0, room.offsetZ || 0);
+      sceneGroup = rg;
+      buildingActiveFloor = floorIsActive;
+      const isSelectedRoom = floorIsActive && activeRoomId === room.id;
+      isActiveTarget = isSelectedRoom;
+      buildingRoomId = room.id;
+      buildingFloorEntry = floorEntry;
+      currentWallMat = !floorIsActive ? wallMatDim : wallMat;
+      currentFloorMat = !floorIsActive ? floorMatDim : (isSelectedRoom ? floorMatSelected : floorMat);
+      clearGroup(sceneGroup);
+      rebuildCurrentFloorGeometry();
+      state = savedState;
+      sceneGroup = savedGroup;
+      buildingActiveFloor = savedActive;
+      isActiveTarget = savedTarget;
+      currentWallMat = savedWallMat;
+      currentFloorMat = savedFloorMat;
+      buildingRoomId = savedRoomId;
+      buildingFloorEntry = savedFloorEntry;
+    }
+
+    function rebuild() {
+      pickList = [];
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (entry) rebuildFloorEntry(entry, true);
+    }
+
+    function rebuildAllFloors() {
+      pickList = [];
+      floors.forEach((f) => rebuildFloorEntry(f, f.id === activeFloorId));
+    }
+
+    // ---------- view-mode toggles ----------
+    function applyHiddenLineMode(on) {
+      hiddenLineModeOn = on;
+      rebuildAllFloors();
+    }
+    hiddenLineApiRef.current = applyHiddenLineMode;
+
+    function applyTransparentInactive(on) {
+      wallMatDim.transparent = true;
+      wallMatDim.opacity = on ? 0.5 : 1;
+      floorMatDim.transparent = true;
+      floorMatDim.opacity = on ? 0.5 : 1;
+    }
+    transparentInactiveApiRef.current = applyTransparentInactive;
+
+    function applyWireframe(on) {
+      [wallMat, floorMat, wallMatDim, floorMatDim, wallMatSelected, floorMatSelected].forEach((m) => { m.wireframe = on; });
+    }
+    wireframeApiRef.current = applyWireframe;
+
+    function applyUltraRealistic(on) {
+      const size = on ? 2048 : 1024;
+      keyLight.shadow.mapSize.set(size, size);
+      if (keyLight.shadow.map) { keyLight.shadow.map.dispose(); keyLight.shadow.map = null; }
+      keyLight.intensity = on ? 1.4 : 1.15;
+      ambient.intensity = on ? 0.42 : 0.55;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, on ? 3 : 2));
+    }
+    ultraRealisticApiRef.current = applyUltraRealistic;
+
+    function applyTintInactive(on, colorHex) {
+      if (on) {
+        const pure = new THREE.Color(colorHex);
+        wallMatDim.color.copy(new THREE.Color(COLORS.wall).multiplyScalar(0.5)).lerp(pure, 0.8);
+        floorMatDim.color.copy(new THREE.Color(COLORS.floor).multiplyScalar(0.5)).lerp(pure, 0.8).multiplyScalar(0.92);
+      } else {
+        wallMatDim.color.copy(new THREE.Color(COLORS.wall)).multiplyScalar(0.5);
+        floorMatDim.color.copy(new THREE.Color(COLORS.floor)).multiplyScalar(0.5);
+      }
+    }
+    tintInactiveApiRef.current = applyTintInactive;
+
+    function applyTintActive(on, colorHex) {
+      if (on) {
+        const pure = new THREE.Color(colorHex);
+        wallMat.color.copy(new THREE.Color(COLORS.wall)).lerp(pure, 0.92);
+        floorMat.color.copy(new THREE.Color(COLORS.floor)).lerp(pure, 0.92).multiplyScalar(0.94);
+      } else {
+        wallMat.color.copy(new THREE.Color(COLORS.wall));
+        floorMat.color.copy(new THREE.Color(COLORS.floor));
+      }
+    }
+    tintActiveApiRef.current = applyTintActive;
+
+    // ---------- camera orbit / fixed orthographic views ----------
+    let radius = Math.max(DEFAULT_ROOM_HALF_X, DEFAULT_ROOM_HALF_Z) * 2.2;
+    let theta = 0.65;
+    let phi = 1.05;
+    let viewMode = "orbit";
+    const target = new THREE.Vector3(0, state.height * 0.32, 0);
+    const ORTHO_DIRS = {
+      top: { dir: new THREE.Vector3(0, 1, 0), up: new THREE.Vector3(0, 0, -1) },
+      front: { dir: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(0, 1, 0) },
+      left: { dir: new THREE.Vector3(-1, 0, 0), up: new THREE.Vector3(0, 1, 0) },
+      right: { dir: new THREE.Vector3(1, 0, 0), up: new THREE.Vector3(0, 1, 0) },
+    };
+    function computeOrthoFit(dirKey) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      floors.forEach((f) => {
+        const g = floorGroups.get(f.id);
+        if (!g) return;
+        const fp = f.data.footprint;
+        minX = Math.min(minX, fp.xMin); maxX = Math.max(maxX, fp.xMax);
+        minZ = Math.min(minZ, fp.zMin); maxZ = Math.max(maxZ, fp.zMax);
+        minY = Math.min(minY, g.position.y); maxY = Math.max(maxY, g.position.y + f.data.height);
+        (f.rooms || []).forEach((r) => {
+          const ox = r.offsetX || 0, oz = r.offsetZ || 0;
+          const rfp = r.data.footprint;
+          minX = Math.min(minX, rfp.xMin + ox); maxX = Math.max(maxX, rfp.xMax + ox);
+          minZ = Math.min(minZ, rfp.zMin + oz); maxZ = Math.max(maxZ, rfp.zMax + oz);
+        });
+      });
+      if (minX === Infinity) { minX = -3; maxX = 3; minZ = -3; maxZ = 3; minY = 0; maxY = 3; }
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+      let halfW, halfH;
+      if (dirKey === "top") { halfW = (maxX - minX) / 2; halfH = (maxZ - minZ) / 2; }
+      else if (dirKey === "front") { halfW = (maxX - minX) / 2; halfH = (maxY - minY) / 2; }
+      else { halfW = (maxZ - minZ) / 2; halfH = (maxY - minY) / 2; } // left / right
+      const margin = 3.3; // room occupies roughly 30% of the frame, not a snug fit
+      halfW = Math.max(0.4, halfW * margin);
+      halfH = Math.max(0.4, halfH * margin);
+      const aspect = width / height;
+      // fit both dimensions within the viewport's aspect ratio (contain-fit):
+      // whichever dimension needs more room to stay uncropped wins.
+      const fitH = Math.max(halfH, halfW / aspect);
+      return { cx, cy, cz, fitH };
+    }
+
+    function updateCamera() {
+      if (viewMode === "orbit") {
+        const s = Math.sin(phi);
+        camera.position.set(
+          target.x + radius * s * Math.sin(theta),
+          target.y + radius * Math.cos(phi),
+          target.z + radius * s * Math.cos(theta)
+        );
+        camera.lookAt(target);
+        camera.updateMatrixWorld(true);
+        activeCamera = camera;
+      } else {
+        const cfg = ORTHO_DIRS[viewMode];
+        orthoCamera.position.copy(target).addScaledVector(cfg.dir, 200);
+        orthoCamera.up.copy(cfg.up);
+        orthoCamera.lookAt(target);
+        const aspect = width / height;
+        orthoCamera.left = -radius * aspect;
+        orthoCamera.right = radius * aspect;
+        orthoCamera.top = radius;
+        orthoCamera.bottom = -radius;
+        orthoCamera.near = 0.1;
+        orthoCamera.far = 500;
+        orthoCamera.updateProjectionMatrix();
+        orthoCamera.clearViewOffset();
+        orthoCamera.updateMatrixWorld(true);
+        activeCamera = orthoCamera;
+      }
+    }
+    applyViewShift(camera, width, height);
+    updateCamera();
+    function setViewMode(mode) {
+      viewMode = mode;
+      dragState = null;
+      orbiting = null;
+      pinchState = null;
+      if (mode !== "orbit") {
+        // re-center and re-fit to the current content (with a ~10% border)
+        // every time an orthographic view is entered, rather than reusing
+        // whatever target/radius the orbit camera happened to be at.
+        const fit = computeOrthoFit(mode);
+        target.set(fit.cx, fit.cy, fit.cz);
+        radius = fit.fitH;
+      }
+      updateCamera();
+    }
+    setViewModeApiRef.current = setViewMode;
+
+    // ---------- quad-view layout (top-left: top, top-right: orbit, bottom-left: front, bottom-right: left) ----------
+    function ensureQuadPaneState() {
+      if (quadPaneStateReady) return;
+      quadPaneStateReady = true;
+      ["top", "front", "left"].forEach((k) => {
+        const fit = computeOrthoFit(k);
+        quadPaneState[k].target.set(fit.cx, fit.cy, fit.cz);
+        quadPaneState[k].radius = fit.fitH;
+      });
+      const fit = computeOrthoFit("top");
+      quadPaneState.orbit.target.set(fit.cx, fit.cy, fit.cz);
+      quadPaneState.orbit.radius = Math.max(6, fit.fitH * 1.3);
+    }
+
+    function updateQuadOrthoCam(cam, dirKey, aspect) {
+      const cfg = ORTHO_DIRS[dirKey];
+      const st = quadPaneState[dirKey];
+      cam.position.copy(st.target).addScaledVector(cfg.dir, 200);
+      cam.up.copy(cfg.up);
+      cam.lookAt(st.target);
+      cam.left = -st.radius * aspect;
+      cam.right = st.radius * aspect;
+      cam.top = st.radius;
+      cam.bottom = -st.radius;
+      cam.near = 0.1;
+      cam.far = 500;
+      cam.updateProjectionMatrix();
+      cam.updateMatrixWorld(true);
+    }
+
+    function updateQuadOrbitCam(aspect) {
+      const st = quadPaneState.orbit;
+      const s = Math.sin(st.phi);
+      camera.position.set(
+        st.target.x + st.radius * s * Math.sin(st.theta),
+        st.target.y + st.radius * Math.cos(st.phi),
+        st.target.z + st.radius * s * Math.cos(st.theta)
+      );
+      camera.lookAt(st.target);
+      camera.aspect = aspect;
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld(true);
+    }
+
+    // returns the 4 pane rects in DOM pixel space (y measured from the top),
+    // each tagged with its camera, direction key (for the ortho panes) and
+    // paneKey (for looking up its independent camera state).
+    function computeQuadPanes(w, h) {
+      const sx = w * splitX, sy = h * splitY;
+      return [
+        { x: 0, y: 0, w: sx, h: sy, cam: orthoTopCam, dir: "top", paneKey: "top" },
+        { x: sx, y: 0, w: w - sx, h: sy, cam: camera, dir: null, paneKey: "orbit" },
+        { x: 0, y: sy, w: sx, h: h - sy, cam: orthoFrontCam, dir: "front", paneKey: "front" },
+        { x: sx, y: sy, w: w - sx, h: h - sy, cam: orthoLeftCam, dir: "left", paneKey: "left" },
+      ];
+    }
+
+    function renderQuadLayout(w, h) {
+      ensureQuadPaneState();
+      const panes = computeQuadPanes(w, h);
+      renderer.setScissorTest(true);
+      panes.forEach((p) => {
+        if (p.w <= 1 || p.h <= 1) return;
+        const aspect = p.w / p.h;
+        if (p.dir) {
+          updateQuadOrthoCam(p.cam, p.dir, aspect);
+        } else {
+          p.cam.clearViewOffset();
+          updateQuadOrbitCam(aspect);
+        }
+        // the fixed ortho panes look straight along one axis, so the key
+        // light's hard directional shadow often falls across most of what's
+        // visible and reads as "the whole view is dark" -- shadows are only
+        // meaningful for the free-look pane, so switch them off for the rest.
+        renderer.shadowMap.enabled = !p.dir;
+        // these cameras also sit 200 units from the target (needed so their
+        // frustum math is well-conditioned), which puts the model deep
+        // inside the scene fog's falloff and washes it toward the dark
+        // background regardless of lighting -- fog only makes sense for the
+        // up-close orbit view anyway, so drop it for the fixed panes.
+        scene.fog = p.dir ? null : sceneFog;
+        const glY = h - p.y - p.h;
+        renderer.setViewport(p.x, glY, p.w, p.h);
+        renderer.setScissor(p.x, glY, p.w, p.h);
+        renderer.render(scene, p.cam);
+      });
+      renderer.shadowMap.enabled = true;
+      scene.fog = sceneFog;
+      renderer.setScissorTest(false);
+    }
+
+    // called at the start of every pointer gesture (and, while nothing is
+    // being dragged, on every hover-move) so picking/orbiting/panning use
+    // whichever pane's camera the pointer is currently over. Returns
+    // "divider" if the point is over the draggable split-handle instead.
+    function updateInteractionContext(clientX, clientY) {
+      if (viewLayoutRef.current !== "quad") {
+        interactionCamera = activeCamera;
+        interactionRect = null;
+        currentGestureIsOrtho = viewMode !== "orbit";
+        currentGesturePaneDir = null;
+        return "ok";
+      }
+      const rect = renderer.domElement.getBoundingClientRect();
+      const x = clientX - rect.left, y = clientY - rect.top;
+      const w = rect.width, h = rect.height;
+      const sx = w * splitX, sy = h * splitY;
+      if (Math.abs(x - sx) < 14 && Math.abs(y - sy) < 14) return "divider";
+      if (x < sx && y < sy) { interactionCamera = orthoTopCam; interactionRect = { x: 0, y: 0, w: sx, h: sy }; currentGestureIsOrtho = true; currentGesturePaneDir = "top"; return "ok"; }
+      if (x >= sx && y < sy) { interactionCamera = camera; interactionRect = { x: sx, y: 0, w: w - sx, h: sy }; currentGestureIsOrtho = false; currentGesturePaneDir = "orbit"; return "ok"; }
+      if (x < sx && y >= sy) { interactionCamera = orthoFrontCam; interactionRect = { x: 0, y: sy, w: sx, h: h - sy }; currentGestureIsOrtho = true; currentGesturePaneDir = "front"; return "ok"; }
+      interactionCamera = orthoLeftCam; interactionRect = { x: sx, y: sy, w: w - sx, h: h - sy }; currentGestureIsOrtho = true; currentGesturePaneDir = "left"; return "ok";
+    }
+
+    // ---------- third-person walk mode (character + orbiting follow camera) ----------
+    const CHAR_EYE_HEIGHT = 1.55; // where the camera's orbit target sits relative to the character's feet
+    const WALK_SPEED = 2.4; // meters/second
+    const WALK_RADIUS = 0.3; // rough "shoulder width" kept clear of walls
+    let walkPos = new THREE.Vector3(0, 0, 0);
+    let walkFloorId = null;
+    let walkHeightOffset = 0; // meters above the current walking floor's own base, from climbing a stair
+    let walkTransition = null; // {fromPos, fromQuat, elapsed, duration} -- eases the camera in on entry
+    let savedView = null; // camera state to restore when leaving walk mode
+
+    function enterWalkMode() {
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (!entry) return;
+      dragState = null;
+      orbiting = null;
+      pinchState = null;
+      previewSelection = null;
+      previewOpening = null;
+      previewStair = null;
+      savedView = { viewMode, target: target.clone(), radius, theta, phi, fov: camera.fov };
+      walkFloorId = entry.id;
+      walkHeightOffset = 0;
+      const fp = entry.data.footprint;
+      walkPos.set((fp.xMin + fp.xMax) / 2, 0, (fp.zMin + fp.zMax) / 2);
+      characterYaw = 0;
+      walkCyclePhase = 0;
+      walkCycleAmp = 0;
+      character.group.position.set(walkPos.x, 0, walkPos.z);
+      character.group.rotation.y = characterYaw;
+      character.group.visible = true;
+      viewMode = "orbit"; // third-person always orbits around the character, regardless of the prior view
+      radius = 5.5;
+      theta = 0;
+      phi = 1.15;
+      camera.fov = 55;
+      camera.updateProjectionMatrix();
+      const fromPos = activeCamera.position.clone();
+      const fromQuat = camera.quaternion.clone();
+      activeCamera = camera; // picking/editing during walk mode always raycasts through this camera
+      target.set(walkPos.x, CHAR_EYE_HEIGHT, walkPos.z);
+      updateCamera();
+      const toPos = camera.position.clone();
+      const toQuat = camera.quaternion.clone();
+      walkTransition = { fromPos, fromQuat, toPos, toQuat, elapsed: 0, duration: 0.45 };
+      camera.clearViewOffset();
+      renderer.domElement.style.cursor = "default";
+    }
+
+    function exitWalkMode() {
+      character.group.visible = false;
+      if (savedView) {
+        viewMode = savedView.viewMode;
+        target.copy(savedView.target);
+        radius = savedView.radius;
+        theta = savedView.theta;
+        phi = savedView.phi;
+        camera.fov = savedView.fov;
+        camera.updateProjectionMatrix();
+      }
+      walkTransition = null;
+      updateCamera();
+      renderer.domElement.style.cursor = "grab";
+    }
+
+    walkModeApiRef.current = (on) => { if (on) enterWalkMode(); else exitWalkMode(); };
+
+    // finds a stair on the given floor whose footprint contains (x,z), and
+    // how far along its climb that point is (0 at the bottom, 1 at the top).
+    function stairClimbAt(floorEntry, x, z) {
+      if (!floorEntry) return null;
+      const stairs = floorEntry.data.stairs || [];
+      for (const st of stairs) {
+        const along = st.axis === "x" ? x : z;
+        const across = st.axis === "x" ? z : x;
+        if (across < st.widthMin - 0.05 || across > st.widthMax + 0.05) continue;
+        const lo = Math.min(st.start, st.end), hi = Math.max(st.start, st.end);
+        if (along < lo - 0.05 || along > hi + 0.05) continue;
+        const t = st.end === st.start ? 0 : (along - st.start) / (st.end - st.start);
+        return { frac: Math.min(1, Math.max(0, t)), stair: st };
+      }
+      return null;
+    }
+
+    function updateWalkMovement(dt) {
+      const input = walkInputRef.current;
+      // movement is relative to the camera's current orbit angle (theta),
+      // like a normal third-person game: forward always means "away from
+      // the camera, into the scene" no matter which way you've orbited.
+      const forwardX = -Math.sin(theta), forwardZ = -Math.cos(theta);
+      const rightX = Math.cos(theta), rightZ = -Math.sin(theta);
+      let dx = 0, dz = 0;
+      if (input.fwd) { dx += forwardX; dz += forwardZ; }
+      if (input.back) { dx -= forwardX; dz -= forwardZ; }
+      if (input.right) { dx += rightX; dz += rightZ; }
+      if (input.left) { dx -= rightX; dz -= rightZ; }
+      const len = Math.hypot(dx, dz);
+      const moving = len > 0.0001;
+      let floorEntry = floors.find((f) => f.id === walkFloorId);
+      if (moving && floorEntry) {
+        const step = WALK_SPEED * dt;
+        let nx = walkPos.x + (dx / len) * step;
+        let nz = walkPos.z + (dz / len) * step;
+        const fp = floorEntry.data.footprint;
+        nx = Math.min(fp.xMax - WALK_RADIUS, Math.max(fp.xMin + WALK_RADIUS, nx));
+        nz = Math.min(fp.zMax - WALK_RADIUS, Math.max(fp.zMin + WALK_RADIUS, nz));
+        walkPos.x = nx;
+        walkPos.z = nz;
+        // turn the character to face the direction it's actually moving
+        const targetYaw = Math.atan2(dx, dz);
+        let diff = targetYaw - characterYaw;
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+        characterYaw += diff * Math.min(1, dt * 10);
+      }
+      // stair climbing: smoothly ramp height while inside a stair's footprint
+      const climb = floorEntry ? stairClimbAt(floorEntry, walkPos.x, walkPos.z) : null;
+      if (climb) {
+        walkHeightOffset = climb.frac * (floorEntry.data.height || WALL_HEIGHT);
+      } else {
+        walkHeightOffset = 0;
+      }
+      // reaching the top of a stair, with a floor above whose footprint
+      // covers this point (i.e. we've walked into its stairwell opening),
+      // hands walking off to that floor at its own base level.
+      if (climb && climb.frac >= 0.98 && floorEntry) {
+        const idx = floors.findIndex((f) => f.id === floorEntry.id);
+        const above = idx !== -1 ? floors[idx + 1] : null;
+        if (above) {
+          const afp = above.data.footprint;
+          if (walkPos.x >= afp.xMin && walkPos.x <= afp.xMax && walkPos.z >= afp.zMin && walkPos.z <= afp.zMax) {
+            walkFloorId = above.id;
+            walkHeightOffset = 0;
+          }
+        }
+      }
+      // procedural walk-cycle: legs/arms swing on a sine wave whose
+      // amplitude eases toward 0 (idle) or 1 (walking), and whose phase
+      // only advances while actually moving, so the character doesn't
+      // "walk in place" when stationary.
+      const targetAmp = moving ? 1 : 0;
+      walkCycleAmp += (targetAmp - walkCycleAmp) * Math.min(1, dt * 6);
+      if (moving) walkCyclePhase += dt * 7.5;
+      const legSwing = Math.sin(walkCyclePhase) * 0.55 * walkCycleAmp;
+      const armSwing = Math.sin(walkCyclePhase) * 0.45 * walkCycleAmp;
+      character.leftLegPivot.rotation.x = legSwing;
+      character.rightLegPivot.rotation.x = -legSwing;
+      character.leftArmPivot.rotation.x = -armSwing;
+      character.rightArmPivot.rotation.x = armSwing;
+
+      updateWalkCamera();
+    }
+
+    function updateWalkCamera() {
+      const floorEntry = floors.find((f) => f.id === walkFloorId);
+      const g = floorEntry ? floorGroups.get(floorEntry.id) : null;
+      const baseY = g ? g.position.y : 0;
+      character.group.position.set(walkPos.x, baseY + walkHeightOffset, walkPos.z);
+      character.group.rotation.y = characterYaw;
+      // the camera orbits this point (drag to rotate, wheel/pinch to zoom,
+      // exactly like the normal orbit camera) -- it just tracks the
+      // character instead of a fixed target.
+      target.set(walkPos.x, baseY + walkHeightOffset + CHAR_EYE_HEIGHT, walkPos.z);
+      updateCamera();
+    }
+
+    // widens the view (never narrows it) so the active floor's footprint and
+    // all of its rooms -- wherever they've been dragged or pasted to --
+    // stay in frame. Called whenever a room is created/pasted, since those
+    // can land well outside whatever the camera currently happens to show.
+    function ensureActiveContentInFrame() {
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (!entry) return;
+      const fp = entry.data.footprint;
+      let minX = fp.xMin, maxX = fp.xMax, minZ = fp.zMin, maxZ = fp.zMax;
+      (entry.rooms || []).forEach((rm) => {
+        const rf = rm.data.footprint, ox = rm.offsetX || 0, oz = rm.offsetZ || 0;
+        minX = Math.min(minX, rf.xMin + ox); maxX = Math.max(maxX, rf.xMax + ox);
+        minZ = Math.min(minZ, rf.zMin + oz); maxZ = Math.max(maxZ, rf.zMax + oz);
+      });
+      const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+      const neededRadius = Math.max(maxX - minX, maxZ - minZ) * 0.85 + 2;
+      target.x = cx;
+      target.z = cz;
+      const g = floorGroups.get(entry.id);
+      if (g) target.y = g.position.y + entry.data.height * 0.32;
+      if (neededRadius > radius) radius = Math.min(MAX_RADIUS, neededRadius);
+      updateCamera();
+    }
+
+    // ---------- pointer / drag machinery ----------
+    const raycaster = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+    function getNDC(e) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const rx = interactionRect ? interactionRect.x : 0;
+      const ry = interactionRect ? interactionRect.y : 0;
+      const rw = interactionRect ? interactionRect.w : rect.width;
+      const rh = interactionRect ? interactionRect.h : rect.height;
+      ndc.x = ((e.clientX - rect.left - rx) / rw) * 2 - 1;
+      ndc.y = -((e.clientY - rect.top - ry) / rh) * 2 + 1;
+      return ndc;
+    }
+    function pick(e) {
+      raycaster.setFromCamera(getNDC(e), interactionCamera);
+      const hits = raycaster.intersectObjects(pickList, false);
+      return hits.length ? hits[0] : null;
+    }
+    function rayFromEvent(e) {
+      raycaster.setFromCamera(getNDC(e), interactionCamera);
+      return raycaster.ray;
+    }
+    function makeVerticalPlane(normal, point) {
+      const planeNormal = new THREE.Vector3(Math.abs(normal.z), 0, Math.abs(normal.x));
+      const plane = new THREE.Plane();
+      plane.setFromNormalAndCoplanarPoint(planeNormal, point);
+      return plane;
+    }
+    function panelFacePlane(info, point) {
+      const plane = new THREE.Plane();
+      plane.setFromNormalAndCoplanarPoint(info.normal, point);
+      return plane;
+    }
+    function worldDirScreen(point, dir) {
+      const p0 = point.clone().project(activeCamera);
+      const p1 = point.clone().addScaledVector(dir, 0.4).project(activeCamera);
+      return { x: p1.x - p0.x, y: -(p1.y - p0.y) };
+    }
+    function classifyDrag(info, hitPoint, dx, dy) {
+      const runDir = info.lengthAxis === "x" ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+      const rs = worldDirScreen(hitPoint, runDir);
+      const ns = worldDirScreen(hitPoint, info.normal);
+      const rl = Math.hypot(rs.x, rs.y) || 1;
+      const nl = Math.hypot(ns.x, ns.y) || 1;
+      const rScore = Math.abs((dx * rs.x + dy * rs.y) / rl);
+      const nScore = Math.abs((dx * ns.x + dy * ns.y) / nl);
+      return rScore >= nScore ? "select" : "extrude";
+    }
+
+    let dragState = null;
+    let orbiting = null;
+    const activePointers = new Map();
+    let pinchState = null;
+    function pointerDist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+    function pointerMid(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
+    function capture(e) { try { renderer.domElement.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ } }
+    function armTimer() {
+      const token = {};
+      return {
+        token,
+        id: setTimeout(() => { if (dragState && dragState.token === token) dragState.armed = true; }, HOLD_MS),
+      };
+    }
+
+    // extracts the detected region into its own draggable room. If the floor
+    // has no partitions, the detected region IS the floor's whole current
+    // shape, so we deep-clone the entire floor data (bumpouts, selections,
+    // openings, panel heights and all) rather than starting from a blank
+    // rectangle -- otherwise any pushed/pulled walls would be silently lost.
+    // With partitions splitting the floor into sub-rooms, a full-fidelity
+    // extraction of just one sub-room's shape isn't implemented yet, so
+    // that case still falls back to a plain rectangle matching its bounds.
+    function commitRoomFromFound(found, hitPoint) {
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      if (!floorEntry) return null;
+      pushUndo();
+      const id = idSeq++;
+      let roomData;
+      if (!state.partitions || state.partitions.length === 0) {
+        roomData = JSON.parse(JSON.stringify(state));
+      } else {
+        roomData = makeFloorData();
+        roomData.footprint = { ...found.bbox };
+      }
+      const room = { id, data: roomData, offsetX: 0, offsetZ: 0 };
+      if (!floorEntry.rooms) floorEntry.rooms = [];
+      floorEntry.rooms.push(room);
+      switchActiveRoom(id);
+      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hitPoint.y);
+      dragState = { type: "room-drag", roomId: id, plane, start: hitPoint.clone(), startOffsetX: 0, startOffsetZ: 0 };
+      rebuild();
+      return id;
+    }
+
+    function onPointerDown(e) {
+      if (e.pointerType === "touch") e.preventDefault();
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (activePointers.size >= 2) {
+        if (activePointers.size === 2) {
+          // a second finger just landed -- hand off to two-finger pan/zoom and
+          // drop whatever single-finger gesture was in progress
+          if (dragState && dragState.holdTimer) clearTimeout(dragState.holdTimer);
+          dragState = null;
+          orbiting = null;
+          previewSelection = null;
+          previewOpening = null;
+          pinchState = { lastDist: null, lastMid: null, pane: null };
+          {
+            const pts0 = Array.from(activePointers.values()).slice(0, 2);
+            if (pts0.length === 2) {
+              const mid0 = pointerMid(pts0[0], pts0[1]);
+              updateInteractionContext(mid0.x, mid0.y);
+              pinchState.pane = viewLayoutRef.current === "quad" ? currentGesturePaneDir : null;
+            }
+          }
+          rebuild();
+        }
+        capture(e);
+        return;
+      }
+
+      const ctx = updateInteractionContext(e.clientX, e.clientY);
+      if (ctx === "divider") {
+        dividerDragActive = true;
+        capture(e);
+        return;
+      }
+
+      const hit = pick(e);
+      if (!hit) {
+        orbiting = { x: e.clientX, y: e.clientY, moved: 0 };
+        renderer.domElement.style.cursor = "grabbing";
+        capture(e);
+        return;
+      }
+      const obj = hit.object;
+      const kind = obj.userData.kind;
+
+      // Tapping a staircase selects it and exposes its step-count/delete
+      // controls, regardless of which tool is currently active.
+      if (kind === "stair") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        const st = (state.stairs || []).find((s) => s.id === obj.userData.id);
+        setSelectedPanel(null);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+        setSelectedOpeningId(null);
+        setSelectedStairId(obj.userData.id);
+        if (st) setStairSteps(st.steps);
+        return;
+      }
+
+      // Same idea for a balcony assembly -- tapping the steps or platform
+      // selects the whole thing (deleting it removes everything, per the
+      // staircase-height slider's Delete button); tapping a pillar or the
+      // ceiling specifically selects just that part, so the global Delete
+      // button (up top) can remove only that piece and leave the rest.
+      if (kind === "balcony" || kind === "balcony-pillar" || kind === "balcony-ceiling") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        const bal = (state.balconies || []).find((b) => b.id === obj.userData.id);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedOpeningId(null);
+        setSelectedBalconyId(obj.userData.id);
+        setSelectedBalconyPart(kind === "balcony-pillar" ? "pillars" : kind === "balcony-ceiling" ? "ceiling" : null);
+        if (bal) {
+          setBalconyStairHeight(bal.platformHeight || 3 * FT);
+          setBalconyPlatformWidth(bal.platformWidth || 10 * FT);
+        }
+        return;
+      }
+
+      // A window or door cutout in a wall -- selectable from any tool (not
+      // just Window/Door), same as stairs and balconies. There's more
+      // parametric control planned for doors specifically down the line;
+      // this selection is the foundation that'll hang off of.
+      if (kind === "opening") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+        setSelectedOpeningId(obj.userData.id);
+        return;
+      }
+
+      // Move Walls: tapping the floor selects (or detects) the enclosed room
+      // under that point and lets you drag it away; tapping a wall/partition
+      // switches editing focus onto whatever it belongs to (the floor itself,
+      // or one specific room) before continuing as normal.
+      if (toolRef.current === "move" && kind === "floor") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        const floorEntry = floors.find((f) => f.id === activeFloorId);
+        if (!floorEntry) return;
+        if (ownerRoomId != null) {
+          const room = (floorEntry.rooms || []).find((r) => r.id === ownerRoomId);
+          if (!room) return;
+          pushUndo();
+          switchActiveRoom(ownerRoomId);
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = {
+            type: "room-drag", roomId: ownerRoomId, plane, start: hit.point.clone(),
+            startOffsetX: room.offsetX || 0, startOffsetZ: room.offsetZ || 0,
+          };
+          capture(e);
+          return;
+        }
+        const rooms = detectRooms();
+        const hx = hit.point.x, hz = hit.point.z;
+        const found = rooms.find((r) => r.floorRects.some((fr) => hx >= fr.x0 - 0.02 && hx <= fr.x1 + 0.02 && hz >= fr.z0 - 0.02 && hz <= fr.z1 + 0.02));
+        if (!found) return;
+        // extracts the region into its own selected, draggable room right
+        // away -- release without moving and it just stays selected in
+        // place (showing the room menu); keep dragging and it moves.
+        commitRoomFromFound(found, hit.point.clone());
+        capture(e);
+        return;
+      }
+
+      // Stairs tool: tapping the plain floor and dragging draws the
+      // footprint rectangle for a new staircase (tapping an existing one is
+      // now handled tool-agnostically above).
+      if (toolRef.current === "stairs") {
+        if (kind === "floor") {
+          const ownerRoomId = obj.userData.ownerRoomId ?? null;
+          if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+          pushUndo();
+          setSelectedStairId(null);
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "stair-draw", plane, x0: hit.point.x, z0: hit.point.z, x1: hit.point.x, z1: hit.point.z };
+          capture(e);
+        }
+        return;
+      }
+      // Props tool: tapping the floor drops the currently-selected shape
+      // right there. Not a drag gesture -- one tap, one prop placed. The
+      // balcony "shape" is the exception -- it's drawn along a wall (see
+      // the pending-balcony branch below), so a floor tap does nothing.
+      if (toolRef.current === "props" && propsShapeRef.current !== "balcony") {
+        if (kind === "floor") {
+          const ownerRoomId = obj.userData.ownerRoomId ?? null;
+          if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+          pushUndo();
+          if (!state.props) state.props = [];
+          state.props.push({ id: idSeq++, kind: propsShapeRef.current, x: hit.point.x, z: hit.point.z });
+          rebuild();
+        }
+        return;
+      }
+      if (kind === "wall" || kind === "partition" || kind === "selection") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+      }
+
+      // grabbing an existing partition directly (outside the cut tool) always
+      // adjusts its length/direction -- a dedicated, always-available gesture.
+      if (kind === "partition" && toolRef.current !== "cut") {
+        const p = state.partitions.find((x) => x.id === obj.userData.id);
+        if (!p) return;
+        const parent = getPanelInfo(p.panel);
+        if (!parent) return;
+        pushUndo();
+        dragState = {
+          type: "partition-redrag", id: p.id,
+          normal: parent.normal, plane: makeVerticalPlane(parent.normal, hit.point),
+          start: hit.point.clone(), baseExt: p.ext,
+        };
+        capture(e);
+        return;
+      }
+
+      let panelKey = null;
+      if (kind === "wall" || kind === "selection") panelKey = obj.userData.panel;
+      else if (kind === "partition") panelKey = "pt:" + obj.userData.id; // only reached in the cut tool
+      if (!panelKey) return;
+      const info = getPanelInfo(panelKey);
+      if (!info) return;
+      const hp = snapToPanelPlane(info, hit.point);
+
+      if (toolRef.current === "cut") {
+        // the cut tool has one job -- no need to arm with a hold first, tap
+        // and drag immediately starts marking the opening's width
+        dragState = { type: "pending-cut", panelKey, info, hitPoint: hp, startScreen: { x: e.clientX, y: e.clientY } };
+      } else if (toolRef.current === "door") {
+        // doors are a fixed width (3ft), floor to lintel at the current
+        // door-height setting -- a single tap places one centered on the
+        // tap point, no drag needed.
+        pushUndo();
+        const doorWidth = 3 * FT;
+        const u = panelU(info, hp);
+        let u0 = u - doorWidth / 2, u1 = u + doorWidth / 2;
+        if (u0 < info.u0) { u0 = info.u0; u1 = u0 + doorWidth; }
+        if (u1 > info.u1) { u1 = info.u1; u0 = u1 - doorWidth; }
+        if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(panelKey, u0, u1)) {
+          state.openings = state.openings.filter((o) => !(o.panel === panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
+          state.openings.push({ id: idSeq++, panel: panelKey, u0, u1, height: doorHeightRef.current, isDoor: true });
+          rebuild();
+        }
+      } else if (toolRef.current === "props" && propsShapeRef.current === "balcony") {
+        // the staircase-balcony assembly is drawn along a wall exactly like
+        // a window (tap and drag to mark its span), not placed on the
+        // floor like the other props -- so it gets its own wall-drag entry
+        // point here rather than going through the floor-tap prop handler.
+        // which side of the wall this was drawn on decides which side the
+        // whole structure gets built on -- compare the RAW hit point
+        // (before it gets snapped onto the wall's centerline plane) against
+        // the wall's centerline, since the snapped point would always read
+        // as exactly on the line and give the same answer every time.
+        const thickCoord = info.thickAxis === "x" ? hit.point.x : hit.point.z;
+        const normalComponent = info.thickAxis === "x" ? info.normal.x : info.normal.z;
+        const side = Math.sign((thickCoord - info.coord) * normalComponent) || 1;
+        dragState = { type: "pending-balcony", panelKey, info, hitPoint: hp, side, startScreen: { x: e.clientX, y: e.clientY } };
+      } else {
+        const t = armTimer();
+        dragState = {
+          type: "pending", panelKey, info, hitPoint: hp,
+          selIdAtPoint: kind === "selection" ? obj.userData.id : null,
+          startScreen: { x: e.clientX, y: e.clientY }, token: t.token, holdTimer: t.id,
+        };
+      }
+      capture(e);
+    }
+
+    function onPointerMove(e) {
+      if (activePointers.has(e.pointerId)) activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (dividerDragActive) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        const nx = (e.clientX - rect.left) / rect.width;
+        const ny = (e.clientY - rect.top) / rect.height;
+        splitX = Math.min(0.82, Math.max(0.18, nx));
+        splitY = Math.min(0.82, Math.max(0.18, ny));
+        return;
+      }
+
+      if (!dragState && !orbiting && !pinchState) {
+        const ctx = updateInteractionContext(e.clientX, e.clientY);
+        if (ctx === "divider") {
+          renderer.domElement.style.cursor = "move";
+          return;
+        }
+      }
+
+      if (pinchState) {
+        if (e.pointerType === "touch") e.preventDefault();
+        const pts = Array.from(activePointers.values()).slice(0, 2);
+        if (pts.length < 2) return;
+        const dist = pointerDist(pts[0], pts[1]);
+        const mid = pointerMid(pts[0], pts[1]);
+        if (pinchState.lastDist != null) {
+          const scale = dist / (pinchState.lastDist || 1);
+          const dx = mid.x - pinchState.lastMid.x;
+          const dy = mid.y - pinchState.lastMid.y;
+          const quadPane = pinchState.pane;
+          if (quadPane) {
+            // pinching inside a quad-view pane only zooms/pans that pane,
+            // same principle as single-finger drag/wheel on it.
+            const st = quadPaneState[quadPane];
+            st.radius = Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, st.radius / scale));
+            const panScale = st.radius * 0.0022;
+            const paneCam = quadPane === "orbit" ? camera : quadPane === "top" ? orthoTopCam : quadPane === "front" ? orthoFrontCam : orthoLeftCam;
+            const e_ = paneCam.matrixWorld.elements;
+            const camRight = new THREE.Vector3(e_[0], e_[1], e_[2]);
+            const camUp = new THREE.Vector3(e_[4], e_[5], e_[6]);
+            st.target.addScaledVector(camRight, -dx * panScale);
+            st.target.addScaledVector(camUp, dy * panScale);
+          } else {
+            radius = Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, radius / scale));
+            const panScale = radius * 0.0022;
+            const e_ = activeCamera.matrixWorld.elements;
+            const camRight = new THREE.Vector3(e_[0], e_[1], e_[2]);
+            const camUp = new THREE.Vector3(e_[4], e_[5], e_[6]);
+            target.addScaledVector(camRight, -dx * panScale);
+            target.addScaledVector(camUp, dy * panScale);
+            updateCamera();
+          }
+        }
+        pinchState.lastDist = dist;
+        pinchState.lastMid = mid;
+        return;
+      }
+
+      if (orbiting) {
+        const dx = e.clientX - orbiting.x;
+        const dy = e.clientY - orbiting.y;
+        const movedSoFar = orbiting.moved + Math.hypot(dx, dy);
+        const quadPane = viewLayoutRef.current === "quad" ? currentGesturePaneDir : null;
+        if (quadPane === "orbit") {
+          // quad view's own orbit pane -- has its own theta/phi, separate
+          // from single-view orbit and from the other 3 panes.
+          const st = quadPaneState.orbit;
+          st.theta -= dx * 0.006;
+          st.phi = Math.min(1.45, Math.max(0.25, st.phi - dy * 0.006));
+        } else if (quadPane) {
+          // one of quad view's fixed ortho panes -- pans only that pane's
+          // own target, leaving the other 3 panes untouched.
+          const st = quadPaneState[quadPane];
+          const panScale = st.radius * 0.0022;
+          const e_ = interactionCamera.matrixWorld.elements;
+          const camRight = new THREE.Vector3(e_[0], e_[1], e_[2]);
+          const camUp = new THREE.Vector3(e_[4], e_[5], e_[6]);
+          st.target.addScaledVector(camRight, -dx * panScale);
+          st.target.addScaledVector(camUp, dy * panScale);
+        } else if (!currentGestureIsOrtho) {
+          // this also covers walk mode, which forces viewMode to "orbit" --
+          // dragging empty space orbits the follow camera around the
+          // character exactly like it orbits a fixed target otherwise.
+          theta -= dx * 0.006;
+          phi = Math.min(1.45, Math.max(0.25, phi - dy * 0.006));
+        } else {
+          // fixed orthographic views (single-view mode):
+          // dragging empty space pans instead of orbiting
+          const panScale = radius * 0.0022;
+          const e_ = interactionCamera.matrixWorld.elements;
+          const camRight = new THREE.Vector3(e_[0], e_[1], e_[2]);
+          const camUp = new THREE.Vector3(e_[4], e_[5], e_[6]);
+          target.addScaledVector(camRight, -dx * panScale);
+          target.addScaledVector(camUp, dy * panScale);
+        }
+        orbiting = { x: e.clientX, y: e.clientY, moved: movedSoFar };
+        if (viewLayoutRef.current !== "quad") updateCamera();
+        return;
+      }
+      if (!dragState) {
+        const hit = pick(e);
+        renderer.domElement.style.cursor = hit ? "pointer" : "grab";
+        return;
+      }
+
+      if (dragState.type === "pending") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (!dragState.armed && dist > MOVE_PX) {
+          clearTimeout(dragState.holdTimer);
+          pushUndo();
+          const info = dragState.info;
+          const cls = classifyDrag(info, dragState.hitPoint, dx, dy);
+          if (cls === "select") {
+            const u = panelU(info, dragState.hitPoint);
+            dragState = { type: "select-drag", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
+            previewSelection = { id: "__preview__", panel: dragState.panelKey, u0: u, u1: u };
+          } else if (dragState.selIdAtPoint) {
+            const sel = state.selections.find((s) => s.id === dragState.selIdAtPoint);
+            if (sel) {
+              state.selections = state.selections.filter((s) => s.id !== sel.id);
+              const id = idSeq++;
+              state.bumpouts.push({ id, panel: dragState.panelKey, u0: sel.u0, u1: sel.u1, depth: 0 });
+              dragState = { type: "panel-extrude", panelKey: "bf:" + id, thickAxis: info.thickAxis, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), startCoord: info.coord };
+            } else {
+              dragState = { type: "panel-extrude", panelKey: dragState.panelKey, thickAxis: info.thickAxis, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), startCoord: info.coord };
+            }
+          } else {
+            dragState = { type: "panel-extrude", panelKey: dragState.panelKey, thickAxis: info.thickAxis, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), startCoord: info.coord };
+          }
+          if (dragState.type === "panel-extrude") setSelectedPanel(dragState.panelKey);
+          rebuild();
+          return;
+        }
+        if (dragState.armed && dist > 2) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          const id = idSeq++;
+          state.partitions.push({ id, panel: dragState.panelKey, u, ext: 0 });
+          dragState = { type: "partition-draw", id, normal: info.normal, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), baseExt: 0 };
+          rebuild();
+          return;
+        }
+        return;
+      }
+
+      if (dragState.type === "pending-cut") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          clearTimeout(dragState.holdTimer);
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "opening-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: openingHeightRef.current };
+          rebuild();
+        }
+        return;
+      }
+
+      if (dragState.type === "pending-balcony") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "balcony-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u, side: dragState.side };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: 7 * FT };
+          rebuild();
+        }
+        return;
+      }
+
+      const ray = rayFromEvent(e);
+
+      if (dragState.type === "panel-extrude") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const delta = dragState.thickAxis === "z" ? pt.z - dragState.start.z : pt.x - dragState.start.x;
+        applyPanelExtrude(dragState.panelKey, dragState.startCoord + delta);
+        rebuild();
+      } else if (dragState.type === "select-drag") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewSelection = { id: "__preview__", panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u) };
+        rebuild();
+      } else if (dragState.type === "partition-draw" || dragState.type === "partition-redrag") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const t = pt.clone().sub(dragState.start).dot(dragState.normal);
+        const p = state.partitions.find((pp) => pp.id === dragState.id);
+        const parent = p ? getPanelInfo(p.panel) : null;
+        if (p && parent) {
+          const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+          const rawExt = (dragState.baseExt || 0) + t;
+          const farSnapped = snapValue(parent.coord + axisSign * rawExt);
+          p.ext = clampPartitionExt(p.panel, (farSnapped - parent.coord) * axisSign);
+        }
+        rebuild();
+      } else if (dragState.type === "opening-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: openingHeightRef.current };
+        rebuild();
+      } else if (dragState.type === "balcony-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
+        rebuild();
+      } else if (dragState.type === "room-move") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const dx = pt.x - dragState.start.x;
+        const dz = pt.z - dragState.start.z;
+        const entry = floors.find((f) => f.id === activeFloorId);
+        if (entry) {
+          entry.offsetX = snapValue(dragState.startOffsetX + dx);
+          entry.offsetZ = snapValue(dragState.startOffsetZ + dz);
+          restackFloors();
+        }
+      } else if (dragState.type === "room-drag") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const dx = pt.x - dragState.start.x;
+        const dz = pt.z - dragState.start.z;
+        const floorEntry = floors.find((f) => f.id === activeFloorId);
+        const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === dragState.roomId);
+        if (room) {
+          let ox = dragState.startOffsetX + dx;
+          let oz = dragState.startOffsetZ + dz;
+          if (snapEnabledRef.current) {
+            const snapped = snapRoomOffset(room, ox, oz);
+            ox = snapped.ox; oz = snapped.oz;
+          }
+          room.offsetX = ox;
+          room.offsetZ = oz;
+          rebuild();
+        }
+      } else if (dragState.type === "stair-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        // clamp to the room's actual interior so a drag toward a wall can
+        // never record an endpoint beyond it -- previously the plane the
+        // drag raycasts against is infinite, so the value kept extending
+        // past the wall even though the wall visually hid the preview,
+        // and the built staircase would poke out through it.
+        const fp = state.footprint;
+        const margin = (state.thickness || 0.12) / 2 + 0.02;
+        const clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, pt.x));
+        const clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, pt.z));
+        dragState.x1 = snapValue(clampedX);
+        dragState.z1 = snapValue(clampedZ);
+        // compute the same dominant-axis choice the final commit uses, live,
+        // so the preview actually shows stepped, oriented geometry while
+        // dragging instead of a flat rectangle -- you can see which axis
+        // it's about to commit to before you let go, and adjust if it's
+        // not the one you meant.
+        const pdx = dragState.x1 - dragState.x0;
+        const pdz = dragState.z1 - dragState.z0;
+        const pAxis = Math.abs(pdx) >= Math.abs(pdz) ? "x" : "z";
+        previewStair = {
+          x0: Math.min(dragState.x0, dragState.x1), x1: Math.max(dragState.x0, dragState.x1),
+          z0: Math.min(dragState.z0, dragState.z1), z1: Math.max(dragState.z0, dragState.z1),
+          axis: pAxis,
+          start: pAxis === "x" ? dragState.x0 : dragState.z0,
+          end: pAxis === "x" ? dragState.x1 : dragState.z1,
+          widthMin: pAxis === "x" ? Math.min(dragState.z0, dragState.z1) : Math.min(dragState.x0, dragState.x1),
+          widthMax: pAxis === "x" ? Math.max(dragState.z0, dragState.z1) : Math.max(dragState.x0, dragState.x1),
+        };
+        rebuild();
+      }
+    }
+
+    function onPointerUp(e) {
+      const wasMulti = activePointers.size >= 2;
+      if (e && activePointers.has(e.pointerId)) activePointers.delete(e.pointerId);
+      if (wasMulti) {
+        if (activePointers.size < 2) pinchState = null;
+        return;
+      }
+      if (dividerDragActive) {
+        dividerDragActive = false;
+        return;
+      }
+      if (orbiting) {
+        const wasTap = orbiting.moved < 4;
+        orbiting = null;
+        renderer.domElement.style.cursor = "grab";
+        if (wasTap) {
+          setSelectedPanel(null);
+          setSelectedStairId(null);
+          setSelectedBalconyId(null);
+          setSelectedBalconyPart(null);
+          setSelectedOpeningId(null);
+          switchActiveRoom(null);
+        }
+        return;
+      }
+      if (!dragState) return;
+      if (dragState.holdTimer) clearTimeout(dragState.holdTimer);
+
+      if (dragState.type === "pending") {
+        if (dragState.selIdAtPoint) {
+          pushUndo();
+          state.selections = state.selections.filter((s) => s.id !== dragState.selIdAtPoint);
+        }
+        selectPanelForHeight(dragState.panelKey);
+      } else if (dragState.type === "pending-cut") {
+        selectPanelForHeight(dragState.panelKey);
+      } else if (dragState.type === "select-drag") {
+        const u0 = Math.min(dragState.u0, dragState.u1);
+        const u1 = Math.max(dragState.u0, dragState.u1);
+        if (u1 - u0 >= MIN_HIGHLIGHT && !wouldOverlapSelection(dragState.panelKey, u0, u1) && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
+          state.selections.push({ id: idSeq++, panel: dragState.panelKey, u0, u1 });
+        }
+        previewSelection = null;
+      } else if (dragState.type === "panel-extrude") {
+        if (dragState.panelKey.startsWith("bf:")) {
+          const id = Number(dragState.panelKey.slice(3));
+          const bo = state.bumpouts.find((b) => b.id === id);
+          if (bo && Math.abs(bo.depth) < 0.04) state.bumpouts = state.bumpouts.filter((b) => b.id !== id);
+        }
+      } else if (dragState.type === "partition-draw" || dragState.type === "partition-redrag") {
+        const p = state.partitions.find((pp) => pp.id === dragState.id);
+        if (p && Math.abs(p.ext) < 0.04) state.partitions = state.partitions.filter((pp) => pp.id !== p.id);
+      } else if (dragState.type === "opening-draw") {
+        const u0 = Math.min(dragState.u0, dragState.u1);
+        const u1 = Math.max(dragState.u0, dragState.u1);
+        if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
+          // a new opening that overlaps existing ones on the same panel
+          // replaces them, rather than being blocked -- drawing a wider
+          // window over a narrower one simply supersedes it.
+          state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
+          state.openings.push({
+            id: idSeq++, panel: dragState.panelKey, u0, u1, height: openingHeightRef.current, dividers: openingDividersRef.current,
+            dividerAxis: openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical",
+          });
+        }
+        previewOpening = null;
+      } else if (dragState.type === "balcony-draw") {
+        const u0 = Math.min(dragState.u0, dragState.u1);
+        const u1 = Math.max(dragState.u0, dragState.u1);
+        const MIN_BALCONY = 6 * FT; // needs room for the center door plus a sliver of window on each side
+        if (u1 - u0 >= MIN_BALCONY && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
+          state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
+          const bid = idSeq++;
+          const doorW = 3 * FT;
+          const mid = (u0 + u1) / 2;
+          const doorU0 = mid - doorW / 2, doorU1 = mid + doorW / 2;
+          const dividerAxis = openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical";
+          const winHeight = 7 * FT;
+          const platformHeight = 3 * FT;
+          // always leave a solid mullion gap flanking the door -- a
+          // deliberate architectural break between window and door, present
+          // no matter what the divider slider is set to.
+          const doorMullion = 0.2;
+          const leftWinU1 = doorU0 - doorMullion;
+          const rightWinU0 = doorU1 + doorMullion;
+          // a divider roughly every 3ft along whichever window section --
+          // "2 dividers by default" for a typical-width section, scaling
+          // up for a longer drag.
+          function dividersForSpan(span) {
+            const segs = Math.max(1, Math.round(span / (3 * FT)));
+            return Math.max(0, segs - 1);
+          }
+          const leftSpan = leftWinU1 - u0;
+          if (leftSpan > 0.3) {
+            state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1: leftWinU1, height: winHeight, dividers: dividersForSpan(leftSpan), dividerAxis, bottomOverride: platformHeight, fromBalcony: bid });
+          }
+          const rightSpan = u1 - rightWinU0;
+          if (rightSpan > 0.3) {
+            state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0: rightWinU0, u1, height: winHeight, dividers: dividersForSpan(rightSpan), dividerAxis, bottomOverride: platformHeight, fromBalcony: bid });
+          }
+          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0: doorU0, u1: doorU1, height: doorHeightRef.current, isDoor: true, bottomOverride: platformHeight, fromBalcony: bid });
+          if (!state.balconies) state.balconies = [];
+          state.balconies.push({ id: bid, panel: dragState.panelKey, u0, u1, dividerAxis, side: dragState.side || 1, platformHeight });
+          setSelectedBalconyId(bid);
+          setBalconyStairHeight(platformHeight);
+        }
+        previewOpening = null;
+      } else if (dragState.type === "stair-draw") {
+        const dx = dragState.x1 - dragState.x0;
+        const dz = dragState.z1 - dragState.z0;
+        if (Math.abs(dx) >= MIN_STAIR_SIZE && Math.abs(dz) >= MIN_STAIR_SIZE) {
+          const id = idSeq++;
+          if (!state.stairs) state.stairs = [];
+          // the ascending axis follows whichever direction was dragged
+          // farther (so stairs drawn along the room's length climb along
+          // its length, drawn across the width climb across it); the click
+          // point is zero height, the release point is full room height.
+          const stair = Math.abs(dx) >= Math.abs(dz)
+            ? { id, axis: "x", start: dragState.x0, end: dragState.x1, widthMin: Math.min(dragState.z0, dragState.z1), widthMax: Math.max(dragState.z0, dragState.z1), steps: defaultStairSteps(state.height) }
+            : { id, axis: "z", start: dragState.z0, end: dragState.z1, widthMin: Math.min(dragState.x0, dragState.x1), widthMax: Math.max(dragState.x0, dragState.x1), steps: defaultStairSteps(state.height) };
+          state.stairs.push(stair);
+          setSelectedStairId(id);
+          setStairSteps(stair.steps);
+          // if a layer already sits above this one, retroactively cut its
+          // headroom opening now too -- not just when a new layer is
+          // created after the fact. Only handled for stairs on the floor
+          // itself (not inside an extracted room), since a room's offset
+          // would need to be folded into the hole's world position.
+          if (activeRoomId == null) {
+            const idx = floors.findIndex((f) => f.id === activeFloorId);
+            const aboveEntry = idx !== -1 ? floors[idx + 1] : null;
+            if (aboveEntry) {
+              if (!aboveEntry.data.floorHoles) aboveEntry.data.floorHoles = [];
+              const cut = computeStairHoleCut(stair);
+              aboveEntry.data.floorHoles.push({ id: idSeq++, xMin: cut.x0, xMax: cut.x1, zMin: cut.z0, zMax: cut.z1, sourceStairId: id });
+              rebuildFloorEntry(aboveEntry, false);
+            }
+          }
+        }
+        previewStair = null;
+      }
+
+      dragState = null;
+      renderer.domElement.style.cursor = "grab";
+      rebuild();
+    }
+
+    function onWheel(e) {
+      e.preventDefault();
+      if (viewLayoutRef.current === "quad") {
+        const ctx = updateInteractionContext(e.clientX, e.clientY);
+        if (ctx === "divider") return;
+        const st = quadPaneState[currentGesturePaneDir];
+        if (st) st.radius = Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, st.radius + e.deltaY * 0.01));
+        return;
+      }
+      radius = Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, radius + e.deltaY * 0.01));
+      updateCamera();
+    }
+
+    const el = renderer.domElement;
+    el.addEventListener("pointerdown", onPointerDown, { passive: false });
+    el.addEventListener("pointermove", onPointerMove, { passive: false });
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerUp);
+    el.addEventListener("wheel", onWheel, { passive: false });
+    // belt-and-suspenders: some mobile browsers still try to interpret a
+    // second touch as a native gesture (page pinch-zoom, swipe-back) even
+    // with touch-action: none on the canvas: block it explicitly too.
+    el.addEventListener("touchstart", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+    el.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+    el.addEventListener("gesturestart", (e) => e.preventDefault());
+    el.addEventListener("gesturechange", (e) => e.preventDefault());
+
+    function onKeyDown(e) {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      if (e.key === "z" || e.key === "Z") {
+        e.preventDefault();
+        if (e.shiftKey) performRedo(); else performUndo();
+      } else if (e.key === "y" || e.key === "Y") {
+        e.preventDefault();
+        performRedo();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+
+    function onResize() {
+      width = mount.clientWidth || 1;
+      height = mount.clientHeight || 1;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      applyViewShift(camera, width, height);
+      renderer.setSize(width, height);
+      updateCamera();
+    }
+    const ro = new ResizeObserver(onResize);
+    ro.observe(mount);
+
+    function resetAll() {
+      pushUndo();
+      state.footprint = { xMin: -DEFAULT_ROOM_HALF_X, xMax: DEFAULT_ROOM_HALF_X, zMin: -DEFAULT_ROOM_HALF_Z, zMax: DEFAULT_ROOM_HALF_Z };
+      state.selections = [];
+      state.bumpouts = [];
+      state.partitions = [];
+      state.openings = [];
+      state.panelHeights = {};
+      state.height = WALL_HEIGHT;
+      restackFloors();
+      previewSelection = null;
+      previewOpening = null;
+      dragState = null;
+      rebuild();
+      syncFloorsToReact();
+    }
+    resetFnRef.current = resetAll;
+    rebuildModelRef.current = rebuild;
+
+    function resetEverything() {
+      pushUndo();
+      Array.from(roomGroups.values()).forEach((rg) => { clearGroup(rg); if (rg.parent) rg.parent.remove(rg); });
+      roomGroups.clear();
+      Array.from(roomContainers.values()).forEach((rc) => { clearGroup(rc); scene.remove(rc); });
+      roomContainers.clear();
+      Array.from(floorGroups.keys()).forEach((id) => {
+        const g = floorGroups.get(id);
+        if (g) { clearGroup(g); scene.remove(g); }
+      });
+      floorGroups.clear();
+      const newFloorId = nextFloorId++;
+      floors = [{ id: newFloorId, data: makeFloorData(), rooms: [] }];
+      activeFloorId = newFloorId;
+      activeRoomId = null;
+      isolatedFloorId = null;
+      hiddenFloorIds.clear();
+      roomClipboard = null;
+      roomPasteCount = 0;
+      setHasRoomClipboard(false);
+      const g = new THREE.Group();
+      scene.add(g);
+      floorGroups.set(newFloorId, g);
+      restackFloors();
+      state = floors[0].data;
+      dragState = null;
+      orbiting = null;
+      pinchState = null;
+      setSelectedPanel(null);
+      setSelectedRoomId(null);
+      setIsolatedFloorIdState(null);
+      setHiddenIds([]);
+      target.set(0, state.height * 0.32, 0);
+      updateCamera();
+      rebuild();
+      syncFloorsToReact();
+    }
+    resetEverythingRef.current = resetEverything;
+
+    rebuild();
+
+    function syncFloorsToReact() {
+      setFloorIds(floors.map((f) => f.id));
+      setActiveFloorIdState(activeFloorId);
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (entry) {
+        setFloorHeight(entry.data.height);
+        setWallThickness(entry.data.thickness);
+      }
+    }
+
+    function refreshThumbnail(floorId) {
+      const canvas = thumbCanvasMapRef.current.get(floorId);
+      if (!canvas) return;
+      const entry = floors.find((f) => f.id === floorId);
+      if (!entry) return;
+      const savedState = state;
+      state = entry.data;
+      const lines = [];
+      const addLines = (pk) => {
+        const info = getPanelInfo(pk);
+        if (!info) return;
+        // draw the wall as solid line(s), but leave a gap wherever a
+        // bump-out opens through it into another connected space --
+        // otherwise the plan shows a wall where there is really an L-shaped
+        // opening. Window/door openings don't affect the plan silhouette,
+        // so those still draw as a continuous wall.
+        const cuts = bumpoutsFor(pk)
+          .map((b) => ({
+            u0: Math.max(info.u0, Math.min(b.u0, info.u1)),
+            u1: Math.max(info.u0, Math.min(b.u1, info.u1)),
+            depth: b.depth,
+          }))
+          .filter((c) => Math.abs(c.depth) > 0.02 && c.u1 - c.u0 > 0.05)
+          .sort((a, b) => a.u0 - b.u0);
+        let cursor = info.u0;
+        const segs = [];
+        cuts.forEach((c) => {
+          if (c.u0 > cursor + 0.001) segs.push([cursor, c.u0]);
+          cursor = c.u1;
+        });
+        if (cursor < info.u1 - 0.001) segs.push([cursor, info.u1]);
+        segs.forEach(([a, b]) => {
+          if (info.lengthAxis === "x") lines.push([a, info.coord, b, info.coord]);
+          else lines.push([info.coord, a, info.coord, b]);
+        });
+      };
+      const keys = ["north", "south", "east", "west"];
+      state.bumpouts.forEach((b) => {
+        if (Math.abs(b.depth) <= 0.02) return;
+        keys.push("bf:" + b.id);
+        const touch = bumpoutCornerTouch(b);
+        if (!touch.min) keys.push("bs0:" + b.id);
+        if (!touch.max) keys.push("bs1:" + b.id);
+      });
+      keys.forEach(addLines);
+      state.partitions.forEach((p) => addLines("pt:" + p.id));
+      const fp = state.footprint;
+      state = savedState;
+
+      // rooms pulled out of this floor draw as their own little box, offset
+      // to wherever they've been dragged, so the thumbnail actually reflects
+      // a detached room instead of looking like nothing changed. If the room
+      // has curved corners on, approximate the same rounded corners here too
+      // (matching renderCurvedCorners' 5-segment arc) so the plan view isn't
+      // misleadingly square. This doesn't account for bump-out-adjacent
+      // corners being left sharp the way the real 3D geometry does -- a
+      // minor mismatch, acceptable for a low-detail preview.
+      (entry.rooms || []).forEach((room) => {
+        const rf = room.data.footprint;
+        const ox = room.offsetX || 0, oz = room.offsetZ || 0;
+        const cc = room.data.curvedCorners;
+        const R = cc && cc.enabled ? Math.min(cc.radius, (rf.xMax - rf.xMin) / 2 - 0.15, (rf.zMax - rf.zMin) / 2 - 0.15) : 0;
+        if (R > 0.05) {
+          const segs = 5;
+          lines.push([rf.xMin + R + ox, rf.zMin + oz, rf.xMax - R + ox, rf.zMin + oz]);
+          lines.push([rf.xMax + ox, rf.zMin + R + oz, rf.xMax + ox, rf.zMax - R + oz]);
+          lines.push([rf.xMax - R + ox, rf.zMax + oz, rf.xMin + R + ox, rf.zMax + oz]);
+          lines.push([rf.xMin + ox, rf.zMax - R + oz, rf.xMin + ox, rf.zMin + R + oz]);
+          const corners = [
+            { cx: rf.xMin + R, cz: rf.zMin + R, a0: 180, a1: 270 },
+            { cx: rf.xMax - R, cz: rf.zMin + R, a0: 270, a1: 360 },
+            { cx: rf.xMax - R, cz: rf.zMax - R, a0: 0, a1: 90 },
+            { cx: rf.xMin + R, cz: rf.zMax - R, a0: 90, a1: 180 },
+          ];
+          corners.forEach((c) => {
+            for (let i = 0; i < segs; i++) {
+              const ang0 = (c.a0 + (c.a1 - c.a0) * (i / segs)) * Math.PI / 180;
+              const ang1 = (c.a0 + (c.a1 - c.a0) * ((i + 1) / segs)) * Math.PI / 180;
+              const x0 = c.cx + R * Math.cos(ang0), z0 = c.cz + R * Math.sin(ang0);
+              const x1 = c.cx + R * Math.cos(ang1), z1 = c.cz + R * Math.sin(ang1);
+              lines.push([x0 + ox, z0 + oz, x1 + ox, z1 + oz]);
+            }
+          });
+          return;
+        }
+        lines.push([rf.xMin + ox, rf.zMin + oz, rf.xMax + ox, rf.zMin + oz]);
+        lines.push([rf.xMax + ox, rf.zMin + oz, rf.xMax + ox, rf.zMax + oz]);
+        lines.push([rf.xMax + ox, rf.zMax + oz, rf.xMin + ox, rf.zMax + oz]);
+        lines.push([rf.xMin + ox, rf.zMax + oz, rf.xMin + ox, rf.zMin + oz]);
+      });
+
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#B9B7B0";
+      ctx.fillRect(0, 0, W, H);
+      let minX = fp.xMin, maxX = fp.xMax, minZ = fp.zMin, maxZ = fp.zMax;
+      lines.forEach(([x0, z0, x1, z1]) => {
+        minX = Math.min(minX, x0, x1); maxX = Math.max(maxX, x0, x1);
+        minZ = Math.min(minZ, z0, z1); maxZ = Math.max(maxZ, z0, z1);
+      });
+      const pad = W * 0.09;
+      const spanX = Math.max(0.5, maxX - minX), spanZ = Math.max(0.5, maxZ - minZ);
+      const scale = Math.min((W - 2 * pad) / spanX, (H - 2 * pad) / spanZ);
+      const ox = W / 2 - ((minX + maxX) / 2) * scale;
+      const oz = H / 2 - ((minZ + maxZ) / 2) * scale;
+      ctx.strokeStyle = "#2E2D28";
+      ctx.lineWidth = Math.max(1.5, W * 0.014);
+      lines.forEach(([x0, z0, x1, z1]) => {
+        ctx.beginPath();
+        ctx.moveTo(ox + x0 * scale, oz + z0 * scale);
+        ctx.lineTo(ox + x1 * scale, oz + z1 * scale);
+        ctx.stroke();
+      });
+    }
+    refreshThumbnailApiRef.current = refreshThumbnail;
+
+    // moves wall-editing focus onto a room (or back to the floor itself when
+    // id is null) -- everything else (tap a wall, cut an opening, add a
+    // partition) already works once `state` points at the right data object.
+    function switchActiveRoom(id) {
+      if (activeRoomId === id) return;
+      activeRoomId = id;
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      if (id == null) {
+        state = floorEntry ? floorEntry.data : makeFloorData();
+      } else {
+        const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === id);
+        state = room ? room.data : makeFloorData();
+        if (room) {
+          setRoomHeight(room.data.height);
+          const cc = room.data.curvedCorners || { enabled: false, radius: 0 };
+          setCurvedCornersOn(cc.enabled);
+          setCurvedCornersRadius(cc.radius || 0.6);
+        }
+      }
+      setSelectedPanel(null);
+      setSelectedRoomId(id);
+      setSelectedStairId(null);
+      setSelectedBalconyId(null);
+      setSelectedBalconyPart(null);
+      setSelectedOpeningId(null);
+      rebuild();
+    }
+    switchActiveRoomRef.current = switchActiveRoom;
+
+    function setActiveRoomHeight(h) {
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === activeRoomId);
+      if (!room) return;
+      room.data.height = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      rebuild();
+    }
+    roomHeightApiRef.current = { setHeight: setActiveRoomHeight };
+
+    function setActiveRoomCurvedCorners(enabled, radius) {
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === activeRoomId);
+      if (!room) return;
+      if (!room.data.curvedCorners) room.data.curvedCorners = { enabled: false, radius: 0 };
+      room.data.curvedCorners.enabled = enabled;
+      room.data.curvedCorners.radius = radius;
+      rebuild();
+    }
+    curvedCornersApiRef.current = {
+      setEnabled: (v) => setActiveRoomCurvedCorners(v, curvedCornersRadiusRef.current),
+      setRadius: (v) => setActiveRoomCurvedCorners(curvedCornersOnRef.current, v),
+    };
+
+    function setActiveBalconyHeight(h) {
+      const id = selectedBalconyIdRef.current;
+      if (id == null) return;
+      const bal = (state.balconies || []).find((b) => b.id === id);
+      if (!bal) return;
+      bal.platformHeight = Math.max(1 * FT, Math.min(state.height - 1.5 * FT, h));
+      rebuild();
+    }
+    balconyHeightApiRef.current = { setHeight: setActiveBalconyHeight };
+
+    function setActiveBalconyPlatformWidth(w) {
+      const id = selectedBalconyIdRef.current;
+      if (id == null) return;
+      const bal = (state.balconies || []).find((b) => b.id === id);
+      if (!bal) return;
+      bal.platformWidth = Math.max(3 * FT, Math.min(60 * FT, w));
+      rebuild();
+    }
+    balconyWidthApiRef.current = { setWidth: setActiveBalconyPlatformWidth };
+
+    function deleteActiveBalcony() {
+      const id = selectedBalconyIdRef.current;
+      if (id == null) return;
+      const part = selectedBalconyPartRef.current;
+      const bal = (state.balconies || []).find((b) => b.id === id);
+      pushUndo();
+      if (part === "pillars" && bal) {
+        bal.pillarsRemoved = true;
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+      } else if (part === "ceiling" && bal) {
+        bal.ceilingRemoved = true;
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+      } else {
+        // steps or platform selected (or no specific part) -- removes the
+        // whole assembly, including its window/door cutout in the wall.
+        state.balconies = (state.balconies || []).filter((b) => b.id !== id);
+        state.openings = (state.openings || []).filter((o) => o.fromBalcony !== id);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+      }
+      rebuild();
+    }
+    deleteBalconyRef.current = deleteActiveBalcony;
+
+    function deleteActiveOpening() {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.openings = (state.openings || []).filter((o) => o.id !== id);
+      setSelectedOpeningId(null);
+      rebuild();
+    }
+    deleteOpeningRef.current = deleteActiveOpening;
+
+    // ---------- voice command actions ----------
+    // A small, deliberately isolated set of actions a voice command can
+    // drive, each just calling straight into the same state + rebuild()
+    // convention every other tool in the app already uses -- nothing
+    // separate or parallel. This is a starting slice (room size, a
+    // straight partition, windows on a wall), not full tool coverage;
+    // more actions can be added here the same way as the voice feature grows.
+    function voiceSetRoomSize(widthFt, depthFt) {
+      pushUndo();
+      const hw = Math.max(3, widthFt) * FT / 2;
+      const hd = Math.max(3, depthFt) * FT / 2;
+      state.footprint = { xMin: -hw, xMax: hw, zMin: -hd, zMax: hd };
+      rebuild();
+    }
+    function voiceAddPartition(wall, positionFraction) {
+      const info = getPanelInfo(wall);
+      if (!info) return;
+      pushUndo();
+      const frac = Math.max(0.05, Math.min(0.95, positionFraction));
+      const u = info.u0 + (info.u1 - info.u0) * frac;
+      const id = idSeq++;
+      state.partitions.push({ id, panel: wall, u, ext: 0 });
+      rebuild();
+    }
+    function voiceAddWindowsToWall(wall, count) {
+      const info = getPanelInfo(wall);
+      if (!info) return;
+      pushUndo();
+      const n = Math.max(1, Math.min(8, Math.round(count)));
+      const span = info.u1 - info.u0;
+      const segW = span / n;
+      const winW = Math.min(segW * 0.6, 1.5);
+      for (let i = 0; i < n; i++) {
+        const center = info.u0 + segW * (i + 0.5);
+        const u0 = center - winW / 2, u1 = center + winW / 2;
+        if (wouldOverlapBumpout(wall, u0, u1)) continue;
+        state.openings = state.openings.filter((o) => !(o.panel === wall && rangesOverlap(u0, u1, o.u0, o.u1)));
+        state.openings.push({ id: idSeq++, panel: wall, u0, u1, height: DEFAULT_OPENING_HEIGHT, dividers: 1, dividerAxis: "vertical" });
+      }
+      rebuild();
+    }
+    function voiceAddWindowsAllWalls(countPerWall) {
+      pushUndo();
+      ["north", "south", "east", "west"].forEach((w) => voiceAddWindowsToWall(w, countPerWall));
+    }
+    voiceActionsRef.current = {
+      set_room_size: (a) => voiceSetRoomSize(a.width_ft, a.depth_ft),
+      add_partition: (a) => voiceAddPartition(a.wall, a.position_fraction ?? 0.5),
+      add_windows_to_wall: (a) => voiceAddWindowsToWall(a.wall, a.count ?? 2),
+      add_windows_all_walls: (a) => voiceAddWindowsAllWalls(a.count_per_wall ?? 2),
+    };
+    voiceRoomContextRef.current = () => {
+      const fp = state.footprint;
+      const wFt = ((fp.xMax - fp.xMin) / FT).toFixed(1);
+      const dFt = ((fp.zMax - fp.zMin) / FT).toFixed(1);
+      return `Current room footprint: ${wFt} ft (east-west, walls "east"/"west" run along this) by ${dFt} ft (north-south, walls "north"/"south" run along this). Existing partitions: ${state.partitions.length}. Existing openings: ${state.openings.length}.`;
+    };
+
+    function selectFloorById(id) {
+      const entry = floors.find((f) => f.id === id);
+      if (!entry) return;
+      const prevActiveId = activeFloorId;
+      activeFloorId = id;
+      activeRoomId = null;
+      state = entry.data;
+      dragState = null;
+      orbiting = null;
+      pinchState = null;
+      setSelectedPanel(null);
+      setSelectedRoomId(null);
+      setSelectedStairId(null);
+      rebuild();
+      if (prevActiveId !== id) {
+        const prevEntry = floors.find((f) => f.id === prevActiveId);
+        if (prevEntry) rebuildFloorEntry(prevEntry, false);
+      }
+      ensureActiveContentInFrame();
+      syncFloorsToReact();
+    }
+    selectFloorRef.current = selectFloorById;
+
+    function duplicateActiveFloor() {
+      pushUndo();
+      const idx = floors.findIndex((f) => f.id === activeFloorId);
+      if (idx === -1) return;
+      const src = floors[idx];
+      const clone = JSON.parse(JSON.stringify(src.data));
+      // each extracted room needs its own new id (ids must stay unique for
+      // picking/selection to work) -- this was previously omitted entirely,
+      // so a duplicated layer silently lost all of its rooms.
+      const clonedRooms = (src.rooms || []).map((r) => ({
+        id: idSeq++,
+        data: JSON.parse(JSON.stringify(r.data)),
+        offsetX: r.offsetX || 0,
+        offsetZ: r.offsetZ || 0,
+      }));
+      const newId = nextFloorId++;
+      const entry = { id: newId, data: clone, rooms: clonedRooms, offsetX: src.offsetX || 0, offsetZ: src.offsetZ || 0 };
+      floors.splice(idx + 1, 0, entry);
+      const g = new THREE.Group();
+      scene.add(g);
+      floorGroups.set(newId, g);
+      restackFloors();
+      if (isolatedFloorId != null) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      selectFloorById(newId);
+      applyVisibility();
+    }
+    duplicateFloorRef.current = duplicateActiveFloor;
+
+    function deleteActiveFloor() {
+      if (floors.length <= 1) return;
+      pushUndo();
+      const idx = floors.findIndex((f) => f.id === activeFloorId);
+      if (idx === -1) return;
+      const [removed] = floors.splice(idx, 1);
+      const g = floorGroups.get(removed.id);
+      if (g) { clearGroup(g); scene.remove(g); }
+      floorGroups.delete(removed.id);
+      (removed.rooms || []).forEach((room) => {
+        const rg = roomGroups.get(room.id);
+        if (rg) { clearGroup(rg); if (rg.parent) rg.parent.remove(rg); }
+        roomGroups.delete(room.id);
+      });
+      const rc = roomContainers.get(removed.id);
+      if (rc) { clearGroup(rc); scene.remove(rc); }
+      roomContainers.delete(removed.id);
+      hiddenFloorIds.delete(removed.id);
+      if (isolatedFloorId === removed.id) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      restackFloors();
+      const newIdx = Math.min(idx, floors.length - 1);
+      selectFloorById(floors[newIdx].id);
+      applyVisibility();
+      setHiddenIds(Array.from(hiddenFloorIds));
+    }
+    deleteFloorRef.current = deleteActiveFloor;
+
+    function applyVisibility() {
+      floorGroups.forEach((g, fid) => {
+        g.visible = isolatedFloorId != null ? fid === isolatedFloorId : !hiddenFloorIds.has(fid);
+      });
+    }
+
+    function addNewFloor() {
+      pushUndo();
+      const idx = floors.findIndex((f) => f.id === activeFloorId);
+      const newId = nextFloorId++;
+      const newData = makeFloorData();
+      // if the floor directly below has any staircases, automatically cut a
+      // matching headroom opening in this new floor above them
+      const belowEntry = idx !== -1 ? floors[idx] : null;
+      if (belowEntry && belowEntry.data.stairs && belowEntry.data.stairs.length) {
+        newData.floorHoles = belowEntry.data.stairs.map((st) => {
+          const cut = computeStairHoleCut(st);
+          return { id: idSeq++, xMin: cut.x0, xMax: cut.x1, zMin: cut.z0, zMax: cut.z1, sourceStairId: st.id };
+        });
+      }
+      const entry = { id: newId, data: newData };
+      if (idx === -1) floors.push(entry); else floors.splice(idx + 1, 0, entry);
+      const g = new THREE.Group();
+      scene.add(g);
+      floorGroups.set(newId, g);
+      restackFloors();
+      if (isolatedFloorId != null) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      selectFloorById(newId);
+      applyVisibility();
+    }
+    addFloorRef.current = addNewFloor;
+
+    function toggleHideFloor(id) {
+      if (hiddenFloorIds.has(id)) hiddenFloorIds.delete(id); else hiddenFloorIds.add(id);
+      applyVisibility();
+      setHiddenIds(Array.from(hiddenFloorIds));
+    }
+    toggleHideRef.current = toggleHideFloor;
+
+    function frameFloorEntry(entry) {
+      const g = floorGroups.get(entry.id);
+      if (!entry || !g) return;
+      const fp = entry.data.footprint;
+      let minX = fp.xMin, maxX = fp.xMax, minZ = fp.zMin, maxZ = fp.zMax;
+      (entry.rooms || []).forEach((r) => {
+        const ox = r.offsetX || 0, oz = r.offsetZ || 0;
+        const rfp = r.data.footprint;
+        minX = Math.min(minX, rfp.xMin + ox); maxX = Math.max(maxX, rfp.xMax + ox);
+        minZ = Math.min(minZ, rfp.zMin + oz); maxZ = Math.max(maxZ, rfp.zMax + oz);
+      });
+      target.x = (minX + maxX) / 2;
+      target.z = (minZ + maxZ) / 2;
+      target.y = g.position.y + entry.data.height * 0.32;
+      radius = Math.max(4, Math.max(maxX - minX, maxZ - minZ) * 1.3);
+    }
+
+    function frameAllContent() {
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, minY = Infinity, maxY = -Infinity;
+      floors.forEach((f) => {
+        const g = floorGroups.get(f.id);
+        if (!g) return;
+        const fp = f.data.footprint;
+        minX = Math.min(minX, fp.xMin); maxX = Math.max(maxX, fp.xMax);
+        minZ = Math.min(minZ, fp.zMin); maxZ = Math.max(maxZ, fp.zMax);
+        minY = Math.min(minY, g.position.y); maxY = Math.max(maxY, g.position.y + f.data.height);
+        (f.rooms || []).forEach((r) => {
+          const ox = r.offsetX || 0, oz = r.offsetZ || 0;
+          const rfp = r.data.footprint;
+          minX = Math.min(minX, rfp.xMin + ox); maxX = Math.max(maxX, rfp.xMax + ox);
+          minZ = Math.min(minZ, rfp.zMin + oz); maxZ = Math.max(maxZ, rfp.zMax + oz);
+        });
+      });
+      if (minX === Infinity) { minX = -3; maxX = 3; minZ = -3; maxZ = 3; minY = 0; maxY = state.height; }
+      target.x = (minX + maxX) / 2;
+      target.z = (minZ + maxZ) / 2;
+      target.y = (minY + maxY) / 2;
+      radius = Math.max(9.5, Math.max(maxX - minX, maxZ - minZ, maxY - minY) * 1.4);
+    }
+
+    function toggleIsolateFloor(id) {
+      isolatedFloorId = isolatedFloorId === id ? null : id;
+      applyVisibility();
+      if (isolatedFloorId != null) {
+        const entry = floors.find((f) => f.id === isolatedFloorId);
+        if (entry) frameFloorEntry(entry);
+      } else {
+        frameAllContent();
+      }
+      updateCamera();
+      setIsolatedFloorIdState(isolatedFloorId);
+    }
+    toggleIsolateRef.current = toggleIsolateFloor;
+
+    let clipboard = null;
+    function copyActiveFloor() {
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (!entry) return;
+      clipboard = JSON.parse(JSON.stringify({
+        data: entry.data,
+        rooms: entry.rooms || [],
+        offsetX: entry.offsetX || 0,
+        offsetZ: entry.offsetZ || 0,
+      }));
+      setHasClipboard(true);
+    }
+    copyFloorRef.current = copyActiveFloor;
+
+    function cutActiveFloor() {
+      copyActiveFloor();
+      deleteActiveFloor();
+    }
+    cutFloorRef.current = cutActiveFloor;
+
+    function pasteFloor() {
+      if (!clipboard) return;
+      pushUndo();
+      const idx = floors.findIndex((f) => f.id === activeFloorId);
+      const newId = nextFloorId++;
+      const clonedRooms = (clipboard.rooms || []).map((r) => ({
+        id: idSeq++,
+        data: JSON.parse(JSON.stringify(r.data)),
+        offsetX: r.offsetX || 0,
+        offsetZ: r.offsetZ || 0,
+      }));
+      const entry = {
+        id: newId,
+        data: JSON.parse(JSON.stringify(clipboard.data)),
+        rooms: clonedRooms,
+        offsetX: clipboard.offsetX,
+        offsetZ: clipboard.offsetZ,
+      };
+      if (idx === -1) floors.push(entry); else floors.splice(idx + 1, 0, entry);
+      const g = new THREE.Group();
+      scene.add(g);
+      floorGroups.set(newId, g);
+      restackFloors();
+      if (isolatedFloorId != null) { isolatedFloorId = null; setIsolatedFloorIdState(null); }
+      selectFloorById(newId);
+      applyVisibility();
+    }
+    pasteFloorRef.current = pasteFloor;
+
+    // Cut removes the room from this floor and stashes it in the clipboard --
+    // useful for moving a room to a different floor/layer entirely (dragging
+    // only repositions within the same floor). Copy stashes a copy but
+    // leaves the original in place. Paste adds the clipboard room to the
+    // active floor; pasting repeatedly places copies side by side.
+    let roomClipboard = null;
+    let roomPasteCount = 0;
+
+    function cutSelectedRoom() {
+      const id = selectedRoomIdRef.current;
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === id);
+      if (!floorEntry || !room) return;
+      pushUndo();
+      roomClipboard = JSON.parse(JSON.stringify({ data: room.data, offsetX: room.offsetX || 0, offsetZ: room.offsetZ || 0 }));
+      roomPasteCount = 0;
+      setHasRoomClipboard(true);
+      const idx = floorEntry.rooms.findIndex((r) => r.id === id);
+      floorEntry.rooms.splice(idx, 1);
+      const rg = roomGroups.get(id);
+      if (rg) { clearGroup(rg); rg.parent && rg.parent.remove(rg); roomGroups.delete(id); }
+      switchActiveRoom(null);
+    }
+    cutRoomRef.current = cutSelectedRoom;
+
+    function copySelectedRoom() {
+      const id = selectedRoomIdRef.current;
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === id);
+      if (!room) return;
+      roomClipboard = JSON.parse(JSON.stringify({ data: room.data, offsetX: room.offsetX || 0, offsetZ: room.offsetZ || 0 }));
+      roomPasteCount = 0;
+      setHasRoomClipboard(true);
+    }
+    copyRoomRef.current = copySelectedRoom;
+
+    function pasteRoom() {
+      if (!roomClipboard) return;
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      if (!floorEntry) return;
+      pushUndo();
+      const id = idSeq++;
+      roomPasteCount++;
+      const width = roomClipboard.data.footprint.xMax - roomClipboard.data.footprint.xMin;
+      const room = {
+        id,
+        data: JSON.parse(JSON.stringify(roomClipboard.data)),
+        offsetX: (roomClipboard.offsetX || 0) + (width + 0.5) * roomPasteCount,
+        offsetZ: roomClipboard.offsetZ || 0,
+      };
+      if (!floorEntry.rooms) floorEntry.rooms = [];
+      floorEntry.rooms.push(room);
+      switchActiveRoom(id);
+      ensureActiveContentInFrame();
+    }
+    pasteRoomRef.current = pasteRoom;
+
+    function duplicateSelectedRoom() {
+      const id = selectedRoomIdRef.current;
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === id);
+      if (!floorEntry || !room) return;
+      pushUndo();
+      const newId = idSeq++;
+      const width = room.data.footprint.xMax - room.data.footprint.xMin;
+      const newRoom = {
+        id: newId,
+        data: JSON.parse(JSON.stringify(room.data)),
+        offsetX: (room.offsetX || 0) + width + 0.5,
+        offsetZ: room.offsetZ || 0,
+      };
+      floorEntry.rooms.push(newRoom);
+      switchActiveRoom(newId);
+      ensureActiveContentInFrame();
+    }
+    duplicateRoomRef.current = duplicateSelectedRoom;
+
+    function deleteSelectedRoom() {
+      const id = selectedRoomIdRef.current;
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === id);
+      if (!floorEntry || !room) return;
+      pushUndo();
+      const idx = floorEntry.rooms.findIndex((r) => r.id === id);
+      floorEntry.rooms.splice(idx, 1);
+      const rg = roomGroups.get(id);
+      if (rg) { clearGroup(rg); rg.parent && rg.parent.remove(rg); roomGroups.delete(id); }
+      switchActiveRoom(null);
+      rebuild();
+    }
+    deleteRoomRef.current = deleteSelectedRoom;
+
+    function setActiveStairSteps(n) {
+      const st = (state.stairs || []).find((s) => s.id === selectedStairIdRef.current);
+      if (!st) return;
+      st.steps = Math.max(2, Math.round(n));
+      rebuild();
+    }
+    stairStepsApiRef.current = { setSteps: setActiveStairSteps };
+
+    function deleteActiveStair() {
+      const id = selectedStairIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.stairs = (state.stairs || []).filter((s) => s.id !== id);
+      // clean up any headroom opening this stair auto-cut in the floor above
+      if (activeRoomId == null) {
+        const idx = floors.findIndex((f) => f.id === activeFloorId);
+        const aboveEntry = idx !== -1 ? floors[idx + 1] : null;
+        if (aboveEntry && aboveEntry.data.floorHoles) {
+          const before = aboveEntry.data.floorHoles.length;
+          aboveEntry.data.floorHoles = aboveEntry.data.floorHoles.filter((h) => h.sourceStairId !== id);
+          if (aboveEntry.data.floorHoles.length !== before) rebuildFloorEntry(aboveEntry, false);
+        }
+      }
+      setSelectedStairId(null);
+      rebuild();
+    }
+    deleteStairRef.current = deleteActiveStair;
+
+    function reorderFloors(draggedId, targetId, position) {
+      if (draggedId == null || targetId == null || draggedId === targetId) return;
+      const fromIdx = floors.findIndex((f) => f.id === draggedId);
+      if (fromIdx === -1) return;
+      pushUndo();
+      const [moved] = floors.splice(fromIdx, 1);
+      const toIdx = floors.findIndex((f) => f.id === targetId);
+      if (toIdx === -1) { floors.splice(fromIdx, 0, moved); return; }
+      const insertAt = position === "before" ? toIdx : toIdx + 1;
+      floors.splice(insertAt, 0, moved);
+      restackFloors();
+      const g = floorGroups.get(activeFloorId);
+      const activeEntry = floors.find((f) => f.id === activeFloorId);
+      if (g && activeEntry) target.y = g.position.y + activeEntry.data.height * 0.32;
+      updateCamera();
+      syncFloorsToReact();
+    }
+    reorderFloorsRef.current = reorderFloors;
+
+    function setActiveFloorHeight(h) {
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (!entry) return;
+      entry.data.height = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      // any wall previously given its own individual height override would
+      // otherwise stay stuck at that old value forever, since getPanelHeight()
+      // prefers a per-panel override over the room's overall height -- when
+      // the user is adjusting the room's overall height, the clear intent is
+      // for every wall to track it, so per-wall overrides reset here.
+      entry.data.panelHeights = {};
+      restackFloors();
+      const g = floorGroups.get(activeFloorId);
+      if (g) target.y = g.position.y + entry.data.height * 0.32;
+      updateCamera();
+      rebuild();
+    }
+    floorHeightApiRef.current = {
+      setHeight: setActiveFloorHeight,
+      getHeight: () => (floors.find((f) => f.id === activeFloorId) || {}).data?.height ?? WALL_HEIGHT,
+    };
+
+    function setActiveFloorThickness(t) {
+      const entry = floors.find((f) => f.id === activeFloorId);
+      if (!entry) return;
+      entry.data.thickness = Math.max(0.03, Math.min(0.6, t));
+      rebuild();
+    }
+    wallThicknessApiRef.current = { setThickness: setActiveFloorThickness };
+
+    function updateHeightLabel() {
+      const el = heightLabelRef.current;
+      if (!el) return;
+      const pk = selectedPanelRef.current;
+      if (!pk) { el.style.display = "none"; return; }
+      const info = getPanelInfo(pk);
+      if (!info) { el.style.display = "none"; return; }
+      const H = getPanelHeight(pk);
+      const mid = (info.u0 + info.u1) / 2;
+      const pt = new THREE.Vector3();
+      if (info.lengthAxis === "x") pt.set(mid, H + 0.2, info.coord);
+      else pt.set(info.coord, H + 0.2, mid);
+      pt.addScaledVector(info.normal, 0.05);
+      const activeGroup = floorGroups.get(activeFloorId);
+      if (activeGroup) pt.y += activeGroup.position.y;
+      const camForward = new THREE.Vector3();
+      activeCamera.getWorldDirection(camForward);
+      if (pt.clone().sub(activeCamera.position).dot(camForward) <= 0) { el.style.display = "none"; return; }
+      const ndc = pt.clone().project(activeCamera);
+      const rect = renderer.domElement.getBoundingClientRect();
+      const sx = (ndc.x * 0.5 + 0.5) * rect.width;
+      const sy = (-ndc.y * 0.5 + 0.5) * rect.height;
+      el.style.display = "block";
+      el.style.left = sx + "px";
+      el.style.top = sy + "px";
+      el.textContent = H.toFixed(2) + " m";
+    }
+
+    const measureLabelPool = [];
+    function updateMeasureLabels() {
+      const layer = measureLayerRef.current;
+      if (!layer) return;
+      if (!showMeasurementsRef.current || measureAnchors.length === 0) {
+        measureLabelPool.forEach((el) => { el.style.display = "none"; });
+        return;
+      }
+      const camForward = new THREE.Vector3();
+      activeCamera.getWorldDirection(camForward);
+      const rect = renderer.domElement.getBoundingClientRect();
+      measureAnchors.forEach((a, i) => {
+        let el = measureLabelPool[i];
+        if (!el) {
+          el = document.createElement("div");
+          el.style.position = "absolute";
+          el.style.transform = "translate(-50%, -50%)";
+          el.style.color = "#FF6B1A";
+          el.style.fontSize = "10.5px";
+          el.style.fontWeight = "700";
+          el.style.fontFamily = "'Roboto', system-ui, sans-serif";
+          el.style.fontVariantNumeric = "tabular-nums";
+          el.style.pointerEvents = "none";
+          el.style.textShadow = "0 1px 3px rgba(0,0,0,0.75)";
+          el.style.whiteSpace = "nowrap";
+          layer.appendChild(el);
+          measureLabelPool[i] = el;
+        }
+        const inFront = a.point.clone().sub(activeCamera.position).dot(camForward) > 0;
+        if (!inFront) { el.style.display = "none"; return; }
+        const ndc = a.point.clone().project(activeCamera);
+        el.style.display = "block";
+        el.style.left = ((ndc.x * 0.5 + 0.5) * rect.width) + "px";
+        el.style.top = ((-ndc.y * 0.5 + 0.5) * rect.height) + "px";
+        el.textContent = a.text;
+      });
+      for (let i = measureAnchors.length; i < measureLabelPool.length; i++) {
+        measureLabelPool[i].style.display = "none";
+      }
+    }
+
+    function hideOverlayLabels() {
+      if (heightLabelRef.current) heightLabelRef.current.style.display = "none";
+      measureLabelPool.forEach((elx) => { elx.style.display = "none"; });
+    }
+
+    let raf;
+    let lastTickTime = performance.now();
+    function tick() {
+      const now = performance.now();
+      const dt = Math.min(0.1, (now - lastTickTime) / 1000);
+      lastTickTime = now;
+
+      if (walkModeRef.current) {
+        renderer.setScissorTest(false);
+        renderer.setViewport(0, 0, width, height);
+        camera.aspect = width / height;
+        camera.clearViewOffset();
+        camera.updateProjectionMatrix();
+        renderer.shadowMap.enabled = true;
+        scene.fog = sceneFog;
+        if (dividerHandleRef.current) dividerHandleRef.current.style.display = "none";
+        if (dividerVLineRef.current) dividerVLineRef.current.style.display = "none";
+        if (dividerHLineRef.current) dividerHLineRef.current.style.display = "none";
+
+        if (walkTransition) {
+          walkTransition.elapsed += dt;
+          const t = Math.min(1, walkTransition.elapsed / walkTransition.duration);
+          const eased = 1 - Math.pow(1 - t, 3);
+          camera.position.lerpVectors(walkTransition.fromPos, walkTransition.toPos, eased);
+          camera.quaternion.slerpQuaternions(walkTransition.fromQuat, walkTransition.toQuat, eased);
+          camera.updateMatrixWorld(true);
+          if (t >= 1) walkTransition = null;
+        } else {
+          updateWalkMovement(dt);
+        }
+        renderer.render(scene, camera);
+        // editing (wall drags, height changes, measurements) works the same
+        // while walking, so keep their live overlays working too.
+        updateHeightLabel();
+        updateMeasureLabels();
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+
+      if (viewLayoutRef.current === "quad") {
+        renderQuadLayout(width, height);
+        hideOverlayLabels();
+        if (dividerHandleRef.current) {
+          dividerHandleRef.current.style.display = "block";
+          dividerHandleRef.current.style.left = (width * splitX) + "px";
+          dividerHandleRef.current.style.top = (height * splitY) + "px";
+        }
+        if (dividerVLineRef.current) {
+          dividerVLineRef.current.style.display = "block";
+          dividerVLineRef.current.style.left = (width * splitX) + "px";
+          dividerVLineRef.current.style.top = "0px";
+          dividerVLineRef.current.style.height = height + "px";
+        }
+        if (dividerHLineRef.current) {
+          dividerHLineRef.current.style.display = "block";
+          dividerHLineRef.current.style.top = (height * splitY) + "px";
+          dividerHLineRef.current.style.left = "0px";
+          dividerHLineRef.current.style.width = width + "px";
+        }
+      } else {
+        renderer.setScissorTest(false);
+        renderer.setViewport(0, 0, width, height);
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        applyViewShift(camera, width, height);
+        // same reasoning as the quad panes: a fixed top/front/left/right
+        // view looks straight along one axis, so the key light's hard
+        // shadow tends to cover most of what's visible -- only the free
+        // orbit view benefits from shadows, so switch them off otherwise.
+        renderer.shadowMap.enabled = viewMode === "orbit";
+        scene.fog = viewMode === "orbit" ? sceneFog : null;
+        renderer.render(scene, activeCamera);
+        updateHeightLabel();
+        updateMeasureLabels();
+        if (dividerHandleRef.current) dividerHandleRef.current.style.display = "none";
+        if (dividerVLineRef.current) dividerVLineRef.current.style.display = "none";
+        if (dividerHLineRef.current) dividerHLineRef.current.style.display = "none";
+      }
+      raf = requestAnimationFrame(tick);
+    }
+    tick();
+
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("pointercancel", onPointerUp);
+      el.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+      clearGroup(sceneGroup);
+      clearGroup(character.group);
+      scene.remove(character.group);
+      if (minorGrid) { minorGrid.geometry.dispose(); minorGrid.material.dispose(); }
+      if (majorGrid) { majorGrid.geometry.dispose(); majorGrid.material.dispose(); }
+      measureLabelPool.forEach((elx) => elx.remove());
+      wallMat.dispose();
+      floorMat.dispose();
+      wallMatDim.dispose();
+      floorMatDim.dispose();
+      wallMatSelected.dispose();
+      floorMatSelected.dispose();
+      selMat.dispose();
+      selMatPreview.dispose();
+      glassMat.dispose();
+      stairMat.dispose();
+      hotspotMat.dispose();
+      Object.values(propMats).forEach((m) => m.dispose());
+      wallGrainTex.dispose();
+      wallRoughTex.dispose();
+      floorGrainTex.dispose();
+      floorRoughTex.dispose();
+      renderer.dispose();
+      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  const RIBBON_HEIGHT = 48;
+  const TOPBAR_HEIGHT = 44;
+  const [layersPanelWidth, setLayersPanelWidth] = useState(148);
+  const panelResizeRef = useRef(null);
+  const layersScrollRef = useRef(null);
+  const scrollStripDragRef = useRef(null);
+  const newSceneBtnRef = useRef(null);
+  const defaultLayersWidth = () => 210;
+  useEffect(() => { setLayersPanelWidth(defaultLayersWidth()); }, []);
+  const [floorNames, setFloorNames] = useState({});
+  const [renamingFloorId, setRenamingFloorId] = useState(null);
+  const [renameInputValue, setRenameInputValue] = useState("");
+
+  // ---------- voice command: speech -> Claude -> actions ----------
+  // askClaude is the ONE function that changes when this moves out of the
+  // artifact sandbox: here, calling the Anthropic API needs no key at all.
+  // Outside the sandbox (e.g. in Claude Code), this function's body is the
+  // only thing that needs to change -- point it at your own backend route
+  // instead, with that route attaching the real API key server-side. Every
+  // other piece (mic UI, action execution) stays exactly as-is.
+  async function askClaude(transcript) {
+    const systemPrompt =
+      "You control a 3D room-builder app by translating one spoken instruction into a list of actions. " +
+      voiceRoomContextRef.current() +
+      " Available actions -- respond with ONLY a JSON array, no prose, no markdown fences, each item shaped as " +
+      '{"action": "<name>", ...params}. Actions: ' +
+      'set_room_size {width_ft, depth_ft} -- sets the overall room footprint. ' +
+      'add_partition {wall: "north"|"south"|"east"|"west", position_fraction: 0-1} -- adds a single straight dividing wall running perpendicular to the named wall, at that fraction along its length (0.5 = middle). To divide a room into four with two crossing walls, emit one add_partition on "north" and one on "west", both at 0.5. ' +
+      'add_windows_to_wall {wall, count} -- evenly spaces that many windows along the named wall. ' +
+      'add_windows_all_walls {count_per_wall} -- windows on all four walls at once. ' +
+      "If the instruction is unclear or asks for something with no matching action, respond with an empty array [].";
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1000,
+        system: systemPrompt,
+        messages: [{ role: "user", content: transcript }],
+      }),
+    });
+    const data = await resp.json();
+    const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+    const clean = text.replace(/```json|```/g, "").trim();
+    try {
+      const parsed = JSON.parse(clean);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function executeVoiceActions(actions) {
+    actions.forEach((a) => {
+      const fn = voiceActionsRef.current[a.action];
+      if (fn) {
+        try { fn(a); } catch { /* one bad action shouldn't block the rest */ }
+      }
+    });
+  }
+
+  function startVoiceListening() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setVoiceStatus("error");
+      setVoiceTranscript("Speech recognition isn't supported in this browser -- try Chrome.");
+      return;
+    }
+    let finalText = "";
+    let hadError = false;
+    const rec = new SR();
+    rec.lang = "en-US";
+    // continuous + manual stop, per spec: tap to start, talk (no auto
+    // cutoff on a pause), tap again to stop and submit whatever was said.
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    voiceRecognitionRef.current = rec;
+    setVoiceListening(true);
+    setVoiceStatus("listening");
+    setVoiceTranscript("");
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalText += t + " ";
+        else interim += t;
+      }
+      setVoiceTranscript((finalText + interim).trim());
+    };
+    rec.onerror = (e) => {
+      hadError = true;
+      setVoiceListening(false);
+      setVoiceStatus("error");
+      const reason = e && e.error;
+      const hint = reason === "not-allowed" || reason === "service-not-allowed"
+        ? "Microphone access was blocked -- this can happen inside the artifact preview's sandbox, which may not grant mic permission at all."
+        : reason === "no-speech" ? "No speech detected."
+        : reason === "network" ? "Speech service network error."
+        : `Speech recognition error: ${reason || "unknown"}.`;
+      setVoiceTranscript(hint);
+    };
+    rec.onend = async () => {
+      setVoiceListening(false);
+      if (hadError) return;
+      const said = finalText.trim();
+      if (!said) {
+        setVoiceStatus("error");
+        setVoiceTranscript("No speech was captured -- try again and speak right after tapping.");
+        return;
+      }
+      setVoiceStatus("thinking");
+      try {
+        const actions = await askClaude(said);
+        executeVoiceActions(actions);
+        setVoiceStatus(actions.length ? "done" : "error");
+        if (!actions.length) setVoiceTranscript(said + "\n(No matching action understood.)");
+      } catch (err) {
+        setVoiceStatus("error");
+        setVoiceTranscript("Couldn't reach Claude: " + (err && err.message ? err.message : String(err)));
+      }
+    };
+    try {
+      rec.start();
+    } catch (err) {
+      setVoiceListening(false);
+      setVoiceStatus("error");
+      setVoiceTranscript("Couldn't start the microphone: " + (err && err.message ? err.message : String(err)));
+    }
+  }
+  function stopVoiceListening() {
+    if (voiceRecognitionRef.current) voiceRecognitionRef.current.stop();
+  }
+
+  return (
+    <div style={{ position: "relative", width: "100%", height: "100vh", background: "#101010", overflow: "hidden", fontFamily: "'Roboto', system-ui, sans-serif", overscrollBehavior: "none" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+        * { box-sizing: border-box; }
+        .rb-btn {
+          font-family: inherit;
+          font-size: 10px;
+          letter-spacing: 0.02em;
+          text-transform: uppercase;
+          padding: 6px 10px;
+          border-radius: 2px;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          background: #1D1D1D;
+          color: #D6D6D4;
+          cursor: pointer;
+          transition: background 0.12s, color 0.12s, border-color 0.12s;
+          white-space: nowrap;
+        }
+        .rb-btn:hover { background: #262626; color: #F2F2F0; border-color: rgba(255, 255, 255, 0.3); }
+        .rb-btn.active { background: #FF6B1A; border-color: #FF6B1A; color: #141414; }
+        .rb-btn:focus-visible { outline: 1.5px solid #FF6B1A; outline-offset: 1px; }
+        .rb-btn:disabled { opacity: 0.35; cursor: default; }
+        .rb-input {
+          width: 54px; font-family: inherit; font-size: 10px; padding: 5px 6px;
+          border-radius: 2px; border: 1px solid rgba(255, 255, 255, 0.2); background: #1D1D1D; color: #F2F2F0;
+        }
+        .rb-input:focus-visible { outline: 1.5px solid #FF6B1A; outline-offset: 1px; }
+        .rb-range { width: 100%; accent-color: #FF6B1A; height: 3px; }
+        .rb-hue-slider {
+          width: 100%; height: 10px; border-radius: 5px; cursor: pointer;
+          -webkit-appearance: none; appearance: none;
+          background: linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000);
+        }
+        .rb-hue-slider::-webkit-slider-thumb {
+          -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+          background: #fff; border: 2px solid #191919; cursor: pointer; box-shadow: 0 0 0 1px rgba(255,255,255,0.4);
+        }
+        .rb-hue-slider::-moz-range-thumb {
+          width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #191919; cursor: pointer;
+        }
+        .rb-hue-slider::-moz-range-track { height: 10px; border-radius: 5px; }
+        .ribbon {
+          position: absolute; left: 0; right: 0; bottom: 0; height: ${RIBBON_HEIGHT}px;
+          display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden;
+          background: #141414; border-top: 1px solid rgba(255, 255, 255, 0.16);
+        }
+        .ribbon-section { display: flex; align-items: center; gap: 12px; padding: 0 12px; flex-shrink: 0; }
+        .ribbon-divider { width: 1px; align-self: stretch; margin: 8px 0; background: rgba(255, 255, 255, 0.14); flex-shrink: 0; }
+        .ribbon-group { display: flex; flex-direction: column; gap: 3px; min-width: 108px; flex-shrink: 0; justify-content: center; }
+        .ribbon-label {
+          font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #ABABAB; font-weight: 500; white-space: nowrap;
+        }
+        .panel-title {
+          font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: #F2F2F0; font-weight: 700;
+        }
+        .layers-scroll { position: absolute; inset: 0; overflow-y: auto; padding: 8px 34px 8px 8px; -webkit-overflow-scrolling: touch; touch-action: pan-y; overscroll-behavior: contain; }
+        .layers-scroll::-webkit-scrollbar { width: 20px; }
+        .layers-scroll::-webkit-scrollbar-thumb { background: rgba(255, 107, 26, 0.55); border-radius: 4px; border: 6px solid transparent; background-clip: padding-box; }
+        .layers-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 107, 26, 0.8); background-clip: padding-box; }
+        .layers-scroll::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); }
+        .rb-walk-btn {
+          width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+          background: rgba(25,25,25,0.72); border: 1px solid rgba(255,255,255,0.22); color: #F2F2F0;
+          touch-action: none; cursor: pointer; user-select: none;
+        }
+        .rb-walk-btn:active { background: rgba(255,107,26,0.55); border-color: #FF6B1A; }
+      `}</style>
+
+      <div ref={mountRef} style={{ position: "absolute", inset: 0, touchAction: "none" }} />
+
+      {/* Voice command UI -- mic button + status window, below the top bar
+          and inset from the right edge. Tap to start (ring turns orange
+          while active), speak, tap again to stop and submit. */}
+      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 14, right: 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+        <button
+          className="rb-btn"
+          onClick={() => (voiceListening ? stopVoiceListening() : startVoiceListening())}
+          style={{
+            width: 40, height: 40, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: voiceListening ? "0 0 0 3px #FF9500" : "none",
+            transition: "box-shadow 0.15s ease",
+          }}
+          title={voiceListening ? "Tap to stop and submit" : "Tap to start voice command"}
+        >
+          <Mic size={16} strokeWidth={2} color={voiceListening ? "#FF9500" : undefined} />
+        </button>
+        {(voiceStatus || voiceTranscript) && (
+          <div
+            style={{
+              maxWidth: 240, padding: "8px 10px", borderRadius: 8, background: "rgba(20,20,20,0.92)",
+              border: "1px solid rgba(255,255,255,0.12)", color: "#ddd", fontSize: 11, lineHeight: 1.4,
+            }}
+          >
+            <div style={{ opacity: 0.6, textTransform: "uppercase", letterSpacing: "0.04em", fontSize: 9, marginBottom: 2 }}>
+              {voiceStatus === "listening" && "Listening… tap to submit"}
+              {voiceStatus === "thinking" && "Thinking…"}
+              {voiceStatus === "done" && "Done"}
+              {voiceStatus === "error" && "Couldn't complete that"}
+            </div>
+            {voiceTranscript && <div>{voiceTranscript}</div>}
+          </div>
+        )}
+      </div>
+
+      <div
+        ref={dividerVLineRef}
+        style={{ position: "absolute", display: "none", width: 1.5, background: "rgba(180,180,180,0.5)", pointerEvents: "none" }}
+      />
+      <div
+        ref={dividerHLineRef}
+        style={{ position: "absolute", display: "none", height: 1.5, background: "rgba(180,180,180,0.5)", pointerEvents: "none" }}
+      />
+      <div
+        ref={dividerHandleRef}
+        style={{
+          position: "absolute", display: "none", width: 22, height: 22,
+          transform: "translate(-50%, -50%)", pointerEvents: "none",
+          borderRadius: "50%", background: "rgba(255,107,26,0.18)",
+          border: "1.5px solid #FF6B1A",
+        }}
+      />
+      <div ref={measureLayerRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }} />
+
+      {walkMode && (
+        <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", color: "#C9C9C6", fontSize: 9.5, background: "rgba(25,25,25,0.6)", padding: "5px 10px", borderRadius: 2, pointerEvents: "none" }}>
+          Drag empty space to orbit the camera &middot; drag a wall or floor to edit it &middot; camera icon to exit
+        </div>
+      )}
+
+      {walkMode && (
+        <div style={{ position: "absolute", right: 24, bottom: RIBBON_HEIGHT + 20, width: 168, height: 168 }}>
+          {[
+            { dir: "fwd", Icon: ArrowUp, style: { left: 56, top: 0 } },
+            { dir: "left", Icon: ArrowLeft, style: { left: 0, top: 56 } },
+            { dir: "right", Icon: ArrowRight, style: { left: 112, top: 56 } },
+            { dir: "back", Icon: ArrowDown, style: { left: 56, top: 112 } },
+          ].map(({ dir, Icon, style }) => (
+            <button
+              key={dir}
+              className="rb-walk-btn"
+              style={{ position: "absolute", ...style }}
+              onPointerDown={(e) => { e.preventDefault(); walkInputRef.current[dir] = true; }}
+              onPointerUp={() => { walkInputRef.current[dir] = false; }}
+              onPointerLeave={() => { walkInputRef.current[dir] = false; }}
+              onPointerCancel={() => { walkInputRef.current[dir] = false; }}
+            >
+              <Icon size={22} strokeWidth={2} />
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div
+        ref={heightLabelRef}
+        style={{
+          position: "absolute", display: "none", transform: "translate(-50%, -100%)",
+          background: "rgba(232, 24, 156, 0.28)", border: "1px solid #E8189C", borderRadius: 2,
+          padding: "3px 7px", color: "#FFFFFF", fontSize: 10, fontWeight: 700,
+          fontVariantNumeric: "tabular-nums", pointerEvents: "none", whiteSpace: "nowrap",
+        }}
+      />
+
+      {/* LEFT: Layers panel, floating -- PowerPoint-style slide list, resizable via the handle on its right edge */}
+      <div
+        style={{
+          position: "absolute", top: TOPBAR_HEIGHT + 8, left: 16, bottom: RIBBON_HEIGHT + 16, width: layersPanelWidth,
+          background: "#191919", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 2,
+          display: "flex", flexDirection: "column", overflow: "hidden",
+        }}
+      >
+        <div
+          title="Drag to resize"
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            panelResizeRef.current = { startX: e.clientX, startWidth: layersPanelWidth };
+          }}
+          onPointerMove={(e) => {
+            const rs = panelResizeRef.current;
+            if (!rs) return;
+            const w = Math.min(520, Math.max(150, rs.startWidth + (e.clientX - rs.startX)));
+            setLayersPanelWidth(w);
+          }}
+          onPointerUp={() => { panelResizeRef.current = null; }}
+          style={{
+            position: "absolute", top: 0, right: -12, width: 24, height: "100%",
+            cursor: "ew-resize", touchAction: "none", zIndex: 1,
+          }}
+        />
+        <div style={{ padding: "9px 9px 7px", borderBottom: "1px solid rgba(255,255,255,0.12)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span className="panel-title">Layers</span>
+            <div style={{ display: "flex", gap: 3 }}>
+              <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9 }} onClick={() => addFloorRef.current()} title="Add a new layer with a default room">+</button>
+              <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9 }} onClick={() => duplicateFloorRef.current()} title="Duplicate the selected layer">Dup</button>
+              <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9 }} onClick={() => deleteFloorRef.current()} title="Delete the selected layer">Del</button>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+            <button className="rb-btn" style={{ padding: "3px 5px", fontSize: 8.5, flex: 1 }} onClick={() => cutFloorRef.current()} title="Cut the selected layer to the clipboard">Cut</button>
+            <button className="rb-btn" style={{ padding: "3px 5px", fontSize: 8.5, flex: 1 }} onClick={() => copyFloorRef.current()} title="Copy the selected layer to the clipboard">Copy</button>
+            <button
+              className="rb-btn"
+              disabled={!hasClipboard}
+              style={{ padding: "3px 5px", fontSize: 8.5, flex: 1 }}
+              onClick={() => pasteFloorRef.current()}
+              title="Paste the clipboard as a new layer"
+            >
+              Paste
+            </button>
+          </div>
+        </div>
+
+        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+          <div className="layers-scroll" ref={layersScrollRef}>
+            {[...floorIds].reverse().map((id, i) => (
+              <div key={id} style={{ display: "flex", flexDirection: "column" }}>
+                <div
+                  style={{
+                  height: 3, margin: "1px 4px", borderRadius: 1,
+                  background: dropInfo && dropInfo.targetId === id && dropInfo.edge === "above" ? "#FF6B1A" : "transparent",
+                }}
+              />
+              <div
+                ref={(el) => { if (el) floorRowRefs.current.set(id, el); }}
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  floorDragRef.current = { id, startX: e.clientX, startY: e.clientY, moved: false };
+                }}
+                onPointerMove={(e) => {
+                  const ds = floorDragRef.current;
+                  if (!ds || ds.id !== id) return;
+                  const dx = e.clientX - ds.startX, dy = e.clientY - ds.startY;
+                  if (!ds.moved && Math.hypot(dx, dy) > 6) {
+                    ds.moved = true;
+                    setDragFloorId(id);
+                  }
+                  if (ds.moved) {
+                    let found = null;
+                    floorRowRefs.current.forEach((el, rid) => {
+                      if (rid === id) return;
+                      const rect = el.getBoundingClientRect();
+                      if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+                        found = { targetId: rid, edge: e.clientY < rect.top + rect.height / 2 ? "above" : "below" };
+                      }
+                    });
+                    setDropInfo(found);
+                  }
+                }}
+                onPointerUp={(e) => {
+                  const ds = floorDragRef.current;
+                  if (ds && ds.id === id) {
+                    if (ds.moved && dropInfo) {
+                      reorderFloorsRef.current(id, dropInfo.targetId, dropInfo.edge === "above" ? "after" : "before");
+                    } else if (!ds.moved) {
+                      selectFloorRef.current(id);
+                    }
+                  }
+                  floorDragRef.current = null;
+                  setDragFloorId(null);
+                  setDropInfo(null);
+                }}
+                style={{
+                  display: "flex", flexDirection: "row", alignItems: "center", gap: 7, cursor: "grab",
+                  padding: 5, borderRadius: 2, touchAction: "none",
+                  opacity: dragFloorId === id ? 0.4 : 1,
+                  border: id === activeFloorIdState ? "1px solid #FF6B1A" : "1px solid transparent",
+                  background: id === activeFloorIdState ? "rgba(255,107,26,0.14)" : "transparent",
+                }}
+              >
+                <canvas
+                  ref={(el) => { if (el) thumbCanvasMapRef.current.set(id, el); }}
+                  width={480}
+                  height={480}
+                  style={{ borderRadius: 1, display: "block", width: 56, height: 56, flexShrink: 0 }}
+                />
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 0 }}>
+                  {renamingFloorId === id ? (
+                    <input
+                      autoFocus
+                      value={renameInputValue}
+                      onChange={(e) => setRenameInputValue(e.target.value)}
+                      onBlur={() => {
+                        setFloorNames((prev) => ({ ...prev, [id]: renameInputValue.trim() }));
+                        setRenamingFloorId(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        if (e.key === "Escape") setRenamingFloorId(null);
+                      }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        fontSize: 9.5, background: "#101010", color: "#E4E4E1",
+                        border: "1px solid #FF6B1A", borderRadius: 2, width: "100%", padding: "1px 3px",
+                      }}
+                    />
+                  ) : (
+                    <span
+                      style={{ color: "#E4E4E1", fontSize: 9.5, cursor: "text", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRenameInputValue(floorNames[id] || `Layer ${floorIds.length - i}`);
+                        setRenamingFloorId(id);
+                      }}
+                      title="Click to rename"
+                    >
+                      {floorNames[id] || `Layer ${floorIds.length - i}`}
+                    </span>
+                  )}
+                  <div
+                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "#ABABAB", fontSize: 8.5, cursor: "pointer" }}>
+                      Iso
+                      <input
+                        type="checkbox"
+                        checked={isolatedFloorIdState === id}
+                        onChange={() => toggleIsolateRef.current(id)}
+                        title="Isolate this layer"
+                        style={{ width: 11, height: 11, cursor: "pointer", accentColor: "#FF6B1A" }}
+                      />
+                    </label>
+                    <button
+                      className="rb-btn"
+                      style={{
+                        padding: "1px 5px", fontSize: 8.5,
+                        background: hiddenIds.includes(id) ? "#FF6B1A" : "#1D1D1D",
+                        color: hiddenIds.includes(id) ? "#141414" : "#ABABAB",
+                      }}
+                      onClick={() => toggleHideRef.current(id)}
+                      title="Hide this layer"
+                    >
+                      {hiddenIds.includes(id) ? "Hidden" : "Hide"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div
+                style={{
+                  height: 3, margin: "1px 4px", borderRadius: 1,
+                  background: dropInfo && dropInfo.targetId === id && dropInfo.edge === "below" ? "#FF6B1A" : "transparent",
+                }}
+              />
+            </div>
+              ))}
+          </div>
+          <div
+            title="Drag to scroll"
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              scrollStripDragRef.current = { startY: e.clientY, startScrollTop: layersScrollRef.current ? layersScrollRef.current.scrollTop : 0 };
+            }}
+            onPointerMove={(e) => {
+              const ds = scrollStripDragRef.current;
+              if (!ds || !layersScrollRef.current) return;
+              layersScrollRef.current.scrollTop = ds.startScrollTop + (e.clientY - ds.startY);
+            }}
+            onPointerUp={() => { scrollStripDragRef.current = null; }}
+            style={{
+              position: "absolute", top: 0, right: 0, width: 30, height: "100%",
+              touchAction: "none", cursor: "ns-resize", zIndex: 2,
+            }}
+          />
+        </div>
+
+        <div style={{ padding: "9px 11px", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", color: "#ABABAB", fontSize: 9 }}>
+            <span>Layer height</span>
+            <span style={{ fontVariantNumeric: "tabular-nums", color: "#F2F2F0" }}>{floorHeight.toFixed(2)} m</span>
+          </div>
+          <input
+            className="rb-range"
+            type="range"
+            min={MIN_WALL_HEIGHT}
+            max={MAX_WALL_HEIGHT}
+            step={0.05}
+            value={floorHeight}
+            onPointerDown={() => pushUndoRef.current()}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              setFloorHeight(v);
+              floorHeightApiRef.current.setHeight(v);
+            }}
+          />
+        </div>
+      </div>
+
+      {/* TOP: full-width row so the resizable layers panel below can never
+          overlap these controls, no matter how wide it's dragged -- no
+          background here, the buttons float directly over the 3D view */}
+      <div
+        style={{
+          position: "absolute", top: 0, left: 0, right: 0, height: TOPBAR_HEIGHT,
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "0 12px", gap: 12, pointerEvents: "none",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
+          <button
+            ref={newSceneBtnRef}
+            className="rb-btn"
+            onClick={() => {
+              resetEverythingRef.current();
+              setTool("move");
+              setSelectedStairId(null);
+              setStairSteps(12);
+              setSelectedBalconyId(null);
+              setSelectedBalconyPart(null);
+              setSelectedOpeningId(null);
+              setBalconyStairHeight(3 * FT);
+              setBalconyPlatformWidth(10 * FT);
+              setViewMode("orbit");
+              setViewLayout("single");
+              if (walkMode) setWalkMode(false);
+              setHiddenLineMode(false);
+              setWireframeMode(false);
+              setTransparentInactive(false);
+              setUltraRealistic(false);
+              setTintActiveOn(false);
+              setTintInactiveOn(false);
+              setSnapEnabled(true);
+              setShowMeasurements(false);
+              setFloorNames({});
+              setOpeningHeight(DEFAULT_OPENING_HEIGHT);
+              setOpeningDividers(0);
+              setOpeningAxisVertical(true);
+              setOpeningAxisHorizontal(false);
+              setDoorHeight(7 * FT);
+              setPropsShape("cube");
+              setCurvedCornersOn(false);
+              setCurvedCornersRadius(0.6);
+              setGridSizeFt(10);
+              setLayersPanelWidth(defaultLayersWidth());
+            }}
+          >
+            New scene
+          </button>
+          <button
+            className="rb-btn"
+            onClick={() => {
+              resetFnRef.current && resetFnRef.current();
+              setSelectedPanel(null);
+            }}
+          >
+            Reset
+          </button>
+          <button
+            className="rb-btn"
+            title="Delete whatever is currently selected"
+            onClick={() => {
+              if (selectedBalconyId != null) deleteBalconyRef.current();
+              else if (selectedStairId != null) deleteStairRef.current();
+              else if (selectedOpeningId != null) deleteOpeningRef.current();
+              else if (selectedRoomId != null) deleteRoomRef.current();
+            }}
+          >
+            Delete
+          </button>
+          <div style={{ width: 14 }} />
+          <button className="rb-btn" disabled={!canUndo} title="Undo" style={{ display: "flex", alignItems: "center" }} onClick={() => undoRef.current()}>
+            <Undo2 size={16} strokeWidth={2} />
+          </button>
+          <button className="rb-btn" disabled={!canRedo} title="Redo" style={{ display: "flex", alignItems: "center" }} onClick={() => redoRef.current()}>
+            <Redo2 size={16} strokeWidth={2} />
+          </button>
+          <div style={{ width: 14 }} />
+          <button
+            className={`rb-btn ${walkMode ? "active" : ""}`}
+            title={walkMode ? "Exit walk mode" : "Walk mode"}
+            style={{ display: "flex", alignItems: "center" }}
+            onClick={() => setWalkMode((v) => !v)}
+          >
+            <CameraIcon size={16} strokeWidth={2} />
+          </button>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, pointerEvents: "auto" }}>
+          <div style={{ display: "flex", gap: 5 }}>
+            <button className={`rb-btn ${viewLayout === "single" ? "active" : ""}`} title="Single view" style={{ display: "flex", alignItems: "center", padding: "6px 9px" }} onClick={() => setViewLayout("single")}>
+              <SingleViewIcon />
+            </button>
+            <button className={`rb-btn ${viewLayout === "quad" ? "active" : ""}`} title="Four views" style={{ display: "flex", alignItems: "center", padding: "6px 9px" }} onClick={() => setViewLayout("quad")}>
+              <QuadViewIcon />
+            </button>
+          </div>
+          <div style={{ display: "flex", gap: 5 }}>
+            {["orbit", "top", "front", "left", "right"].map((v) => (
+              <button
+                key={v}
+                className={`rb-btn ${viewMode === v ? "active" : ""}`}
+                style={{ padding: "6px 8px", fontSize: 9 }}
+                onClick={() => setViewMode(v)}
+              >
+                {v.charAt(0).toUpperCase() + v.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: "#C9C9C6", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }} />
+      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: "#8A8A87", fontSize: 8.5, textAlign: "right" }}>
+        Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
+      </div>
+
+      {/* BOTTOM: ribbon -- tools, then context settings, then view options, then everything else */}
+      <div className="ribbon">
+        <div className="ribbon-section">
+          <span className="panel-title" style={{ marginRight: 4 }}>Exodex</span>
+          <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
+          <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
+          <button className={`rb-btn ${tool === "door" ? "active" : ""}`} onClick={() => setTool("door")}>Door</button>
+          <button className={`rb-btn ${tool === "stairs" ? "active" : ""}`} onClick={() => setTool("stairs")}>Stairs</button>
+          <button className={`rb-btn ${tool === "props" ? "active" : ""}`} onClick={() => setTool("props")}>Props</button>
+        </div>
+
+        <div className="ribbon-divider" />
+
+        <div className="ribbon-section">
+          {tool === "move" && selectedRoomId != null && selectedPanel == null && (
+            <>
+              <div className="ribbon-group" style={{ minWidth: 340 }}>
+                <span className="ribbon-label">Room</span>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="rb-btn" onClick={() => cutRoomRef.current()}>Cut</button>
+                  <button className="rb-btn" onClick={() => copyRoomRef.current()}>Copy</button>
+                  <button className="rb-btn" disabled={!hasRoomClipboard} onClick={() => pasteRoomRef.current()}>Paste</button>
+                  <button className="rb-btn" onClick={() => duplicateRoomRef.current()}>Duplicate</button>
+                  <button className="rb-btn" onClick={() => deleteRoomRef.current()}>Delete</button>
+                  <button className="rb-btn" onClick={() => switchActiveRoomRef.current(null)}>Done</button>
+                </div>
+              </div>
+              <div className="ribbon-group">
+                <span className="ribbon-label">Room height &middot; {roomHeight.toFixed(2)} m</span>
+                <input
+                  className="rb-range"
+                  type="range"
+                  min={MIN_WALL_HEIGHT}
+                  max={MAX_WALL_HEIGHT}
+                  step={0.05}
+                  value={roomHeight}
+                  onPointerDown={() => pushUndoRef.current()}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    setRoomHeight(v);
+                    roomHeightApiRef.current.setHeight(v);
+                  }}
+                />
+              </div>
+              <div className="ribbon-group" style={{ minWidth: 190 }}>
+                <span className="ribbon-label">
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={curvedCornersOn}
+                      onChange={(e) => {
+                        pushUndoRef.current();
+                        setCurvedCornersOn(e.target.checked);
+                        curvedCornersApiRef.current.setEnabled(e.target.checked);
+                      }}
+                    />
+                    Curved corners &middot; {curvedCornersRadius.toFixed(2)} m
+                  </label>
+                </span>
+                <input
+                  className="rb-range"
+                  type="range"
+                  min={0.1}
+                  max={2.5}
+                  step={0.05}
+                  value={curvedCornersRadius}
+                  onPointerDown={() => pushUndoRef.current()}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    setCurvedCornersRadius(v);
+                    curvedCornersApiRef.current.setRadius(v);
+                  }}
+                />
+              </div>
+            </>
+          )}
+          {tool === "move" && selectedPanel != null && (
+            <div className="ribbon-group" style={{ minWidth: 200 }}>
+              <span className="ribbon-label">Wall height &middot; {selectedHeight.toFixed(2)} m</span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  className="rb-range"
+                  type="range"
+                  min={MIN_WALL_HEIGHT}
+                  max={MAX_WALL_HEIGHT}
+                  step={0.05}
+                  value={selectedHeight}
+                  onPointerDown={() => pushUndoRef.current()}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    setSelectedHeight(v);
+                    panelHeightApiRef.current.setHeight(selectedPanel, v);
+                  }}
+                />
+                <button className="rb-btn" onClick={() => setSelectedPanel(null)}>Done</button>
+              </div>
+            </div>
+          )}
+          {tool === "move" && selectedRoomId == null && selectedPanel == null && (
+            <div className="ribbon-group">
+              <span className="ribbon-label">Thickness &middot; {wallThickness.toFixed(2)} m</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={0.03}
+                max={0.6}
+                step={0.01}
+                value={wallThickness}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setWallThickness(v);
+                  wallThicknessApiRef.current.setThickness(v);
+                }}
+              />
+            </div>
+          )}
+          {tool === "cut" && (
+            <div className="ribbon-group">
+              <span className="ribbon-label">Opening height &middot; {(openingHeight / FT).toFixed(2)} ft</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={0}
+                max={Math.max(0.2, (floorHeight - 0.1) / FT)}
+                step={0.05}
+                value={openingHeight / FT}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setOpeningHeight(Math.max(0, ft * FT));
+                }}
+              />
+            </div>
+          )}
+          {tool === "cut" && (
+            <div className="ribbon-group">
+              <span className="ribbon-label">Dividers &middot; {openingDividers}</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={0}
+                max={6}
+                step={1}
+                value={openingDividers}
+                onChange={(e) => setOpeningDividers(parseInt(e.target.value, 10))}
+              />
+            </div>
+          )}
+          {tool === "cut" && (
+            <div className="ribbon-group">
+              <span className="ribbon-label">Divider direction</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className={`rb-btn ${openingAxisVertical ? "active" : ""}`} onClick={() => setOpeningAxisVertical((v) => !v)}>Vertical</button>
+                <button className={`rb-btn ${openingAxisHorizontal ? "active" : ""}`} onClick={() => setOpeningAxisHorizontal((v) => !v)}>Horizontal</button>
+              </div>
+            </div>
+          )}
+          {tool === "door" && (
+            <div className="ribbon-group">
+              <span className="ribbon-label">Door height &middot; {(doorHeight / FT).toFixed(2)} ft</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={3}
+                max={Math.max(3.2, (floorHeight - 0.05) / FT)}
+                step={0.05}
+                value={doorHeight / FT}
+                onChange={(e) => setDoorHeight(Math.max(0, parseFloat(e.target.value) * FT))}
+              />
+            </div>
+          )}
+          {tool === "props" && (
+            <div className="ribbon-group" style={{ minWidth: 220 }}>
+              <span className="ribbon-label">Prop shape</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {["sphere", "cube", "cone", "cylinder", "balcony"].map((s) => (
+                  <button
+                    key={s}
+                    className={`rb-btn ${propsShape === s ? "active" : ""}`}
+                    onClick={() => setPropsShape(s)}
+                  >
+                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {selectedStairId != null && (
+            <div className="ribbon-group" style={{ minWidth: 220 }}>
+              <span className="ribbon-label">Steps &middot; {stairSteps}</span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  className="rb-range"
+                  type="range"
+                  min={2}
+                  max={60}
+                  step={1}
+                  value={stairSteps}
+                  onPointerDown={() => pushUndoRef.current()}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    setStairSteps(n);
+                    stairStepsApiRef.current.setSteps(n);
+                  }}
+                />
+                <button className="rb-btn" onClick={() => deleteStairRef.current()}>Delete</button>
+                <button className="rb-btn" onClick={() => setSelectedStairId(null)}>Done</button>
+              </div>
+            </div>
+          )}
+          {selectedBalconyId != null && (
+            <div className="ribbon-group" style={{ minWidth: 260 }}>
+              <span className="ribbon-label">Staircase height &middot; {(balconyStairHeight / FT).toFixed(2)} ft</span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  className="rb-range"
+                  type="range"
+                  min={1}
+                  max={Math.max(1.5, (floorHeight - 1.5 * FT) / FT)}
+                  step={0.1}
+                  value={balconyStairHeight / FT}
+                  onPointerDown={() => pushUndoRef.current()}
+                  onChange={(e) => {
+                    const ft = parseFloat(e.target.value);
+                    setBalconyStairHeight(ft * FT);
+                    balconyHeightApiRef.current.setHeight(ft * FT);
+                  }}
+                />
+                <button className="rb-btn" onClick={() => deleteBalconyRef.current()}>Delete</button>
+                <button className="rb-btn" onClick={() => setSelectedBalconyId(null)}>Done</button>
+              </div>
+            </div>
+          )}
+          {selectedBalconyId != null && (
+            <div className="ribbon-group" style={{ minWidth: 220 }}>
+              <span className="ribbon-label">Platform width &middot; {(balconyPlatformWidth / FT).toFixed(2)} ft</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={3}
+                max={60}
+                step={0.5}
+                value={balconyPlatformWidth / FT}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setBalconyPlatformWidth(ft * FT);
+                  balconyWidthApiRef.current.setWidth(ft * FT);
+                }}
+              />
+            </div>
+          )}
+          {selectedOpeningId != null && (
+            <div className="ribbon-group" style={{ minWidth: 160 }}>
+              <span className="ribbon-label">Opening selected</span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button className="rb-btn" onClick={() => deleteOpeningRef.current()}>Delete</button>
+                <button className="rb-btn" onClick={() => setSelectedOpeningId(null)}>Done</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="ribbon-divider" />
+
+        <div className="ribbon-section">
+          <div className="ribbon-group">
+            <span className="ribbon-label">Grid &middot; {gridSizeFt.toFixed(2)} ft</span>
+            <input
+              className="rb-range"
+              type="range"
+              min={0.1}
+              max={10}
+              step={0.05}
+              value={gridSizeFt}
+              onChange={(e) => setGridSizeFt(parseFloat(e.target.value))}
+            />
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button className={`rb-btn ${snapEnabled ? "active" : ""}`} onClick={() => setSnapEnabled((v) => !v)}>Snap</button>
+            <button className={`rb-btn ${showMeasurements ? "active" : ""}`} onClick={() => setShowMeasurements((v) => !v)}>Measure</button>
+            <button className={`rb-btn ${hiddenLineMode ? "active" : ""}`} onClick={() => setHiddenLineMode((v) => !v)}>Hidden line</button>
+            <button className={`rb-btn ${wireframeMode ? "active" : ""}`} onClick={() => setWireframeMode((v) => !v)}>Wireframe</button>
+            <button className={`rb-btn ${transparentInactive ? "active" : ""}`} onClick={() => setTransparentInactive((v) => !v)}>Fade inactive</button>
+            <button className={`rb-btn ${ultraRealistic ? "active" : ""}`} onClick={() => setUltraRealistic((v) => !v)}>Realistic</button>
+          </div>
+          <div className="ribbon-group" style={{ minWidth: 150, gap: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <input type="checkbox" checked={tintActiveOn} onChange={(e) => setTintActiveOn(e.target.checked)} style={{ cursor: "pointer" }} />
+              <span className="ribbon-label" style={{ margin: 0, width: 40, flexShrink: 0 }}>Active</span>
+              <div style={{ display: "flex", gap: 3 }}>
+                {TE_SWATCHES.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => { setTintActiveColor(c); setTintActiveOn(true); }}
+                    title={`#${c.toString(16).padStart(6, "0")}`}
+                    style={{
+                      width: 14, height: 14, borderRadius: "50%", padding: 0, cursor: "pointer",
+                      background: `#${c.toString(16).padStart(6, "0")}`,
+                      border: tintActiveOn && tintActiveColor === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.35)",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <input type="checkbox" checked={tintInactiveOn} onChange={(e) => setTintInactiveOn(e.target.checked)} style={{ cursor: "pointer" }} />
+              <span className="ribbon-label" style={{ margin: 0, width: 40, flexShrink: 0 }}>Inactive</span>
+              <div style={{ display: "flex", gap: 3 }}>
+                {TE_SWATCHES.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => { setTintInactiveColor(c); setTintInactiveOn(true); }}
+                    title={`#${c.toString(16).padStart(6, "0")}`}
+                    style={{
+                      width: 14, height: 14, borderRadius: "50%", padding: 0, cursor: "pointer",
+                      background: `#${c.toString(16).padStart(6, "0")}`,
+                      border: tintInactiveOn && tintInactiveColor === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.35)",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
