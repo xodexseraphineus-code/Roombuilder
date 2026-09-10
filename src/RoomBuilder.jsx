@@ -39,11 +39,12 @@ const COLORS = {
   highlight: 0xff2d6e,
 };
 
-// a representative Teenage Engineering-style palette (orange, green, blue,
+// a representative Teenage Engineering-style palette (orange, white, blue,
 // yellow, red) for the tint swatches -- couldn't find a documented "Apple
 // keyboard" collab palette specifically, so this uses their well-known
-// saturated accent-color approach instead.
-const TE_SWATCHES = [0xff6b1a, 0x4caf6d, 0x4a90d9, 0xf2c230, 0xe5484d];
+// saturated accent-color approach instead (green swapped for white, which
+// gets more use).
+const TE_SWATCHES = [0xff6b1a, 0xffffff, 0x4a90d9, 0xf2c230, 0xe5484d];
 
 // a short synthesized click (Web Audio, no audio file to fetch) for wall/
 // partition contact feedback -- one shared AudioContext, created lazily on
@@ -102,11 +103,14 @@ export default function RoomBuilder() {
   const rebuildGridRef = useRef(() => {});
   const rebuildModelRef = useRef(() => {});
   const setViewModeApiRef = useRef(() => {});
-  // UI chrome theme (ribbon, panels, buttons) -- separate from anything in
-  // the 3D scene itself (wall/floor materials, background), just the
-  // surrounding app frame. Defaults to dark to match how this always
-  // looked before.
+  // UI chrome theme (ribbon, panels, buttons) -- mostly just the
+  // surrounding app frame (CSS), but also drives the 3D viewport's empty-
+  // space background/fog color via viewportThemeApiRef below, since a
+  // near-black void reads as far too contrasty next to a light UI.
+  // Defaults to dark to match how this always looked before.
   const [uiTheme, setUiTheme] = useState("dark");
+  const viewportThemeApiRef = useRef(() => {});
+  useEffect(() => { viewportThemeApiRef.current(uiTheme); }, [uiTheme]);
   const [tool, setTool] = useState("move");
   const toolRef = useRef(tool);
   useEffect(() => { toolRef.current = tool; rebuildModelRef.current(); }, [tool]);
@@ -278,6 +282,20 @@ export default function RoomBuilder() {
     scene.background = new THREE.Color(COLORS.bg);
     scene.fog = new THREE.Fog(COLORS.bg, 60, 400);
     const sceneFog = scene.fog;
+    // the empty-space backdrop and its matching fog color -- dark mode
+    // keeps the original near-black void, but that same void read as far
+    // too contrasty next to a light UI, so light mode gets a medium
+    // grey-blue instead (closer to what Keynote uses behind its slide
+    // canvas: a grey a shade darker than the surrounding chrome, not a
+    // stark black-vs-white jump).
+    const VIEWPORT_BG_LIGHT = 0xc7cad1;
+    function applyViewportTheme(theme) {
+      const c = theme === "light" ? VIEWPORT_BG_LIGHT : COLORS.bg;
+      scene.background.set(c);
+      sceneFog.color.set(c);
+    }
+    viewportThemeApiRef.current = applyViewportTheme;
+    applyViewportTheme(uiTheme);
 
     const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 500);
     const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
@@ -1799,6 +1817,125 @@ export default function RoomBuilder() {
       });
     }
 
+    // A notch (negative-depth bumpout) cuts a chunk out of the room's floor
+    // on the assumption that the cut area stays open to the exterior. But a
+    // partition can wall off part of that cut -- e.g. a partition drawn
+    // across a notch's mouth turns it into a fully enclosed room -- and once
+    // that happens the area is topologically interior even though it's still
+    // outside `floorRects`. This finds any such sealed pocket so the floor
+    // can be healed there. Modeled on detectRooms()'s grid flood-fill: void
+    // cells (inside the footprint but cut away by a notch) are flooded
+    // starting from the footprint's outer edge, blocked by partition
+    // segments; whatever void never gets reached from the edge is sealed off
+    // and needs its floor restored.
+    function computeSealedNotchFloorRects(floorRectsPostNotch) {
+      const fp = state.footprint;
+      const minX = fp.xMin, maxX = fp.xMax, minZ = fp.zMin, maxZ = fp.zMax;
+      if (maxX - minX < 0.1 || maxZ - minZ < 0.1) return [];
+
+      let CELL = 0.15;
+      let cols = Math.max(1, Math.ceil((maxX - minX) / CELL));
+      let rows = Math.max(1, Math.ceil((maxZ - minZ) / CELL));
+      while (cols * rows > 40000) {
+        CELL *= 1.3;
+        cols = Math.max(1, Math.ceil((maxX - minX) / CELL));
+        rows = Math.max(1, Math.ceil((maxZ - minZ) / CELL));
+      }
+
+      const isVoid = new Uint8Array(cols * rows); // inside the footprint but cut away by a notch
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const cx = minX + (i + 0.5) * CELL, cz = minZ + (j + 0.5) * CELL;
+          const inFloor = floorRectsPostNotch.some((r) => cx >= r.x0 && cx <= r.x1 && cz >= r.z0 && cz <= r.z1);
+          isVoid[j * cols + i] = inFloor ? 0 : 1;
+        }
+      }
+      if (!isVoid.some((v) => v)) return [];
+
+      const partitionSegs = [];
+      state.partitions.forEach((p) => {
+        const parent = getPanelInfo(p.panel);
+        if (!parent || Math.abs(p.ext) < 0.03) return;
+        const axisSign = parent.thickAxis === "z" ? parent.normal.z : parent.normal.x;
+        const far = parent.coord + axisSign * p.ext;
+        const lo = Math.min(parent.coord, far), hi = Math.max(parent.coord, far);
+        if (parent.thickAxis === "z") partitionSegs.push({ vertical: true, at: p.u, a: lo, b: hi });
+        else partitionSegs.push({ vertical: false, at: p.u, a: lo, b: hi });
+      });
+      function blockedV(edgeX, z0, z1) {
+        return partitionSegs.some((s) => s.vertical && Math.abs(s.at - edgeX) < CELL * 0.5 && s.a <= z1 - 1e-6 && s.b >= z0 + 1e-6);
+      }
+      function blockedH(edgeZ, x0, x1) {
+        return partitionSegs.some((s) => !s.vertical && Math.abs(s.at - edgeZ) < CELL * 0.5 && s.a <= x1 - 1e-6 && s.b >= x0 + 1e-6);
+      }
+
+      const reached = new Uint8Array(cols * rows);
+      const stack = [];
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const idx = j * cols + i;
+          if (!isVoid[idx]) continue;
+          // a void cell touching the footprint's outer edge always connects
+          // to true exterior, whatever partitions surround it elsewhere
+          if (i === 0 || i === cols - 1 || j === 0 || j === rows - 1) { reached[idx] = 1; stack.push([i, j]); }
+        }
+      }
+      while (stack.length) {
+        const [ci, cj] = stack.pop();
+        const cx0 = minX + ci * CELL, cx1 = cx0 + CELL, cz0 = minZ + cj * CELL, cz1 = cz0 + CELL;
+        const tryNeighbor = (ni, nj, blocked) => {
+          if (ni < 0 || ni >= cols || nj < 0 || nj >= rows) return;
+          const nIdx = nj * cols + ni;
+          if (isVoid[nIdx] && !reached[nIdx] && !blocked) { reached[nIdx] = 1; stack.push([ni, nj]); }
+        };
+        tryNeighbor(ci + 1, cj, blockedV(cx1, cz0, cz1));
+        tryNeighbor(ci - 1, cj, blockedV(cx0, cz0, cz1));
+        tryNeighbor(ci, cj + 1, blockedH(cz1, cx0, cx1));
+        tryNeighbor(ci, cj - 1, blockedH(cz0, cx0, cx1));
+      }
+
+      const sealedCells = [];
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const idx = j * cols + i;
+        if (isVoid[idx] && !reached[idx]) sealedCells.push([i, j]);
+      }
+      if (sealedCells.length === 0) return [];
+
+      // merge sealed cells into rectangles: row runs, then stack matching
+      // runs across rows -- same pattern as detectRooms()
+      const byRow = new Map();
+      sealedCells.forEach(([i, j]) => { if (!byRow.has(j)) byRow.set(j, []); byRow.get(j).push(i); });
+      const rowRuns = [];
+      byRow.forEach((is, j) => {
+        is.sort((a, b) => a - b);
+        let start = is[0], prev = is[0];
+        for (let k = 1; k < is.length; k++) {
+          if (is[k] === prev + 1) { prev = is[k]; continue; }
+          rowRuns.push({ j, i0: start, i1: prev }); start = is[k]; prev = is[k];
+        }
+        rowRuns.push({ j, i0: start, i1: prev });
+      });
+      rowRuns.sort((a, b) => a.j - b.j || a.i0 - b.i0);
+      const used = new Array(rowRuns.length).fill(false);
+      const healed = [];
+      for (let a = 0; a < rowRuns.length; a++) {
+        if (used[a]) continue;
+        let j1 = rowRuns[a].j;
+        const j0 = rowRuns[a].j, i0 = rowRuns[a].i0, i1 = rowRuns[a].i1;
+        used[a] = true;
+        let extended = true;
+        while (extended) {
+          extended = false;
+          for (let b = 0; b < rowRuns.length; b++) {
+            if (used[b]) continue;
+            if (rowRuns[b].i0 === i0 && rowRuns[b].i1 === i1 && rowRuns[b].j === j1 + 1) { j1 = rowRuns[b].j; used[b] = true; extended = true; }
+          }
+        }
+        healed.push({ x0: minX + i0 * CELL, x1: minX + (i1 + 1) * CELL, z0: minZ + j0 * CELL, z1: minZ + (j1 + 1) * CELL });
+      }
+      return healed;
+    }
+
     function rebuildCurrentFloorGeometry() {
       clearGroup(sceneGroup);
       const fp = state.footprint;
@@ -1871,6 +2008,13 @@ export default function RoomBuilder() {
           if (cut) floorRects = subtractAll(floorRects, cut);
         }
       });
+      // a partition can wall off part of a notch, turning that cut-away area
+      // into a fully enclosed room -- restore its floor before floorHoles
+      // (genuine stairwell cutouts, unrelated to notches) get subtracted.
+      if (!builtCurvedFloor && state.partitions.length > 0 && state.bumpouts.some((b) => b.depth < -0.02)) {
+        const healed = computeSealedNotchFloorRects(floorRects);
+        if (healed.length) floorRects = floorRects.concat(healed);
+      }
       if (!builtCurvedFloor) (state.floorHoles || []).forEach((h) => {
         floorRects = subtractAll(floorRects, { x0: h.xMin, x1: h.xMax, z0: h.zMin, z1: h.zMax });
       });
@@ -5824,8 +5968,8 @@ export default function RoomBuilder() {
           any themed chrome panel, so they stay a fixed light color in both
           themes rather than following --text-secondary/tertiary (which
           would go dark-on-dark and vanish in light mode). */}
-      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: "rgba(255,255,255,0.75)", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }} />
-      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: "rgba(255,255,255,0.45)", fontSize: 8.5, textAlign: "right" }}>
+      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.7)" : "rgba(255,255,255,0.75)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }} />
+      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 8.5, textAlign: "right" }}>
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
 
@@ -6232,7 +6376,7 @@ export default function RoomBuilder() {
                     style={{
                       width: 14, height: 14, borderRadius: "50%", padding: 0, cursor: "pointer",
                       background: `#${c.toString(16).padStart(6, "0")}`,
-                      border: tintActiveOn && tintActiveColor === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.35)",
+                      border: tintActiveOn && tintActiveColor === c ? "2px solid var(--accent)" : "1px solid var(--border-control)",
                     }}
                   />
                 ))}
@@ -6250,7 +6394,7 @@ export default function RoomBuilder() {
                     style={{
                       width: 14, height: 14, borderRadius: "50%", padding: 0, cursor: "pointer",
                       background: `#${c.toString(16).padStart(6, "0")}`,
-                      border: tintInactiveOn && tintInactiveColor === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.35)",
+                      border: tintInactiveOn && tintInactiveColor === c ? "2px solid var(--accent)" : "1px solid var(--border-control)",
                     }}
                   />
                 ))}
