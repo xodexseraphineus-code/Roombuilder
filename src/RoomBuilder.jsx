@@ -2186,6 +2186,12 @@ export default function RoomBuilder() {
     // floors are still excluded automatically, since Three.js's raycaster
     // skips invisible objects on its own.
     function rebuildFloorEntry(entry, isActive) {
+      // clearGroup() below disposes this floor's (and its rooms') old
+      // meshes but never touches pickList -- drop their stale entries here,
+      // once, so every caller (rebuild(), rebuildAllFloors(), or a direct
+      // call like the active-floor handoff in selectFloorById) gets a
+      // pickList that never accumulates disposed/orphaned mesh references.
+      pickList = pickList.filter((o) => o.userData.ownerFloorId !== entry.id);
       const savedState = state;
       const savedGroup = sceneGroup;
       const savedActive = buildingActiveFloor;
@@ -2279,10 +2285,19 @@ export default function RoomBuilder() {
       buildingFloorEntry = savedFloorEntry;
     }
 
+    // called constantly -- every drag frame, every mutation, every tool or
+    // selection change -- so it must only refresh the ONE floor actually
+    // being worked on right now (the cross-floor retarget target while a
+    // gesture has landed on another layer's wall, via buildingFloorEntry;
+    // otherwise the active floor) rather than wiping pickList outright.
+    // Blowing away the whole list here was the reason cross-floor editing
+    // broke the instant any tool was (re)selected: every OTHER visible
+    // layer's walls would silently drop out of pickList and become
+    // unclickable, even though they were still fully editable in principle.
     function rebuild() {
-      pickList = [];
-      const entry = floors.find((f) => f.id === activeFloorId);
-      if (entry) rebuildFloorEntry(entry, true);
+      const targetId = buildingFloorEntry ? buildingFloorEntry.id : activeFloorId;
+      const entry = floors.find((f) => f.id === targetId);
+      if (entry) rebuildFloorEntry(entry, entry.id === activeFloorId);
     }
 
     function rebuildAllFloors() {
@@ -3755,10 +3770,14 @@ export default function RoomBuilder() {
       pinchState = null;
       setSelectedPanel(null);
       setSelectedRoomId(null);
-      setIsolatedFloorIdState(null);
       setHiddenIds([]);
       target.set(0, state.height * 0.32, 0);
       updateCamera();
+      // every old floor's meshes were just torn down above (clearGroup()
+      // doesn't touch pickList) and rebuild() only refreshes the one new
+      // floor -- so this is the one place a full wipe is actually correct,
+      // rather than the surgical per-floor filtering rebuild() now does.
+      pickList = [];
       rebuild();
       syncFloorsToReact();
     }
@@ -4184,6 +4203,10 @@ export default function RoomBuilder() {
       const g = floorGroups.get(removed.id);
       if (g) { clearGroup(g); scene.remove(g); }
       floorGroups.delete(removed.id);
+      // clearGroup() disposes the removed floor's meshes but doesn't touch
+      // pickList -- drop its (and its rooms') entries so raycasting never
+      // hits an orphaned, disposed mesh.
+      pickList = pickList.filter((o) => o.userData.ownerFloorId !== removed.id);
       (removed.rooms || []).forEach((room) => {
         const rg = roomGroups.get(room.id);
         if (rg) { clearGroup(rg); if (rg.parent) rg.parent.remove(rg); }
