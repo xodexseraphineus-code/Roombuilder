@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -102,6 +102,11 @@ export default function RoomBuilder() {
   const rebuildGridRef = useRef(() => {});
   const rebuildModelRef = useRef(() => {});
   const setViewModeApiRef = useRef(() => {});
+  // UI chrome theme (ribbon, panels, buttons) -- separate from anything in
+  // the 3D scene itself (wall/floor materials, background), just the
+  // surrounding app frame. Defaults to dark to match how this always
+  // looked before.
+  const [uiTheme, setUiTheme] = useState("dark");
   const [tool, setTool] = useState("move");
   const toolRef = useRef(tool);
   useEffect(() => { toolRef.current = tool; rebuildModelRef.current(); }, [tool]);
@@ -5234,34 +5239,73 @@ export default function RoomBuilder() {
   }
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100vh", background: "#101010", overflow: "hidden", fontFamily: "'Roboto', system-ui, sans-serif", overscrollBehavior: "none" }}>
+    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100vh", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
         * { box-sizing: border-box; }
+        [data-theme="dark"] {
+          --bg-window: #1e1e1e;
+          --bg-panel: #2c2c2e;
+          --bg-panel-translucent: rgba(44, 44, 46, 0.82);
+          --bg-control: #3a3a3c;
+          --bg-control-hover: #48484a;
+          --bg-control-pressed: #58585a;
+          --bg-floating: rgba(30, 30, 30, 0.78);
+          --border-separator: rgba(84, 84, 88, 0.65);
+          --border-control: rgba(255, 255, 255, 0.12);
+          --text-primary: rgba(255, 255, 255, 0.92);
+          --text-secondary: rgba(235, 235, 245, 0.6);
+          --text-tertiary: rgba(235, 235, 245, 0.3);
+          --scrollbar-track: rgba(255, 255, 255, 0.05);
+        }
+        [data-theme="light"] {
+          --bg-window: #ececec;
+          --bg-panel: #f5f5f7;
+          --bg-panel-translucent: rgba(245, 245, 247, 0.82);
+          --bg-control: #ffffff;
+          --bg-control-hover: #e5e5ea;
+          --bg-control-pressed: #d1d1d6;
+          --bg-floating: rgba(255, 255, 255, 0.82);
+          --border-separator: rgba(60, 60, 67, 0.29);
+          --border-control: rgba(0, 0, 0, 0.1);
+          --text-primary: rgba(0, 0, 0, 0.92);
+          --text-secondary: rgba(60, 60, 67, 0.6);
+          --text-tertiary: rgba(60, 60, 67, 0.3);
+          --scrollbar-track: rgba(0, 0, 0, 0.04);
+        }
+        [data-theme] {
+          /* the app's own brand accent -- kept constant across both themes
+             rather than swapped for Apple's system blue, since it's used
+             throughout as the "this is selected/active" signal (layers,
+             resize handles, active-tool state) and switching it would
+             fight the rest of the app's visual language. */
+          --accent: #FF6B1A;
+          --accent-contrast: #141414;
+          --font-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        }
         .rb-btn {
-          font-family: inherit;
-          font-size: 10px;
-          letter-spacing: 0.02em;
-          text-transform: uppercase;
-          padding: 6px 10px;
-          border-radius: 2px;
-          border: 1px solid rgba(255, 255, 255, 0.18);
-          background: #1D1D1D;
-          color: #D6D6D4;
+          font-family: var(--font-system);
+          font-size: 12.5px;
+          font-weight: 500;
+          letter-spacing: 0;
+          padding: 6px 11px;
+          border-radius: 6px;
+          border: 0.5px solid var(--border-control);
+          background: var(--bg-control);
+          color: var(--text-primary);
           cursor: pointer;
-          transition: background 0.12s, color 0.12s, border-color 0.12s;
+          transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
           white-space: nowrap;
         }
-        .rb-btn:hover { background: #262626; color: #F2F2F0; border-color: rgba(255, 255, 255, 0.3); }
-        .rb-btn.active { background: #FF6B1A; border-color: #FF6B1A; color: #141414; }
-        .rb-btn:focus-visible { outline: 1.5px solid #FF6B1A; outline-offset: 1px; }
+        .rb-btn:hover { background: var(--bg-control-hover); }
+        .rb-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+        .rb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         .rb-btn:disabled { opacity: 0.35; cursor: default; }
         .rb-input {
-          width: 54px; font-family: inherit; font-size: 10px; padding: 5px 6px;
-          border-radius: 2px; border: 1px solid rgba(255, 255, 255, 0.2); background: #1D1D1D; color: #F2F2F0;
+          width: 54px; font-family: var(--font-system); font-size: 12.5px; padding: 5px 7px;
+          border-radius: 6px; border: 0.5px solid var(--border-control); background: var(--bg-control); color: var(--text-primary);
         }
-        .rb-input:focus-visible { outline: 1.5px solid #FF6B1A; outline-offset: 1px; }
-        .rb-range { width: 100%; accent-color: #FF6B1A; height: 3px; }
+        .rb-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+        .rb-range { width: 100%; accent-color: var(--accent); height: 3px; }
         .rb-hue-slider {
           width: 100%; height: 10px; border-radius: 5px; cursor: pointer;
           -webkit-appearance: none; appearance: none;
@@ -5269,37 +5313,39 @@ export default function RoomBuilder() {
         }
         .rb-hue-slider::-webkit-slider-thumb {
           -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
-          background: #fff; border: 2px solid #191919; cursor: pointer; box-shadow: 0 0 0 1px rgba(255,255,255,0.4);
+          background: #fff; border: 2px solid var(--bg-window); cursor: pointer; box-shadow: 0 0 0 1px rgba(255,255,255,0.4);
         }
         .rb-hue-slider::-moz-range-thumb {
-          width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #191919; cursor: pointer;
+          width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid var(--bg-window); cursor: pointer;
         }
         .rb-hue-slider::-moz-range-track { height: 10px; border-radius: 5px; }
         .ribbon {
           position: absolute; left: 0; right: 0; bottom: 0; height: ${RIBBON_HEIGHT}px;
           display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden;
-          background: #141414; border-top: 1px solid rgba(255, 255, 255, 0.16);
+          background: var(--bg-panel-translucent); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+          border-top: 0.5px solid var(--border-separator);
         }
         .ribbon-section { display: flex; align-items: center; gap: 12px; padding: 0 12px; flex-shrink: 0; }
-        .ribbon-divider { width: 1px; align-self: stretch; margin: 8px 0; background: rgba(255, 255, 255, 0.14); flex-shrink: 0; }
+        .ribbon-divider { width: 0.5px; align-self: stretch; margin: 8px 0; background: var(--border-separator); flex-shrink: 0; }
         .ribbon-group { display: flex; flex-direction: column; gap: 3px; min-width: 108px; flex-shrink: 0; justify-content: center; }
         .ribbon-label {
-          font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #ABABAB; font-weight: 500; white-space: nowrap;
+          font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--text-secondary); font-weight: 500; white-space: nowrap;
         }
         .panel-title {
-          font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: #F2F2F0; font-weight: 700;
+          font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text-primary); font-weight: 600;
         }
         .layers-scroll { position: absolute; inset: 0; overflow-y: auto; padding: 8px 34px 8px 8px; -webkit-overflow-scrolling: touch; touch-action: pan-y; overscroll-behavior: contain; }
         .layers-scroll::-webkit-scrollbar { width: 20px; }
         .layers-scroll::-webkit-scrollbar-thumb { background: rgba(255, 107, 26, 0.55); border-radius: 4px; border: 6px solid transparent; background-clip: padding-box; }
         .layers-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 107, 26, 0.8); background-clip: padding-box; }
-        .layers-scroll::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); }
+        .layers-scroll::-webkit-scrollbar-track { background: var(--scrollbar-track); }
         .rb-walk-btn {
           width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
-          background: rgba(25,25,25,0.72); border: 1px solid rgba(255,255,255,0.22); color: #F2F2F0;
+          background: var(--bg-floating); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+          border: 0.5px solid var(--border-control); color: var(--text-primary);
           touch-action: none; cursor: pointer; user-select: none;
         }
-        .rb-walk-btn:active { background: rgba(255,107,26,0.55); border-color: #FF6B1A; }
+        .rb-walk-btn:active { background: rgba(255,107,26,0.55); border-color: var(--accent); }
       `}</style>
 
       <div ref={mountRef} style={{ position: "absolute", inset: 0, touchAction: "none" }} />
@@ -5323,8 +5369,8 @@ export default function RoomBuilder() {
         {(voiceStatus || voiceTranscript) && (
           <div
             style={{
-              maxWidth: 240, padding: "8px 10px", borderRadius: 8, background: "rgba(20,20,20,0.92)",
-              border: "1px solid rgba(255,255,255,0.12)", color: "#ddd", fontSize: 11, lineHeight: 1.4,
+              maxWidth: 240, padding: "8px 10px", borderRadius: 10, background: "var(--bg-floating)", backdropFilter: "blur(12px)",
+              border: "0.5px solid var(--border-control)", color: "var(--text-primary)", fontSize: 11, lineHeight: 1.4,
             }}
           >
             <div style={{ opacity: 0.6, textTransform: "uppercase", letterSpacing: "0.04em", fontSize: 9, marginBottom: 2 }}>
@@ -5358,7 +5404,7 @@ export default function RoomBuilder() {
       <div ref={measureLayerRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }} />
 
       {walkMode && (
-        <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", color: "#C9C9C6", fontSize: 9.5, background: "rgba(25,25,25,0.6)", padding: "5px 10px", borderRadius: 2, pointerEvents: "none" }}>
+        <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", color: "var(--text-primary)", fontSize: 9.5, background: "var(--bg-floating)", backdropFilter: "blur(12px)", padding: "5px 10px", borderRadius: 8, pointerEvents: "none" }}>
           Drag empty space to orbit the camera &middot; drag a wall or floor to edit it &middot; camera icon to exit
         </div>
       )}
@@ -5400,7 +5446,8 @@ export default function RoomBuilder() {
       <div
         style={{
           position: "absolute", top: TOPBAR_HEIGHT + 8, left: 16, bottom: RIBBON_HEIGHT + 16, width: layersPanelWidth,
-          background: "#191919", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 2,
+          background: "var(--bg-panel-translucent)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+          border: "0.5px solid var(--border-separator)", borderRadius: 10,
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}
       >
@@ -5422,7 +5469,7 @@ export default function RoomBuilder() {
             cursor: "ew-resize", touchAction: "none", zIndex: 1,
           }}
         />
-        <div style={{ padding: "9px 9px 7px", borderBottom: "1px solid rgba(255,255,255,0.12)" }}>
+        <div style={{ padding: "9px 9px 7px", borderBottom: "0.5px solid var(--border-separator)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span className="panel-title">Layers</span>
             <div style={{ display: "flex", gap: 3 }}>
@@ -5526,13 +5573,13 @@ export default function RoomBuilder() {
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={(e) => e.stopPropagation()}
                       style={{
-                        fontSize: 9.5, background: "#101010", color: "#E4E4E1",
-                        border: "1px solid #FF6B1A", borderRadius: 2, width: "100%", padding: "1px 3px",
+                        fontSize: 9.5, background: "var(--bg-control)", color: "var(--text-primary)",
+                        border: "1px solid var(--accent)", borderRadius: 4, width: "100%", padding: "1px 3px",
                       }}
                     />
                   ) : (
                     <span
-                      style={{ color: "#E4E4E1", fontSize: 9.5, cursor: "text", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      style={{ color: "var(--text-primary)", fontSize: 9.5, cursor: "text", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -5548,22 +5595,22 @@ export default function RoomBuilder() {
                     style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}
                     onPointerDown={(e) => e.stopPropagation()}
                   >
-                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "#ABABAB", fontSize: 8.5, cursor: "pointer" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
                       Iso
                       <input
                         type="checkbox"
                         checked={isolatedFloorIdsState.includes(id)}
                         onChange={() => toggleIsolateRef.current(id)}
                         title="Isolate this layer (multiple can be isolated together)"
-                        style={{ width: 11, height: 11, cursor: "pointer", accentColor: "#FF6B1A" }}
+                        style={{ width: 11, height: 11, cursor: "pointer", accentColor: "var(--accent)" }}
                       />
                     </label>
                     <button
                       className="rb-btn"
                       style={{
                         padding: "1px 5px", fontSize: 8.5,
-                        background: hiddenIds.includes(id) ? "#FF6B1A" : "#1D1D1D",
-                        color: hiddenIds.includes(id) ? "#141414" : "#ABABAB",
+                        background: hiddenIds.includes(id) ? "var(--accent)" : "var(--bg-control)",
+                        color: hiddenIds.includes(id) ? "var(--accent-contrast)" : "var(--text-secondary)",
                       }}
                       onClick={() => toggleHideRef.current(id)}
                       title="Hide this layer"
@@ -5601,10 +5648,10 @@ export default function RoomBuilder() {
           />
         </div>
 
-        <div style={{ padding: "9px 11px", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", color: "#ABABAB", fontSize: 9 }}>
+        <div style={{ padding: "9px 11px", borderTop: "0.5px solid var(--border-separator)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9 }}>
             <span>Layer height</span>
-            <span style={{ fontVariantNumeric: "tabular-nums", color: "#F2F2F0" }}>{floorHeight.toFixed(2)} m</span>
+            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)" }}>{floorHeight.toFixed(2)} m</span>
           </div>
           <input
             className="rb-range"
@@ -5621,7 +5668,7 @@ export default function RoomBuilder() {
             }}
           />
           <div style={{ display: "flex", gap: 12, marginTop: 7 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "#ABABAB", cursor: "pointer" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input
                 type="checkbox"
                 checked={ceilingOn}
@@ -5633,7 +5680,7 @@ export default function RoomBuilder() {
               />
               Ceiling
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "#ABABAB", cursor: "pointer" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input
                 type="checkbox"
                 checked={groundOn}
@@ -5762,11 +5809,23 @@ export default function RoomBuilder() {
               </button>
             ))}
           </div>
+          <button
+            className="rb-btn"
+            title={uiTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            style={{ display: "flex", alignItems: "center" }}
+            onClick={() => setUiTheme((t) => (t === "dark" ? "light" : "dark"))}
+          >
+            {uiTheme === "dark" ? <Moon size={16} strokeWidth={2} /> : <Sun size={16} strokeWidth={2} />}
+          </button>
         </div>
       </div>
 
-      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: "#C9C9C6", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }} />
-      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: "#8A8A87", fontSize: 8.5, textAlign: "right" }}>
+      {/* these two float directly over the always-dark 3D canvas, not over
+          any themed chrome panel, so they stay a fixed light color in both
+          themes rather than following --text-secondary/tertiary (which
+          would go dark-on-dark and vanish in light mode). */}
+      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: "rgba(255,255,255,0.75)", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }} />
+      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: "rgba(255,255,255,0.45)", fontSize: 8.5, textAlign: "right" }}>
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
 
