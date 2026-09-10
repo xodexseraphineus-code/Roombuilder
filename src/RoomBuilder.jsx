@@ -592,6 +592,51 @@ export default function RoomBuilder() {
     const wallRoughTex = makeRoughnessTexture(128, 210, 40);
     const floorGrainTex = makeGrainTexture(128, [230, 228, 220], 14);
     const floorRoughTex = makeRoughnessTexture(128, 195, 50);
+    // brutalist concrete: a repeating precast-panel texture -- thin vertical
+    // board-formed grooves, plus small tie-rod holes inset from each
+    // panel's corners (which, once tiled, cluster into a group of four
+    // right at each interior panel joint -- the classic look). Painted in
+    // a near-white base so it reads as pure per-pixel shading once
+    // multiplied by whatever grey the concrete preset's color is set to.
+    function makeConcretePanelTexture(size) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(size, size);
+      for (let i = 0; i < size * size; i++) {
+        const n = (Math.random() - 0.5) * 12;
+        const v = Math.min(255, Math.max(0, 232 + n));
+        img.data[i * 4 + 0] = v; img.data[i * 4 + 1] = v; img.data[i * 4 + 2] = v; img.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      ctx.strokeStyle = "rgba(70,68,64,0.4)";
+      ctx.lineWidth = Math.max(1, size * 0.012);
+      const grooveCount = 4;
+      for (let i = 1; i < grooveCount; i++) {
+        const x = (size / grooveCount) * i;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, size);
+        ctx.stroke();
+      }
+      const holeR = size * 0.04;
+      const inset = size * 0.08;
+      [[inset, inset], [size - inset, inset], [inset, size - inset], [size - inset, size - inset]].forEach(([cx, cy]) => {
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, holeR);
+        grad.addColorStop(0, "rgba(40,38,35,0.85)");
+        grad.addColorStop(0.6, "rgba(90,88,84,0.45)");
+        grad.addColorStop(1, "rgba(120,118,114,0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, holeR, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(4, 4);
+      return tex;
+    }
+    const concretePanelTex = makeConcretePanelTexture(256);
 
     let minorGrid = null;
     let majorGrid = null;
@@ -2084,6 +2129,7 @@ export default function RoomBuilder() {
         const pillarsSelected = isSelected && part === "pillars";
         const ceilingSelected = isSelected && part === "ceiling";
         const floorLikeMat = wholeSelected ? floorMatSelected : currentFloorMat;
+        const stepMat = wholeSelected ? wallMatSelected : currentWallMat;
         const pillarMatActive = (wholeSelected || pillarsSelected) ? pillarMatSelected : pillarMat;
         const ceilingMat = (wholeSelected || ceilingSelected) ? wallMatSelected : currentWallMat;
         function toWorld(u, d) {
@@ -2135,7 +2181,7 @@ export default function RoomBuilder() {
         const stepH = platformHeight / numLevels;
         for (let i = 0; i < numLevels - 1; i++) {
           const topH = (numLevels - 1 - i) * stepH;
-          addBox(u0, u1, PLATFORM_D + i * STEP_D, PLATFORM_D + (i + 1) * STEP_D, 0, topH, floorLikeMat);
+          addBox(u0, u1, PLATFORM_D + i * STEP_D, PLATFORM_D + (i + 1) * STEP_D, 0, topH, stepMat);
         }
         // pillar height is user-controlled (bal.pillarHeight, "height above
         // the platform"), defaulting to a 3ft fence rail the first time a
@@ -2423,26 +2469,33 @@ export default function RoomBuilder() {
     }
     wireframeApiRef.current = applyWireframe;
 
-    // grey concrete / black metal / white plastic / red -- flat color +
-    // roughness/metalness only, no textures, so each reads as a clean,
-    // uniform surface rather than fighting the wall's default grain map.
-    // grey/white lean deliberately cool (a hint of blue) and a touch of
-    // metalness/lower roughness than a "pure matte" value -- the scene's
-    // key light is warm enough that a neutral or warm-leaning matte grey
-    // or white washes out to the same beige as the default wall color.
+    // grey concrete / black metal / white plastic / yellow -- flat color +
+    // roughness/metalness only (concrete keeps its own panel texture
+    // instead), so each reads as a clean, deliberate material rather than
+    // fighting the wall's default grain map. grey/white lean deliberately
+    // cool (a hint of blue) and carry a touch of metalness/lower roughness
+    // than a "pure matte" value -- the scene's key light is warm enough
+    // that a neutral or warm-leaning matte grey or white washes out to the
+    // same beige as the default wall color.
+    // floorLighten blends the wall color toward white by that fraction for
+    // the floor (concrete's floor is a lighter poured-slab shade of the
+    // same material); floorSame makes the floor match the wall outright
+    // (plastic, yellow); neither means the floor is left at its own
+    // default look entirely (black metal, and the default material).
     const BUILDING_MATERIAL_PRESETS = [
       null,
-      { color: 0x93999c, roughness: 0.88, metalness: 0.08 },
+      { color: 0x93999c, roughness: 0.88, metalness: 0.08, concrete: true, floorLighten: 0.2 },
       { color: 0x141414, roughness: 0.28, metalness: 0.85 },
-      { color: 0xfafcff, roughness: 0.16, metalness: 0.15 },
-      { color: 0xa8241d, roughness: 0.3, metalness: 0.4 },
+      { color: 0xfafcff, roughness: 0.16, metalness: 0.15, floorSame: true },
+      { color: 0xffe600, roughness: 0.18, metalness: 0.08, floorSame: true },
     ];
     function applyBuildingMaterial(index) {
       const preset = BUILDING_MATERIAL_PRESETS[index];
       const mainColor = preset ? preset.color : COLORS.wall;
       const roughness = preset ? preset.roughness : 0.85;
       const metalness = preset ? preset.metalness : 0.02;
-      const map = preset ? null : wallGrainTex;
+      const useConcreteTex = !!(preset && preset.concrete);
+      const map = preset ? (useConcreteTex ? concretePanelTex : null) : wallGrainTex;
       const roughnessMap = preset ? null : wallRoughTex;
       wallMat.map = map;
       wallMat.roughnessMap = roughnessMap;
@@ -2456,6 +2509,39 @@ export default function RoomBuilder() {
       wallMatDim.roughness = roughness;
       wallMatDim.metalness = metalness;
       wallMatDim.needsUpdate = true;
+
+      // the room ceiling ("roof") always matches the walls -- a balcony's
+      // own covered ceiling already tracks currentWallMat directly, so it
+      // follows for free without any change here.
+      ceilingMat.map = map;
+      ceilingMat.color.set(mainColor);
+      ceilingMat.roughness = roughness;
+      ceilingMat.metalness = metalness;
+      ceilingMat.needsUpdate = true;
+
+      let floorColor = COLORS.floor, floorRough = 0.88, floorMetal = 0.0;
+      let floorMap = floorGrainTex, floorRoughnessMap = floorRoughTex;
+      if (preset && preset.floorLighten != null) {
+        floorColor = new THREE.Color(mainColor).lerp(new THREE.Color(0xffffff), preset.floorLighten);
+        floorRough = roughness; floorMetal = metalness;
+        floorMap = useConcreteTex ? concretePanelTex : null;
+        floorRoughnessMap = null;
+      } else if (preset && preset.floorSame) {
+        floorColor = mainColor; floorRough = roughness; floorMetal = metalness;
+        floorMap = null; floorRoughnessMap = null;
+      }
+      floorMat.map = floorMap;
+      floorMat.roughnessMap = floorRoughnessMap;
+      floorMat.color.set(floorColor);
+      floorMat.roughness = floorRough;
+      floorMat.metalness = floorMetal;
+      floorMat.needsUpdate = true;
+      floorMatDim.map = floorMap;
+      floorMatDim.roughnessMap = floorRoughnessMap;
+      floorMatDim.color.set(new THREE.Color(floorColor).multiplyScalar(0.5));
+      floorMatDim.roughness = floorRough;
+      floorMatDim.metalness = floorMetal;
+      floorMatDim.needsUpdate = true;
     }
     buildingMaterialApiRef.current = applyBuildingMaterial;
 
@@ -3285,6 +3371,15 @@ export default function RoomBuilder() {
         return;
       }
       if (kind === "wall" || kind === "partition" || kind === "selection") {
+        // reaching here means the tap landed on a wall/partition itself,
+        // not an existing opening/stair/balcony (those are handled -- and
+        // return early -- above), so any previously selected one of those
+        // is stale now: clear it rather than leaving its resize handles
+        // and ribbon controls stuck showing while a new thing gets drawn.
+        setSelectedOpeningId(null);
+        setSelectedStairId(null);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
         // switchActiveRoom resets `state` to the active floor when it
@@ -4967,6 +5062,7 @@ export default function RoomBuilder() {
       wallRoughTex.dispose();
       floorGrainTex.dispose();
       floorRoughTex.dispose();
+      concretePanelTex.dispose();
       groundPlane.geometry.dispose();
       groundMat.dispose();
       groundFadeTex.dispose();
@@ -5655,16 +5751,16 @@ export default function RoomBuilder() {
           <button
             className="rb-btn"
             onClick={() => setBuildingMaterialIndex((i) => (i + 1) % 5)}
-            title="Cycle building material (default, concrete, black metal, white plastic, red)"
+            title="Cycle building material (default, concrete, black metal, white plastic, yellow)"
             style={{
               padding: 2, width: 22, height: 22, minWidth: 22, display: "grid",
               gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr 1fr", gap: 1, overflow: "hidden",
             }}
           >
-            <span style={{ background: "#9b968c", borderRadius: 1 }} />
+            <span style={{ background: "#93999c", borderRadius: 1 }} />
             <span style={{ background: "#141414", borderRadius: 1 }} />
-            <span style={{ background: "#f0efe9", borderRadius: 1 }} />
-            <span style={{ background: "#a8241d", borderRadius: 1 }} />
+            <span style={{ background: "#fafcff", borderRadius: 1 }} />
+            <span style={{ background: "#ffe600", borderRadius: 1 }} />
           </button>
           <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
           <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
