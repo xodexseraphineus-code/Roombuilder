@@ -2752,9 +2752,27 @@ export default function RoomBuilder() {
       const neededRadius = Math.max(maxX - minX, maxZ - minZ) * 0.85 + 2;
       target.x = cx;
       target.z = cz;
+      // since any visible layer's walls stay editable regardless of which one
+      // is "active" (see rebuildFloorEntry), the camera must keep every
+      // visible layer in frame when switching/duplicating the active one --
+      // otherwise a layer can get scrolled out of view and its walls become
+      // unreachable to click, even though they're still fully editable.
+      let minY = Infinity, maxY = -Infinity;
+      floors.forEach((f) => {
+        const visible = isolatedFloorIds.size > 0 ? isolatedFloorIds.has(f.id) : !hiddenFloorIds.has(f.id);
+        if (!visible) return;
+        const g = floorGroups.get(f.id);
+        if (!g) return;
+        minY = Math.min(minY, g.position.y);
+        maxY = Math.max(maxY, g.position.y + f.data.height);
+      });
       const g = floorGroups.get(entry.id);
-      if (g) target.y = g.position.y + entry.data.height * 0.32;
-      if (neededRadius > radius) radius = Math.min(MAX_RADIUS, neededRadius);
+      if (minY === Infinity) { minY = g ? g.position.y : 0; maxY = minY + entry.data.height; }
+      const activeCenterY = g ? g.position.y + entry.data.height * 0.32 : (minY + maxY) / 2;
+      target.y = Math.max(minY, Math.min(maxY, activeCenterY));
+      const verticalRadius = (maxY - minY) * 0.6 + 2;
+      const combinedRadius = Math.max(neededRadius, verticalRadius);
+      if (combinedRadius > radius) radius = Math.min(MAX_RADIUS, combinedRadius);
       updateCamera();
     }
 
