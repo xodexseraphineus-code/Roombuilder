@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -263,6 +263,7 @@ export default function RoomBuilder() {
   const [voiceStatus, setVoiceStatus] = useState(""); // "", "listening", "thinking", "done", "error"
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const voiceRecognitionRef = useRef(null);
+  const [commandText, setCommandText] = useState(""); // typed alternative to the mic, for when speech input isn't available
   const copyFloorRef = useRef(() => {});
   const cutFloorRef = useRef(() => {});
   const pasteFloorRef = useRef(() => {});
@@ -5309,6 +5310,29 @@ export default function RoomBuilder() {
     });
   }
 
+  // shared by both the spoken and typed command paths: sends the
+  // instruction text to Claude, runs whatever actions come back, and
+  // reports the outcome in the same status/transcript window either way.
+  async function submitToClaude(said) {
+    setVoiceStatus("thinking");
+    try {
+      const actions = await askClaude(said);
+      executeVoiceActions(actions);
+      setVoiceStatus(actions.length ? "done" : "error");
+      setVoiceTranscript(actions.length ? "" : said + "\n(No matching action understood.)");
+    } catch (err) {
+      setVoiceStatus("error");
+      setVoiceTranscript("Couldn't reach Claude: " + (err && err.message ? err.message : String(err)));
+    }
+  }
+
+  function submitTypedCommand() {
+    const said = commandText.trim();
+    if (!said) return;
+    setCommandText("");
+    submitToClaude(said);
+  }
+
   function startVoiceListening() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
@@ -5359,16 +5383,7 @@ export default function RoomBuilder() {
         setVoiceTranscript("No speech was captured -- try again and speak right after tapping.");
         return;
       }
-      setVoiceStatus("thinking");
-      try {
-        const actions = await askClaude(said);
-        executeVoiceActions(actions);
-        setVoiceStatus(actions.length ? "done" : "error");
-        if (!actions.length) setVoiceTranscript(said + "\n(No matching action understood.)");
-      } catch (err) {
-        setVoiceStatus("error");
-        setVoiceTranscript("Couldn't reach Claude: " + (err && err.message ? err.message : String(err)));
-      }
+      await submitToClaude(said);
     };
     try {
       rec.start();
@@ -5494,22 +5509,49 @@ export default function RoomBuilder() {
 
       <div ref={mountRef} style={{ position: "absolute", inset: 0, touchAction: "none" }} />
 
-      {/* Voice command UI -- mic button + status window, below the top bar
-          and inset from the right edge. Tap to start (ring turns orange
-          while active), speak, tap again to stop and submit. */}
+      {/* Command UI -- a typed command box plus the mic button, below the
+          top bar and inset from the right edge. Mic: tap to start (ring
+          turns orange while active), speak, tap again to stop and submit.
+          Text box: type an instruction and hit Enter or the send button --
+          same Claude pipeline either way, useful wherever speech input
+          isn't available (e.g. this sandbox). */}
       <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 14, right: 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-        <button
-          className="rb-btn"
-          onClick={() => (voiceListening ? stopVoiceListening() : startVoiceListening())}
-          style={{
-            width: 40, height: 40, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: voiceListening ? "0 0 0 3px #FF9500" : "none",
-            transition: "box-shadow 0.15s ease",
-          }}
-          title={voiceListening ? "Tap to stop and submit" : "Tap to start voice command"}
-        >
-          <Mic size={16} strokeWidth={2} color={voiceListening ? "#FF9500" : undefined} />
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="text"
+            value={commandText}
+            onChange={(e) => setCommandText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submitTypedCommand(); }}
+            placeholder="Type a command…"
+            style={{
+              width: 200, height: 34, padding: "0 10px", borderRadius: 9,
+              border: "0.5px solid var(--border-control)", background: "var(--bg-floating)",
+              backdropFilter: "blur(12px)", color: "var(--text-primary)", fontSize: 12, outline: "none",
+            }}
+          />
+          <button
+            className="rb-btn"
+            onClick={submitTypedCommand}
+            disabled={!commandText.trim()}
+            style={{ width: 34, height: 34, borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", opacity: commandText.trim() ? 1 : 0.5 }}
+            title="Send command"
+          >
+            <Send size={14} strokeWidth={2} />
+          </button>
+          <button
+            className="rb-btn"
+            onClick={() => (voiceListening ? stopVoiceListening() : startVoiceListening())}
+            style={{
+              width: 40, height: 40, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+              boxShadow: voiceListening ? "0 0 0 3px #FF9500" : "none",
+              transition: "box-shadow 0.15s ease",
+              flexShrink: 0,
+            }}
+            title={voiceListening ? "Tap to stop and submit" : "Tap to start voice command"}
+          >
+            <Mic size={16} strokeWidth={2} color={voiceListening ? "#FF9500" : undefined} />
+          </button>
+        </div>
         {(voiceStatus || voiceTranscript) && (
           <div
             style={{
