@@ -5383,7 +5383,7 @@ export default function RoomBuilder() {
   }
 
   return (
-    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100vh", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
+    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
         * { box-sizing: border-box; }
         [data-theme="dark"] {
