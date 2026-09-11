@@ -163,6 +163,9 @@ export default function RoomBuilder() {
   const [selectedOpeningId, setSelectedOpeningId] = useState(null); // a window or door cutout in a wall
   const selectedOpeningIdRef = useRef(selectedOpeningId);
   useEffect(() => { selectedOpeningIdRef.current = selectedOpeningId; rebuildModelRef.current(); }, [selectedOpeningId]);
+  const [selectedPropId, setSelectedPropId] = useState(null); // a placed sphere/cube/cone/cylinder prop
+  const selectedPropIdRef = useRef(selectedPropId);
+  useEffect(() => { selectedPropIdRef.current = selectedPropId; rebuildModelRef.current(); }, [selectedPropId]);
   const [balconyStairHeight, setBalconyStairHeight] = useState(3 * FT);
   const balconyHeightApiRef = useRef({ setHeight: () => {} });
   const [balconyPlatformWidth, setBalconyPlatformWidth] = useState(10 * FT);
@@ -175,6 +178,7 @@ export default function RoomBuilder() {
   const balconyGlassApiRef = useRef({ setEnabled: () => {} });
   const deleteBalconyRef = useRef(() => {});
   const deleteOpeningRef = useRef(() => {});
+  const deletePropRef = useRef(() => {});
   const openingEditApiRef = useRef({ setHeight: () => {}, setDividers: () => {}, setAxis: () => {} });
   const [selectedOpeningIsDoor, setSelectedOpeningIsDoor] = useState(false);
   const voiceActionsRef = useRef({});
@@ -2177,26 +2181,75 @@ export default function RoomBuilder() {
       }
     }
 
-    // decorative sphere/cube/cone/cylinder props, placed by tapping the
-    // floor with the Props tool -- purely visual for now (not pickable,
-    // so they can't be moved or deleted from the UI yet).
+    // sphere/cube/cone/cylinder props, placed by tapping the floor with the
+    // Props tool. Each stores its own w (x-size)/d (z-size)/h (y-size),
+    // falling back to the original fixed sizes for props placed before
+    // resizing existed. Cube resizes w/d independently (a true rectangle);
+    // sphere/cylinder/cone keep w===d (a uniform radius) and only h varies
+    // independently, so a corner drag can never make them elliptical.
+    function propDefaultDiameter(kind) { return kind === "cone" || kind === "cylinder" ? 6 * FT : PROP_HEIGHT; }
+    function propWidthOf(p) { return p.w != null ? p.w : propDefaultDiameter(p.kind); }
+    function propDepthOf(p) { return p.d != null ? p.d : propDefaultDiameter(p.kind); }
+    function propHeightOf(p) { return p.h != null ? p.h : PROP_HEIGHT; }
+    const PROP_MIN_SIZE = 0.2; // smallest edge/diameter/height a prop can be resized to
+    const PROP_MAX_SIZE = 30;
+    const PROP_HANDLE = 0.16; // small cube handles -- visually unobtrusive, still easy to grab on touch
+
     function renderProps() {
-      const r = 3 * FT;
       (state.props || []).forEach((p) => {
+        const w = propWidthOf(p), d = propDepthOf(p), h = propHeightOf(p);
         let geo;
         switch (p.kind) {
-          case "sphere": geo = new THREE.SphereGeometry(PROP_HEIGHT / 2, 20, 16); break;
-          case "cube": geo = new THREE.BoxGeometry(PROP_HEIGHT, PROP_HEIGHT, PROP_HEIGHT); break;
-          case "cone": geo = new THREE.ConeGeometry(r, PROP_HEIGHT, 24); break;
-          case "cylinder": default: geo = new THREE.CylinderGeometry(r, r, PROP_HEIGHT, 24); break;
+          case "sphere":
+            geo = new THREE.SphereGeometry(w / 2, 20, 16);
+            break;
+          case "cube":
+            geo = new THREE.BoxGeometry(w, h, d);
+            break;
+          case "cone":
+            geo = new THREE.ConeGeometry(w / 2, h, 24);
+            break;
+          case "cylinder":
+          default:
+            geo = new THREE.CylinderGeometry(w / 2, w / 2, h, 24);
+            break;
         }
         const mesh = new THREE.Mesh(geo, propMats[p.kind] || propMats.cube);
-        mesh.position.set(p.x, PROP_HEIGHT / 2, p.z);
+        mesh.position.set(p.x, h / 2, p.z);
+        // a sphere's geometry radius already sets its X/Z extent (kept
+        // equal to w=d above) -- height comes from a Y-only scale instead,
+        // since SphereGeometry has no independent height parameter.
+        if (p.kind === "sphere" && w > 0.001) mesh.scale.y = h / w;
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         addEdges(mesh);
         mesh.userData = { kind: "prop", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(mesh);
+        if (isPickableTarget) pickList.push(mesh);
+
+        if (isPickableTarget && selectedPropIdRef.current === p.id) {
+          const boxGeo = new THREE.BoxGeometry(w, h, d);
+          const wire = new THREE.LineSegments(
+            new THREE.EdgesGeometry(boxGeo),
+            new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthTest: false })
+          );
+          wire.position.set(p.x, h / 2, p.z);
+          wire.renderOrder = 9;
+          sceneGroup.add(wire);
+
+          function addHandle(edge, hx, hy, hz) {
+            const mesh2 = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+            mesh2.position.set(hx, hy, hz);
+            mesh2.renderOrder = 10;
+            mesh2.userData = { kind: "resize-handle", target: "prop", id: p.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh2);
+            pickList.push(mesh2);
+          }
+          [["nw", -1, -1], ["ne", 1, -1], ["sw", -1, 1], ["se", 1, 1]].forEach(([edge, sx, sz]) => {
+            addHandle(edge, p.x + sx * (w / 2), h, p.z + sz * (d / 2));
+          });
+          addHandle("top", p.x, h + PROP_HANDLE * 0.9, p.z);
+        }
       });
     }
 
@@ -3390,6 +3443,27 @@ export default function RoomBuilder() {
           if (!info) return;
           pushUndo();
           dragState = { type: "resize-balcony", id: rh.id, edge: rh.edge, panelKey: bal.panel, plane: panelFacePlane(info, hit.point) };
+        } else if (rh.target === "prop") {
+          const p = (state.props || []).find((pp) => pp.id === rh.id);
+          if (!p) return;
+          pushUndo();
+          if (rh.edge === "top") {
+            // vertical drag: a plane through the prop's center, facing the
+            // camera, so the pointer ray's intersection tracks how far up
+            // or down the drag moved regardless of viewing angle.
+            const center = new THREE.Vector3(p.x, propHeightOf(p) / 2, p.z);
+            const camXZ = new THREE.Vector3(interactionCamera.position.x - center.x, 0, interactionCamera.position.z - center.z);
+            if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
+            const plane = new THREE.Plane();
+            plane.setFromNormalAndCoplanarPoint(camXZ, center);
+            dragState = { type: "resize-prop-height", id: rh.id, plane, startH: propHeightOf(p), startY: hit.point.y };
+          } else {
+            // corner drag: a horizontal plane at the prop's current top,
+            // so the pointer's XZ position under the cursor maps directly
+            // to how far the dragged corner has moved from center.
+            const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+            dragState = { type: "resize-prop-corner", id: rh.id, corner: rh.edge, plane, cx: p.x, cz: p.z };
+          }
         }
         capture(e);
         return;
@@ -3421,6 +3495,7 @@ export default function RoomBuilder() {
         const bal = (state.balconies || []).find((b) => b.id === obj.userData.id);
         setSelectedPanel(null);
         setSelectedStairId(null);
+        setSelectedPropId(null);
         setSelectedOpeningId(null);
         setSelectedBalconyId(obj.userData.id);
         setSelectedBalconyPart(kind === "balcony-pillar" ? "pillars" : kind === "balcony-ceiling" ? "ceiling" : null);
@@ -3445,6 +3520,7 @@ export default function RoomBuilder() {
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
         setSelectedPanel(null);
         setSelectedStairId(null);
+        setSelectedPropId(null);
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
         setSelectedOpeningId(obj.userData.id);
@@ -3464,11 +3540,27 @@ export default function RoomBuilder() {
         return;
       }
 
+      // A placed prop (sphere/cube/cone/cylinder) -- selectable from any
+      // tool, same as stairs/balconies/openings. Selecting it shows the
+      // corner + top-center resize handles (see renderProps).
+      if (kind === "prop") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+        setSelectedOpeningId(null);
+        setSelectedPropId(obj.userData.id);
+        return;
+      }
+
       // Move Walls: tapping the floor selects (or detects) the enclosed room
       // under that point and lets you drag it away; tapping a wall/partition
       // switches editing focus onto whatever it belongs to (the floor itself,
       // or one specific room) before continuing as normal.
       if (toolRef.current === "move" && kind === "floor") {
+        setSelectedPropId(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         const floorEntry = floors.find((f) => f.id === activeFloorId);
         if (!floorEntry) return;
@@ -3525,6 +3617,7 @@ export default function RoomBuilder() {
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
           pushUndo();
           setSelectedStairId(null);
+        setSelectedPropId(null);
           const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
           dragState = { type: "stair-draw", plane, x0: hit.point.x, z0: hit.point.z, x1: hit.point.x, z1: hit.point.z };
           capture(e);
@@ -3554,6 +3647,7 @@ export default function RoomBuilder() {
         // and ribbon controls stuck showing while a new thing gets drawn.
         setSelectedOpeningId(null);
         setSelectedStairId(null);
+        setSelectedPropId(null);
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
@@ -3946,6 +4040,35 @@ export default function RoomBuilder() {
           }
         }
         rebuild();
+      } else if (dragState.type === "resize-prop-corner") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const p = (state.props || []).find((pp) => pp.id === dragState.id);
+        if (!p) { dragState = null; return; }
+        const signX = dragState.corner === "ne" || dragState.corner === "se" ? 1 : -1;
+        const signZ = dragState.corner === "sw" || dragState.corner === "se" ? 1 : -1;
+        const dx = pt.x - dragState.cx, dz = pt.z - dragState.cz;
+        if (p.kind === "cube") {
+          const newW = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, signX * dx * 2));
+          const newD = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, signZ * dz * 2));
+          p.w = newW;
+          p.d = newD;
+        } else {
+          // round shapes stay a uniform radius -- the diagonal distance
+          // from center to the pointer, regardless of which corner it is.
+          const newDiam = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, Math.hypot(dx, dz) * 2));
+          p.w = newDiam;
+          p.d = newDiam;
+        }
+        rebuild();
+      } else if (dragState.type === "resize-prop-height") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const p = (state.props || []).find((pp) => pp.id === dragState.id);
+        if (!p) { dragState = null; return; }
+        const deltaY = pt.y - dragState.startY;
+        p.h = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, dragState.startH + deltaY));
+        rebuild();
       } else if (dragState.type === "room-move") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
@@ -4031,6 +4154,7 @@ export default function RoomBuilder() {
         if (wasTap) {
           setSelectedPanel(null);
           setSelectedStairId(null);
+        setSelectedPropId(null);
           setSelectedBalconyId(null);
           setSelectedBalconyPart(null);
           setSelectedOpeningId(null);
@@ -4411,6 +4535,7 @@ export default function RoomBuilder() {
       setSelectedPanel(null);
       setSelectedRoomId(id);
       setSelectedStairId(null);
+        setSelectedPropId(null);
       setSelectedBalconyId(null);
       setSelectedBalconyPart(null);
       setSelectedOpeningId(null);
@@ -4531,6 +4656,16 @@ export default function RoomBuilder() {
     }
     deleteOpeningRef.current = deleteActiveOpening;
 
+    function deleteActiveProp() {
+      const id = selectedPropIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.props = (state.props || []).filter((p) => p.id !== id);
+      setSelectedPropId(null);
+      rebuild();
+    }
+    deletePropRef.current = deleteActiveProp;
+
     // live-edits whichever opening is currently selected, so the height/
     // dividers/direction controls act on that specific window (or door)
     // instead of only ever setting the default for the next one drawn.
@@ -4632,6 +4767,7 @@ export default function RoomBuilder() {
       setSelectedPanel(null);
       setSelectedRoomId(null);
       setSelectedStairId(null);
+        setSelectedPropId(null);
       rebuild();
       if (prevActiveId !== id) {
         const prevEntry = floors.find((f) => f.id === prevActiveId);
@@ -4988,6 +5124,7 @@ export default function RoomBuilder() {
         }
       }
       setSelectedStairId(null);
+        setSelectedPropId(null);
       rebuild();
     }
     deleteStairRef.current = deleteActiveStair;
@@ -5899,6 +6036,7 @@ export default function RoomBuilder() {
               resetEverythingRef.current();
               setTool("move");
               setSelectedStairId(null);
+        setSelectedPropId(null);
               setStairSteps(12);
               setSelectedBalconyId(null);
               setSelectedBalconyPart(null);
@@ -5951,6 +6089,7 @@ export default function RoomBuilder() {
               if (selectedBalconyId != null) deleteBalconyRef.current();
               else if (selectedStairId != null) deleteStairRef.current();
               else if (selectedOpeningId != null) deleteOpeningRef.current();
+              else if (selectedPropId != null) deletePropRef.current();
               else if (selectedRoomId != null) deleteRoomRef.current();
             }}
           >
