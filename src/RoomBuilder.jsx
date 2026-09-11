@@ -3253,7 +3253,43 @@ export default function RoomBuilder() {
       ndc.y = -((e.clientY - rect.top - ry) / rh) * 2 + 1;
       return ndc;
     }
+    // Resize handles (window/door/balcony/prop) render as small bars or
+    // cubes -- fine visually, but as literal 3D geometry they shrink to a
+    // near-unhittable speck once zoomed out, or on a touchscreen finger.
+    // Rather than growing the geometry itself (which would either look
+    // chunky up close or still be tiny far away), handles get a hit-test
+    // radius that's constant in SCREEN pixels: project each one to screen
+    // space and grab whichever is closest to the pointer, as long as it's
+    // within a generous "fingertip" radius -- independent of zoom level.
+    const HANDLE_HIT_PX = 26;
+    const handleWorldPos = new THREE.Vector3();
+    function pointerPixel(e) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const rx = interactionRect ? interactionRect.x : 0;
+      const ry = interactionRect ? interactionRect.y : 0;
+      return { x: e.clientX - rect.left - rx, y: e.clientY - rect.top - ry };
+    }
+    function pickHandle(e) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const rw = interactionRect ? interactionRect.w : rect.width;
+      const rh = interactionRect ? interactionRect.h : rect.height;
+      const p = pointerPixel(e);
+      let best = null, bestDist = HANDLE_HIT_PX;
+      for (const obj of pickList) {
+        if (obj.userData.kind !== "resize-handle") continue;
+        obj.getWorldPosition(handleWorldPos);
+        const proj = handleWorldPos.clone().project(interactionCamera);
+        if (proj.z < -1 || proj.z > 1) continue; // behind the camera or outside its clip range
+        const sx = (proj.x * 0.5 + 0.5) * rw;
+        const sy = (-proj.y * 0.5 + 0.5) * rh;
+        const d = Math.hypot(sx - p.x, sy - p.y);
+        if (d < bestDist) { bestDist = d; best = obj; }
+      }
+      return best;
+    }
     function pick(e) {
+      const handle = pickHandle(e);
+      if (handle) return { object: handle, point: handle.getWorldPosition(new THREE.Vector3()) };
       raycaster.setFromCamera(getNDC(e), interactionCamera);
       const hits = raycaster.intersectObjects(pickList, false);
       return hits.length ? hits[0] : null;
