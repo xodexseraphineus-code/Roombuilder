@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
@@ -372,11 +372,11 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
     onPick(payload);
   }
 
-  const size = 340;
+  const size = 272; // 20% smaller than the original 340
   const cx = size / 2, cy = size / 2;
-  const hubR = 24;
-  const greyR0 = 24, greyR1 = 42;
-  const discR0 = 42, discR1 = 165;
+  const hubR = 19;
+  const greyR0 = 19, greyR1 = 34;
+  const discR0 = 34, discR1 = 132;
   const hueSpan = 360 / WHEEL_HUE_COUNT;
   const greySpan = 360 / WHEEL_GREY_STEPS;
   const ringDepth = (discR1 - discR0) / WHEEL_TINT_RINGS;
@@ -560,7 +560,7 @@ export default function RoomBuilder() {
   const propsShapeRef = useRef(propsShape);
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
   const [wallThickness, setWallThickness] = useState(0.35);
-  const [ceilingOn, setCeilingOn] = useState(false);
+  const [ceilingOn, setCeilingOn] = useState(true);
   const ceilingApiRef = useRef({ setEnabled: () => {} });
   const [groundOn, setGroundOn] = useState(false);
   const groundApiRef = useRef({ setEnabled: () => {} });
@@ -722,13 +722,20 @@ export default function RoomBuilder() {
   const tintActiveApiRef = useRef(() => {});
   useEffect(() => { tintActiveApiRef.current(tintActiveOn, tintActiveColor); }, [tintActiveOn, tintActiveColor]);
   const [themeWheelOpen, setThemeWheelOpen] = useState(false);
-  // defaults near the bottom of the Layers panel rather than dead center
-  // over the 3D viewport, so it doesn't sit right in the middle of the
+  // defaults beside the Layers panel, in the lower-left corner of the 3D
+  // viewport, with a real buffer from the panel edge and the ribbon below
+  // it -- not sitting on top of the panel, and not dead center over the
   // user's work area the moment it's opened.
-  const [themeWheelPos, setThemeWheelPos] = useState(() => ({
-    x: 210,
-    y: typeof window !== "undefined" ? Math.max(320, window.innerHeight - 260) : 420,
-  }));
+  const [themeWheelPos, setThemeWheelPos] = useState(() => {
+    const wheelHalf = 136; // half of the wheel overlay's own 272px size
+    const edgeBuffer = 36;
+    const defaultPanelWidth = 148;
+    const ribbonHeight = 48;
+    return {
+      x: defaultPanelWidth + edgeBuffer + wheelHalf,
+      y: typeof window !== "undefined" ? Math.max(320, window.innerHeight - ribbonHeight - edgeBuffer - wheelHalf) : 420,
+    };
+  });
   // { type: "hue", hueDeg, ring } | { type: "grey", step, midLight } | { type: "preset", name } | null
   const [themeAnchor, setThemeAnchor] = useState(null);
   const themeApiRef = useRef(() => {});
@@ -808,7 +815,7 @@ export default function RoomBuilder() {
     // to the Layers/Recent panels' own --bg-panel in each theme (#e8e8e8
     // light, #2c2c2e dark), so spinning the 3D view right up against the
     // sidebar shows no seam at all, rather than a distinct tone of its own.
-    const VIEWPORT_BG_LIGHT = 0xe8e8e8;
+    const VIEWPORT_BG_LIGHT = 0xe5e5e5;
     const VIEWPORT_BG_DARK = 0x2c2c2e;
     function applyViewportTheme(theme) {
       const c = theme === "light" ? VIEWPORT_BG_LIGHT : VIEWPORT_BG_DARK;
@@ -1415,7 +1422,7 @@ export default function RoomBuilder() {
         props: [],        // {id, kind, x, z} -- decorative sphere/cube/cone/cylinder placed on the floor
         curvedCorners: { enabled: false, radius: 0 }, // rounds the 4 corners of the base footprint's external walls
         balconies: [], // {id, panel, u0, u1, dividerAxis} -- a staircase+platform+pillars assembly with a window/door cutout in the wall behind it
-        ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target
+        ceilingEnabled: true, // a purely decorative slab at wall-height -- never a raycast target
       };
     }
     let idSeq = 1;
@@ -1683,6 +1690,10 @@ export default function RoomBuilder() {
         if (!parent) return;
         if (isMax) bo.u1 = Math.max(bo.u0 + 0.3, Math.min(parent.u1, newCoord));
         else bo.u0 = Math.min(bo.u1 - 0.3, Math.max(parent.u0, newCoord));
+        // widening the bump-out can newly overlap an opening that used to
+        // sit entirely on the flat parent wall -- same reassignment as at
+        // creation time, so that part of it moves onto the bump-out's face.
+        splitOpeningsAcrossBump(bo.panel, bo.u0, bo.u1, bo.id);
       }
     }
     // a pulled section can grow outward (positive depth, a new protrusion) or
@@ -1790,7 +1801,7 @@ export default function RoomBuilder() {
     const balconyRoofMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
     // decorative room ceiling -- 10% transparent (90% opaque) so it doesn't
     // block editing visibility from above; never added to pickList.
-    const ceilingMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.9, envMapIntensity: 0.35 });
+    const ceilingMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.6, envMapIntensity: 0.35 });
     // swapped to the dimmed pair whenever we're building a non-active floor,
     // so every other floor reads as 30% darker while it's not the one you're editing
     let currentWallMat = wallMat;
@@ -1993,7 +2004,7 @@ export default function RoomBuilder() {
         // door, rather than the window system's full column/row grid.
         if (Math.round(c.dividers || 0) >= 1) {
           const mid = (c.u0 + c.u1) / 2;
-          addMullion(mid - 0.025, mid + 0.025, doorBottom, doorTop);
+          addMullion(mid - 0.0175, mid + 0.0175, doorBottom, doorTop);
         }
         return;
       }
@@ -2011,7 +2022,7 @@ export default function RoomBuilder() {
       const axis = c.dividerAxis || "vertical";
       const doVertical = axis === "vertical" || axis === "both";
       const doHorizontal = axis === "horizontal" || axis === "both";
-      const mullionWidth = 0.05;
+      const mullionWidth = 0.035; // 30% thinner than the original 0.05
 
       // vertical dividers split the opening into columns (u-spans); if off,
       // there's just one column spanning the whole width.
@@ -2147,6 +2158,33 @@ export default function RoomBuilder() {
       return list;
     }
     function bumpoutsFor(panelKey) { return state.bumpouts.filter((b) => b.panel === panelKey); }
+    // If a new/resized bump-out's u-span now overlaps an existing
+    // window/door opening on the same wall, the part of the opening that
+    // falls inside the bump-out's span belongs on the bump-out's own far
+    // face -- a different plane now, not the original wall -- while
+    // whatever's outside the bump-out stays put. Without this, an opening
+    // that used to span the whole wall keeps rendering at the original
+    // wall's coordinate even where that wall has been pushed or pulled
+    // out from under it, leaving it floating in space. Splitting it into
+    // up to three independent openings (each reassigned to whichever
+    // panel is actually behind it) is what makes each piece sit flush
+    // with its own wall and remain independently editable afterward.
+    function splitOpeningsAcrossBump(panelKey, bumpU0, bumpU1, bumpoutId) {
+      const affected = state.openings.filter((o) => o.panel === panelKey && rangesOverlap(bumpU0, bumpU1, o.u0, o.u1));
+      affected.forEach((o) => {
+        state.openings = state.openings.filter((oo) => oo.id !== o.id);
+        const midU0 = Math.max(o.u0, bumpU0), midU1 = Math.min(o.u1, bumpU1);
+        if (midU1 - midU0 > 0.05) {
+          state.openings.push({ ...o, id: idSeq++, panel: "bf:" + bumpoutId, u0: midU0, u1: midU1 });
+        }
+        if (o.u0 < bumpU0 - 0.001) {
+          state.openings.push({ ...o, id: idSeq++, panel: panelKey, u0: o.u0, u1: bumpU0 });
+        }
+        if (o.u1 > bumpU1 + 0.001) {
+          state.openings.push({ ...o, id: idSeq++, panel: panelKey, u0: bumpU1, u1: o.u1 });
+        }
+      });
+    }
     function selectionsFor(panelKey) {
       const list = state.selections.filter((s) => s.panel === panelKey);
       if (previewSelection && previewSelection.panel === panelKey) list.push(previewSelection);
@@ -3483,6 +3521,17 @@ export default function RoomBuilder() {
       wallMat.envMap = shinyEnvMap;
       wallMat.needsUpdate = true;
 
+      // window/door mullions -- same finish as the wall itself (not their
+      // own separate dark-metal material), just 20% darker so they still
+      // read as a distinct frame rather than disappearing into the pane.
+      mullionMat.map = map;
+      mullionMat.roughnessMap = roughnessMap;
+      mullionMat.color.copy(wallColor).multiplyScalar(0.8);
+      mullionMat.roughness = roughness;
+      mullionMat.metalness = metalness;
+      mullionMat.envMap = shinyEnvMap;
+      mullionMat.needsUpdate = true;
+
       const wallDimColor = new THREE.Color(mainColor).multiplyScalar(0.5);
       if (currentTintInactiveOn) wallDimColor.lerp(new THREE.Color(currentTintInactiveColor), 0.8);
       wallMatDim.map = map;
@@ -4104,7 +4153,7 @@ export default function RoomBuilder() {
     // radius that's constant in SCREEN pixels: project each one to screen
     // space and grab whichever is closest to the pointer, as long as it's
     // within a generous "fingertip" radius -- independent of zoom level.
-    const HANDLE_HIT_PX = 26;
+    const HANDLE_HIT_PX = 42; // bigger than a fingertip in screen space -- these are fiddly to grab otherwise
     const handleWorldPos = new THREE.Vector3();
     function pointerPixel(e) {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -4744,6 +4793,7 @@ export default function RoomBuilder() {
               state.selections = state.selections.filter((s) => s.id !== sel.id);
               const id = idSeq++;
               state.bumpouts.push({ id, panel: dragState.panelKey, u0: sel.u0, u1: sel.u1, depth: 0 });
+              splitOpeningsAcrossBump(dragState.panelKey, sel.u0, sel.u1, id);
               dragState = { type: "panel-extrude", panelKey: "bf:" + id, thickAxis: info.thickAxis, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), startCoord: info.coord };
             } else {
               dragState = { type: "panel-extrude", panelKey: dragState.panelKey, thickAxis: info.thickAxis, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), startCoord: info.coord };
@@ -6309,21 +6359,6 @@ export default function RoomBuilder() {
   const layersScrollRef = useRef(null);
   const scrollStripDragRef = useRef(null);
   const recentScrollInnerRef = useRef(null);
-  const recentScrollDragRef = useRef(null);
-  const recentScrollTrackRef = useRef(null);
-  const recentScrollThumbRef = useRef(null);
-  const updateRecentThumb = useCallback(() => {
-    const el = recentScrollInnerRef.current, thumb = recentScrollThumbRef.current;
-    if (!el || !thumb) return;
-    const { scrollWidth, clientWidth, scrollLeft } = el;
-    if (scrollWidth <= clientWidth + 1) { thumb.style.display = "none"; return; }
-    thumb.style.display = "block";
-    const widthPct = Math.max((clientWidth / scrollWidth) * 100, 8);
-    const leftPct = (scrollLeft / (scrollWidth - clientWidth)) * (100 - widthPct);
-    thumb.style.width = `${widthPct}%`;
-    thumb.style.left = `${leftPct}%`;
-  }, []);
-  useEffect(() => { updateRecentThumb(); }, [recentScenes.length, layersPanelWidth, updateRecentThumb]);
   const newSceneBtnRef = useRef(null);
   const defaultLayersWidth = () => 210;
   useEffect(() => { setLayersPanelWidth(defaultLayersWidth()); }, []);
@@ -6482,6 +6517,12 @@ export default function RoomBuilder() {
           --bg-panel-translucent: var(--bg-content);
           --bg-strip: #1c1c1e;
           --splitter: var(--bg-strip);
+          /* a distinctly-visible hairline for the layer/recent panels'
+             own edge against the 3D view, and the gap above Recent --
+             lighter than the panel fill (the inverse of light mode's
+             darker hairline), not just the subtle top-band-matching
+             --splitter which reads as almost no line at all. */
+          --divider-strong: #59595d;
           --bg-control: #3a3a3c;
           --bg-control-hover: #444446;
           --bg-control-pressed: #58585a;
@@ -6504,12 +6545,17 @@ export default function RoomBuilder() {
              is pinned to that exact same darker value rather than a
              separate translucent-black mix (which read as crushing to
              near-black in practice). */
-          --bg-content: #e8e8e8;
+          --bg-content: #e5e5e5;
           --bg-window: var(--bg-content);
           --bg-panel: var(--bg-content);
           --bg-panel-translucent: var(--bg-content);
-          --bg-strip: #b0b0b0;
+          --bg-strip: #e1e1e1;
           --splitter: var(--bg-strip);
+          /* color-picked directly from the reference mockup: a distinct,
+             clearly-visible hairline (not the near-invisible --splitter
+             match) for the layer/recent panels' own edge and the gap
+             above Recent. */
+          --divider-strong: #c7c7c9;
           --bg-thumb: #ffffff;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
@@ -6580,7 +6626,6 @@ export default function RoomBuilder() {
           border: 1.5px solid var(--border-control); background: var(--bg-control);
           cursor: pointer; position: relative;
         }
-        .rb-radio:checked { border-color: var(--accent); }
         .rb-radio:checked::after {
           content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--accent);
         }
@@ -6617,11 +6662,6 @@ export default function RoomBuilder() {
         .layers-scroll::-webkit-scrollbar-thumb { background: rgba(255, 107, 26, 0.55); border-radius: 4px; border: 6px solid transparent; background-clip: padding-box; }
         .layers-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 107, 26, 0.8); background-clip: padding-box; }
         .layers-scroll::-webkit-scrollbar-track { background: var(--scrollbar-track); }
-        .recent-scroll { -webkit-overflow-scrolling: touch; touch-action: pan-x; overscroll-behavior: contain; }
-        .recent-scroll::-webkit-scrollbar { height: 12px; }
-        .recent-scroll::-webkit-scrollbar-thumb { background: rgba(255, 107, 26, 0.55); border-radius: 4px; border: 3px solid transparent; background-clip: padding-box; }
-        .recent-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 107, 26, 0.8); background-clip: padding-box; }
-        .recent-scroll::-webkit-scrollbar-track { background: var(--scrollbar-track); }
         .rb-walk-btn {
           width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
           background: var(--bg-floating); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -6762,19 +6802,23 @@ export default function RoomBuilder() {
         style={{
           position: "absolute", bottom: RIBBON_HEIGHT, left: 0, height: RECENT_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)", display: "flex", flexDirection: "column", overflow: "hidden",
+          borderRight: "2px solid var(--divider-strong)",
         }}
       >
-        <div style={{ padding: "8px 9px 4px" }}>
+        {/* a clearly-visible splitter with real breathing room on both
+            sides, matching the reference's own gap between its object-type
+            list and its "recent" section header. */}
+        <div style={{ margin: "10px 12px 0", borderTop: "1px solid var(--divider-strong)" }} />
+        <div style={{ padding: "10px 9px 4px" }}>
           <span className="panel-title">Recent</span>
         </div>
         <div
-          className="recent-scroll"
+          className="recent-scroll layers-scroll"
           ref={recentScrollInnerRef}
-          onScroll={updateRecentThumb}
-          style={{ flex: 1, minHeight: 0, overflowX: "auto", overflowY: "hidden", display: "flex", gap: 6, padding: "0 9px 10px", alignItems: "flex-start" }}
+          style={{ position: "static", flex: 1, minHeight: 0, display: "flex", flexWrap: "wrap", gap: 6, alignContent: "flex-start", padding: "0 34px 10px 9px" }}
         >
           {recentScenes.length === 0 && (
-            <span style={{ fontSize: 9, color: "var(--text-tertiary)", alignSelf: "center" }}>Autosaves every 15s</span>
+            <span style={{ fontSize: 9, color: "var(--text-tertiary)" }}>Autosaves every 15s</span>
           )}
           {recentScenes.map((entry) => (
             <button
@@ -6795,35 +6839,6 @@ export default function RoomBuilder() {
             </button>
           ))}
         </div>
-        <div
-          ref={recentScrollTrackRef}
-          title="Drag to scroll"
-          onPointerDown={(e) => {
-            e.currentTarget.setPointerCapture(e.pointerId);
-            recentScrollDragRef.current = { startX: e.clientX, startScrollLeft: recentScrollInnerRef.current ? recentScrollInnerRef.current.scrollLeft : 0 };
-          }}
-          onPointerMove={(e) => {
-            const ds = recentScrollDragRef.current;
-            if (!ds || !recentScrollInnerRef.current) return;
-            recentScrollInnerRef.current.scrollLeft = ds.startScrollLeft - (e.clientX - ds.startX);
-            updateRecentThumb();
-          }}
-          onPointerUp={() => { recentScrollDragRef.current = null; }}
-          style={{
-            position: "absolute", bottom: 0, left: 9, right: 9, height: 10,
-            touchAction: "none", cursor: "ew-resize", display: "flex", alignItems: "center",
-          }}
-        >
-          <div style={{ position: "relative", width: "100%", height: 4, borderRadius: 2, background: "var(--scrollbar-track)" }}>
-            <div
-              ref={recentScrollThumbRef}
-              style={{
-                position: "absolute", top: 0, height: "100%", borderRadius: 2,
-                background: "var(--border-separator)", pointerEvents: "none",
-              }}
-            />
-          </div>
-        </div>
       </div>
 
       {/* LEFT: Layers panel -- docked flush to the left edge, directly
@@ -6835,6 +6850,7 @@ export default function RoomBuilder() {
           position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT + RECENT_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: "flex", flexDirection: "column", overflow: "hidden",
+          borderRight: "2px solid var(--divider-strong)",
         }}
       >
         <div
