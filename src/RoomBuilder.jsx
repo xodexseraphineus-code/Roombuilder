@@ -1024,8 +1024,66 @@ export default function RoomBuilder() {
       envScene.add(sun);
       return envScene;
     }
+    // A second, much more detailed environment used only for reflections on
+    // glass and "shiny" finishes (metal/gloss/railings) -- a high-contrast
+    // cityscape silhouette (dark buildings), a bright sky, and a very hot
+    // sun hotspot, so a reflective surface actually reads as reflecting a
+    // real place instead of a flat gradient. Generated procedurally (same
+    // PMREMGenerator approach as the soft ambient one above) rather than
+    // fetched from an external HDRI file -- no network dependency, and it
+    // works the same whether this ships on GitHub Pages or inlined into an
+    // Artifact page with a strict CDN allowlist that wouldn't permit
+    // fetching a real .hdr file anyway.
+    function buildReflectionEnvironmentScene() {
+      const envScene = new THREE.Scene();
+      const skyRadius = 45;
+      const skyGeo = new THREE.SphereGeometry(skyRadius, 32, 20, 0, Math.PI * 2, 0, Math.PI / 2);
+      // a bright, punchy sky -- near-white at the horizon, a saturated blue
+      // overhead, noticeably brighter than the soft ambient sky so it reads
+      // as "high contrast" against the dark building silhouettes below it.
+      paintVerticalGradient(skyGeo, skyRadius, new THREE.Color(0xdfe9f5).multiplyScalar(1.4), new THREE.Color(0x2f6fd8).multiplyScalar(1.6));
+      const sky = new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide }));
+      envScene.add(sky);
+      // a ring of dark, varied-height building silhouettes -- what actually
+      // gives a reflection its "cityscape" read, rather than just a plain
+      // gradient with a bright spot in it.
+      const buildingCount = 28;
+      const cityMat = new THREE.MeshBasicMaterial({ color: 0x08090b });
+      for (let i = 0; i < buildingCount; i++) {
+        const angle = (i / buildingCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.15;
+        const dist = 16 + Math.random() * 10;
+        const h = 4 + Math.random() * 26;
+        const w = 2 + Math.random() * 3.5;
+        const geo = new THREE.BoxGeometry(w, h, w);
+        const mesh = new THREE.Mesh(geo, cityMat);
+        mesh.position.set(Math.cos(angle) * dist, h / 2, Math.sin(angle) * dist);
+        mesh.rotation.y = Math.random() * Math.PI;
+        envScene.add(mesh);
+      }
+      const ground = new THREE.Mesh(
+        new THREE.SphereGeometry(skyRadius, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: 0x050506, side: THREE.BackSide })
+      );
+      envScene.add(ground);
+      // a very hot, tight sun hotspot -- placed along the same direction as
+      // keyLight so it agrees with the actual shadow-casting light, but far
+      // brighter than the soft environment's own sun since this map is only
+      // ever used for point-like specular reflections, never as broad IBL.
+      const sunDir = keyLight.position.clone().normalize();
+      const sun = new THREE.Mesh(
+        new THREE.SphereGeometry(1.4, 16, 16),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff4d8).multiplyScalar(40) })
+      );
+      sun.position.copy(sunDir.multiplyScalar(skyRadius * 0.97));
+      envScene.add(sun);
+      return envScene;
+    }
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     const realisticEnvMap = pmremGenerator.fromScene(buildSoftEnvironmentScene(), 0.04).texture;
+    // a lower sigma (less blur) than the soft ambient map -- this one wants
+    // to stay crisp enough that the buildings/sun hotspot actually read as
+    // shapes in a reflection, not another smooth gradient.
+    const reflectionEnvMap = pmremGenerator.fromScene(buildReflectionEnvironmentScene(), 0.015).texture;
     pmremGenerator.dispose();
 
     const composer = new EffectComposer(renderer);
@@ -1709,9 +1767,13 @@ export default function RoomBuilder() {
     // a wall-tinted panel did; a room theme still tints .color on top (a
     // hue-tinted metal rail, e.g. neon blue), but the low roughness/high
     // metalness stays fixed so it always looks like metal hardware.
-    const PILLAR_DEFAULT_COLOR = 0x26282b;
-    const pillarMat = new THREE.MeshStandardMaterial({ color: PILLAR_DEFAULT_COLOR, roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5 });
-    const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(PILLAR_DEFAULT_COLOR).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5 });
+    const PILLAR_DEFAULT_COLOR = 0x333333; // 80% of the way to black
+    const pillarMat = new THREE.MeshStandardMaterial({ color: PILLAR_DEFAULT_COLOR, roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5, envMap: reflectionEnvMap });
+    const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(PILLAR_DEFAULT_COLOR).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5, envMap: reflectionEnvMap });
+    // window/door mullions get their own dark frame material -- 80% of the
+    // way to black by default, distinct from the railings' metal hardware
+    // (less metallic, more like a painted/anodized frame than raw metal).
+    const mullionMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.55, metalness: 0.15, envMapIntensity: 0.4 });
     // the balcony platform gets its own material too -- a room theme colors
     // it independently from the room's own floor, rather than the platform
     // just always matching whatever the floor happens to be.
@@ -1748,6 +1810,10 @@ export default function RoomBuilder() {
     // shares this one material, so the bump applies everywhere at once.
     const glassMat = new THREE.MeshStandardMaterial({
       color: 0x9ec8ee, transparent: true, opacity: 0.3, roughness: 0.096, metalness: 0.06, envMapIntensity: 1.2, side: THREE.DoubleSide,
+      // its own detailed cityscape reflection map rather than the soft
+      // ambient ibl -- glass should visibly reflect *something*, not just
+      // tint toward a flat gradient color.
+      envMap: reflectionEnvMap,
     });
     // an invisible volume used purely to make thin/hollow things (pillars,
     // window and door cutouts) much easier to tap -- raycasting still hits
@@ -1848,19 +1914,34 @@ export default function RoomBuilder() {
       }
     }
 
-    // draggable edge bars around a selected opening -- left/right resize its
-    // width (u0/u1), top resizes its height, and bottom (windows only --
-    // doors are floor-anchored) resizes it from below. Poke slightly proud
-    // of both wall faces and render on top (handleMat has depthTest off) so
-    // they're always visible and easy to grab regardless of viewing angle.
+    // a single top-center handle on a selected wall/partition -- drag it up
+    // or down to change just that one panel's own height (state.panelHeights),
+    // the same value the ribbon's "Wall height" slider already edits, just
+    // reachable directly in the 3D view like a prop's own height handle.
+    function addWallHeightHandle(panelKey, lengthAxis, coord, midU, H) {
+      if (!isPickableTarget || selectedPanelRef.current !== panelKey) return;
+      const geo = new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE);
+      const mesh = new THREE.Mesh(geo, handleMat);
+      mesh.renderOrder = 10;
+      if (lengthAxis === "x") mesh.position.set(midU, H + PROP_HANDLE * 0.9, coord);
+      else mesh.position.set(coord, H + PROP_HANDLE * 0.9, midU);
+      mesh.userData = { kind: "resize-handle", target: "wall-height", id: panelKey, edge: "top", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+      sceneGroup.add(mesh);
+      pickList.push(mesh);
+    }
+    // small corner-ball handles around a selected opening, same look and
+    // size as a prop's own corner handles -- nw/ne drag the top edge (plus
+    // whichever side they're on), sw/se the bottom edge (windows only --
+    // doors are floor-anchored, so they only ever get the top pair). Poke
+    // slightly proud of both wall faces and render on top (handleMat has
+    // depthTest off) so they're always visible and easy to grab regardless
+    // of viewing angle.
     function addOpeningResizeHandles(c, lengthAxis, coord, y0, y1) {
       const T = state.thickness;
-      const barU = Math.min(0.22, Math.max(0.1, (c.u1 - c.u0) * 0.35));
-      const barY = Math.min(0.22, Math.max(0.1, (y1 - y0) * 0.35));
-      function addHandle(edge, uCenter, yCenter, uLen, yLen) {
+      function addHandle(edge, uCenter, yCenter) {
         const geo = lengthAxis === "x"
-          ? new THREE.BoxGeometry(uLen, yLen, T + 0.05)
-          : new THREE.BoxGeometry(T + 0.05, yLen, uLen);
+          ? new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, T + 0.05)
+          : new THREE.BoxGeometry(T + 0.05, PROP_HANDLE, PROP_HANDLE);
         const mesh = new THREE.Mesh(geo, handleMat);
         mesh.renderOrder = 10;
         if (lengthAxis === "x") mesh.position.set(uCenter, yCenter, coord);
@@ -1869,10 +1950,12 @@ export default function RoomBuilder() {
         sceneGroup.add(mesh);
         if (isPickableTarget) pickList.push(mesh);
       }
-      addHandle("left", c.u0, (y0 + y1) / 2, barU, y1 - y0);
-      addHandle("right", c.u1, (y0 + y1) / 2, barU, y1 - y0);
-      addHandle("top", (c.u0 + c.u1) / 2, y1, c.u1 - c.u0, barY);
-      if (!c.isDoor) addHandle("bottom", (c.u0 + c.u1) / 2, y0, c.u1 - c.u0, barY);
+      addHandle("nw", c.u0, y1);
+      addHandle("ne", c.u1, y1);
+      if (!c.isDoor) {
+        addHandle("sw", c.u0, y0);
+        addHandle("se", c.u1, y0);
+      }
     }
 
     function renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion) {
@@ -2144,7 +2227,7 @@ export default function RoomBuilder() {
       // kept thinner than the wall itself rather than matching it.
       function addMullion(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
-        const seg = makePanel(lengthAxis, coord, a, b, T * 0.7, yb, yt, currentWallMat);
+        const seg = makePanel(lengthAxis, coord, a, b, T * 0.7, yb, yt, mullionMat);
         seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
       }
@@ -2180,6 +2263,7 @@ export default function RoomBuilder() {
         cursor = c.u1;
       });
       if (cursor < wallU1 - 0.001) addSeg(cursor, wallU1, 0, H);
+      addWallHeightHandle(panelKey, lengthAxis, coord, (wallU0 + wallU1) / 2, H);
 
       selectionsFor(panelKey).forEach((sel) => {
         const u0 = Math.max(wallU0, Math.min(sel.u0, wallU1));
@@ -2225,7 +2309,7 @@ export default function RoomBuilder() {
       }
       function addMullion(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
-        const seg = makePanel(lengthAxis, p.u, a, b, T * 0.7, yb, yt, currentWallMat);
+        const seg = makePanel(lengthAxis, p.u, a, b, T * 0.7, yb, yt, mullionMat);
         seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
       }
@@ -2242,6 +2326,7 @@ export default function RoomBuilder() {
         cursor = op.u1;
       });
       if (cursor < hi - 0.001) addSeg(cursor, hi, 0, H);
+      addWallHeightHandle(panelKey, lengthAxis, p.u, (lo + hi) / 2, H);
     }
 
     // standard rectangle-minus-rectangle: splits `rect` around `cut`, returning
@@ -3371,6 +3456,10 @@ export default function RoomBuilder() {
       const isGrain = preset.texKey === "grain";
       const map = wallTexForKey(preset.texKey);
       const roughnessMap = isGrain ? wallRoughTex : null;
+      // metal/gloss are the "shiny" finishes -- give them the detailed
+      // cityscape reflection map instead of the soft ambient one so a
+      // shiny wall/floor actually reflects something recognizable.
+      const shinyEnvMap = preset.key === "metal" || preset.key === "gloss" ? reflectionEnvMap : null;
 
       const wallColor = new THREE.Color(mainColor);
       if (currentTintActiveOn) wallColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
@@ -3379,6 +3468,7 @@ export default function RoomBuilder() {
       wallMat.color.copy(wallColor);
       wallMat.roughness = roughness;
       wallMat.metalness = metalness;
+      wallMat.envMap = shinyEnvMap;
       wallMat.needsUpdate = true;
 
       const wallDimColor = new THREE.Color(mainColor).multiplyScalar(0.5);
@@ -3388,6 +3478,7 @@ export default function RoomBuilder() {
       wallMatDim.color.copy(wallDimColor);
       wallMatDim.roughness = roughness;
       wallMatDim.metalness = metalness;
+      wallMatDim.envMap = shinyEnvMap;
       wallMatDim.needsUpdate = true;
 
       // the room ceiling ("roof") always matches the walls -- a balcony's
@@ -3397,6 +3488,7 @@ export default function RoomBuilder() {
       ceilingMat.color.copy(wallColor);
       ceilingMat.roughness = roughness;
       ceilingMat.metalness = metalness;
+      ceilingMat.envMap = shinyEnvMap;
       ceilingMat.needsUpdate = true;
 
       let floorBase, floorRough, floorMetal, floorMap, floorRoughnessMap;
@@ -3419,6 +3511,7 @@ export default function RoomBuilder() {
       floorMat.color.copy(floorColor);
       floorMat.roughness = floorRough;
       floorMat.metalness = floorMetal;
+      floorMat.envMap = shinyEnvMap;
       floorMat.needsUpdate = true;
 
       const floorDimColor = new THREE.Color(floorBase).multiplyScalar(0.5);
@@ -3428,6 +3521,7 @@ export default function RoomBuilder() {
       floorMatDim.color.copy(floorDimColor);
       floorMatDim.roughness = floorRough;
       floorMatDim.metalness = floorMetal;
+      floorMatDim.envMap = shinyEnvMap;
       floorMatDim.needsUpdate = true;
     }
     function applyBuildingMaterial(index) {
@@ -4237,6 +4331,18 @@ export default function RoomBuilder() {
             const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
             dragState = { type: "resize-prop-corner", id: rh.id, corner: rh.edge, plane, cx: p.x, cz: p.z };
           }
+        } else if (rh.target === "wall-height") {
+          // same vertical-drag-plane technique as a prop's own top handle --
+          // a plane through the handle's own position, facing the camera
+          // horizontally, so the pointer ray's intersection tracks how far
+          // up/down the drag moved regardless of viewing angle.
+          pushUndo();
+          const center = hit.point.clone();
+          const camXZ = new THREE.Vector3(interactionCamera.position.x - center.x, 0, interactionCamera.position.z - center.z);
+          if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
+          const plane = new THREE.Plane();
+          plane.setFromNormalAndCoplanarPoint(camXZ, center);
+          dragState = { type: "resize-wall-height", panelKey: rh.id, plane, startH: getPanelHeight(rh.id), startY: hit.point.y };
         }
         capture(e);
         return;
@@ -4753,16 +4859,24 @@ export default function RoomBuilder() {
         const info = getPanelInfo(dragState.panelKey);
         if (!o || !info) { dragState = null; return; }
         const MIN_OPENING_H = 0.3; // smallest opening you can resize to vertically
-        if (dragState.edge === "left" || dragState.edge === "right") {
+        // corner handles (nw/ne/sw/se) drive both axes at once from the
+        // same drag -- west/east adjusts u0/u1, north/south adjusts the
+        // height, exactly like each used to independently, just combined
+        // into one grab per corner instead of a separate bar per edge.
+        const edge = dragState.edge;
+        const hasW = edge.includes("w"), hasE = edge.includes("e");
+        const hasN = edge.includes("n"), hasS = edge.includes("s");
+        if (hasW || hasE) {
           const u = snapValue(panelU(info, pt));
-          if (dragState.edge === "left") {
+          if (hasW) {
             const newU0 = Math.max(info.u0, Math.min(u, o.u1 - MIN_OPENING));
             if (!wouldOverlapOpeningExcluding(o.panel, newU0, o.u1, o.id) && !wouldOverlapBumpout(o.panel, newU0, o.u1)) o.u0 = newU0;
           } else {
             const newU1 = Math.min(info.u1, Math.max(u, o.u0 + MIN_OPENING));
             if (!wouldOverlapOpeningExcluding(o.panel, o.u0, newU1, o.id) && !wouldOverlapBumpout(o.panel, o.u0, newU1)) o.u1 = newU1;
           }
-        } else {
+        }
+        if (hasN || hasS) {
           const H = state.height;
           const y = snapValue(pt.y);
           if (o.isDoor) {
@@ -4779,7 +4893,7 @@ export default function RoomBuilder() {
             // real window frame rather than always staying centered.
             const curBottom = o.bottomOverride != null ? o.bottomOverride : Math.max(0, (H - (o.height ?? DEFAULT_OPENING_HEIGHT)) / 2);
             const curTop = curBottom + (o.height ?? DEFAULT_OPENING_HEIGHT);
-            if (dragState.edge === "top") {
+            if (hasN) {
               const newTop = Math.max(curBottom + MIN_OPENING_H, Math.min(H - 0.05, y));
               o.bottomOverride = curBottom;
               o.height = newTop - curBottom;
@@ -4843,6 +4957,13 @@ export default function RoomBuilder() {
         const deltaY = pt.y - dragState.startY;
         p.h = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, dragState.startH + deltaY));
         rebuild();
+      } else if (dragState.type === "resize-wall-height") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const deltaY = pt.y - dragState.startY;
+        const newH = snapValue(dragState.startH + deltaY);
+        setPanelHeightValue(dragState.panelKey, newH);
+        if (selectedPanelRef.current === dragState.panelKey) setSelectedHeight(getPanelHeight(dragState.panelKey));
       } else if (dragState.type === "room-move") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
@@ -6140,6 +6261,7 @@ export default function RoomBuilder() {
       floorMatSelected.dispose();
       pillarMat.dispose();
       pillarMatSelected.dispose();
+      mullionMat.dispose();
       ceilingMat.dispose();
       balconyRoofMat.dispose();
       selMat.dispose();
@@ -6157,6 +6279,7 @@ export default function RoomBuilder() {
       groundMat.dispose();
       groundFadeTex.dispose();
       realisticEnvMap.dispose();
+      reflectionEnvMap.dispose();
       composer.dispose();
       gtaoPass.dispose();
       bloomPass.dispose();
@@ -6173,6 +6296,8 @@ export default function RoomBuilder() {
   const panelResizeRef = useRef(null);
   const layersScrollRef = useRef(null);
   const scrollStripDragRef = useRef(null);
+  const recentScrollInnerRef = useRef(null);
+  const recentScrollDragRef = useRef(null);
   const newSceneBtnRef = useRef(null);
   const defaultLayersWidth = () => 210;
   useEffect(() => { setLayersPanelWidth(defaultLayersWidth()); }, []);
@@ -6332,7 +6457,7 @@ export default function RoomBuilder() {
           --text-secondary: rgba(235, 235, 245, 0.6);
           --text-tertiary: rgba(235, 235, 245, 0.3);
           --scrollbar-track: rgba(255, 255, 255, 0.05);
-          --bg-thumb: #38383a;
+          --bg-thumb: #ffffff;
           /* dark theme: a lighter grey splitter reads against the dark panels */
           --splitter: rgba(255, 255, 255, 0.22);
         }
@@ -6348,7 +6473,7 @@ export default function RoomBuilder() {
           --bg-panel: #e8e8e8;
           --bg-panel-translucent: #e8e8e8;
           --bg-strip: #d2d2d2;
-          --bg-thumb: #eeeeee;
+          --bg-thumb: #ffffff;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
           --bg-control-pressed: #cfcfcf;
@@ -6420,9 +6545,9 @@ export default function RoomBuilder() {
           border: 1.5px solid var(--border-control); background: var(--bg-control);
           cursor: pointer; position: relative;
         }
-        .rb-radio:checked { border-color: var(--text-primary); }
+        .rb-radio:checked { border-color: var(--accent); }
         .rb-radio:checked::after {
-          content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--text-primary);
+          content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--accent);
         }
         .rb-hue-slider {
           width: 100%; height: 10px; border-radius: 5px; cursor: pointer;
@@ -6457,6 +6582,11 @@ export default function RoomBuilder() {
         .layers-scroll::-webkit-scrollbar-thumb { background: rgba(255, 107, 26, 0.55); border-radius: 4px; border: 6px solid transparent; background-clip: padding-box; }
         .layers-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 107, 26, 0.8); background-clip: padding-box; }
         .layers-scroll::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+        .recent-scroll { -webkit-overflow-scrolling: touch; touch-action: pan-x; overscroll-behavior: contain; }
+        .recent-scroll::-webkit-scrollbar { height: 12px; }
+        .recent-scroll::-webkit-scrollbar-thumb { background: rgba(255, 107, 26, 0.55); border-radius: 4px; border: 3px solid transparent; background-clip: padding-box; }
+        .recent-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 107, 26, 0.8); background-clip: padding-box; }
+        .recent-scroll::-webkit-scrollbar-track { background: var(--scrollbar-track); }
         .rb-walk-btn {
           width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
           background: var(--bg-floating); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -6587,20 +6717,22 @@ export default function RoomBuilder() {
         }}
       />
 
-      {/* LEFT, above the Layers panel: Recent -- a browser-local autosave
-          history (every ~15s, no server to persist to), thumbnails you can
-          click to reload that scene. Scrolls horizontally when there are
-          more than fit. */}
+      {/* LEFT, below the Layers panel and just above the ribbon: Recent --
+          a browser-local autosave history (every ~15s, no server to
+          persist to), thumbnails you can click to reload that scene. A
+          draggable strip along the bottom scrolls sideways through them
+          as the list grows, same idea as the Layers panel's own vertical
+          scroll strip. */}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, left: 0, height: RECENT_HEIGHT, width: layersPanelWidth,
+          position: "absolute", bottom: RIBBON_HEIGHT, left: 0, height: RECENT_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)", display: "flex", flexDirection: "column", overflow: "hidden",
         }}
       >
         <div style={{ padding: "8px 9px 4px" }}>
           <span className="panel-title">Recent</span>
         </div>
-        <div style={{ flex: 1, minHeight: 0, overflowX: "auto", overflowY: "hidden", display: "flex", gap: 6, padding: "0 9px 8px", alignItems: "flex-start" }}>
+        <div className="recent-scroll" ref={recentScrollInnerRef} style={{ flex: 1, minHeight: 0, overflowX: "auto", overflowY: "hidden", display: "flex", gap: 6, padding: "0 9px 10px", alignItems: "flex-start" }}>
           {recentScenes.length === 0 && (
             <span style={{ fontSize: 9, color: "var(--text-tertiary)", alignSelf: "center" }}>Autosaves every 15s</span>
           )}
@@ -6623,14 +6755,32 @@ export default function RoomBuilder() {
             </button>
           ))}
         </div>
+        <div
+          title="Drag to scroll"
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            recentScrollDragRef.current = { startX: e.clientX, startScrollLeft: recentScrollInnerRef.current ? recentScrollInnerRef.current.scrollLeft : 0 };
+          }}
+          onPointerMove={(e) => {
+            const ds = recentScrollDragRef.current;
+            if (!ds || !recentScrollInnerRef.current) return;
+            recentScrollInnerRef.current.scrollLeft = ds.startScrollLeft - (e.clientX - ds.startX);
+          }}
+          onPointerUp={() => { recentScrollDragRef.current = null; }}
+          style={{
+            position: "absolute", bottom: 0, left: 0, right: 0, height: 12,
+            touchAction: "none", cursor: "ew-resize",
+          }}
+        />
       </div>
 
       {/* LEFT: Layers panel -- docked flush to the left edge, directly
-          under Recent (not floating), PowerPoint-style slide list,
-          resizable via the handle on its right edge */}
+          under the top band (not floating), PowerPoint-style slide list,
+          resizable via the handle on its right edge; Recent sits below it,
+          just above the ribbon. */}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT + RECENT_HEIGHT, left: 0, bottom: RIBBON_HEIGHT, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT + RECENT_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}
@@ -6859,16 +7009,24 @@ export default function RoomBuilder() {
               click either button to act on whichever layer is selected;
               + always creates a fresh default layer. */}
           <div style={{ display: "flex", gap: 4 }}>
-            <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9, flex: 1 }} onClick={() => addFloorRef.current()} title="Add a new layer with a default room">+</button>
+            <button
+              className="rb-btn"
+              style={{ padding: "3px 6px", fontSize: 9, flex: 1, background: "var(--bg-control)", border: "1px solid var(--border-control)" }}
+              onClick={() => addFloorRef.current()}
+              title="Add a new layer with a default room"
+            >
+              +
+            </button>
             <button
               ref={dupBtnRef}
               className="rb-btn"
               style={{
-                padding: "3px 6px", fontSize: 9, flex: 1,
-                boxShadow: dragOverAction === "dup" ? "inset 0 0 0 1.5px var(--ring-selected)" : "none",
+                padding: "3px 6px", fontSize: 9, flex: 1, background: "var(--bg-control)",
+                border: dragOverAction === "dup" ? "1px solid var(--accent)" : "1px solid var(--border-control)",
+                boxShadow: dragOverAction === "dup" ? "inset 0 0 0 1.5px var(--accent)" : "none",
               }}
               onClick={() => duplicateFloorRef.current()}
-              title="Duplicate the selected layer (or drag a layer here)"
+              title="Duplicate the selected layer -- or drag a layer row down onto this button"
             >
               Dup
             </button>
@@ -6876,11 +7034,12 @@ export default function RoomBuilder() {
               ref={delBtnRef}
               className="rb-btn"
               style={{
-                padding: "3px 6px", fontSize: 9, flex: 1,
-                boxShadow: dragOverAction === "del" ? "inset 0 0 0 1.5px var(--ring-selected)" : "none",
+                padding: "3px 6px", fontSize: 9, flex: 1, background: "var(--bg-control)",
+                border: dragOverAction === "del" ? "1px solid var(--accent)" : "1px solid var(--border-control)",
+                boxShadow: dragOverAction === "del" ? "inset 0 0 0 1.5px var(--accent)" : "none",
               }}
               onClick={() => deleteFloorRef.current()}
-              title="Delete the selected layer (or drag a layer here)"
+              title="Delete the selected layer -- or drag a layer row down onto this button"
             >
               Del
             </button>
