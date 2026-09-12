@@ -380,6 +380,10 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
   const hueSpan = 360 / WHEEL_HUE_COUNT;
   const greySpan = 360 / WHEEL_GREY_STEPS;
   const ringDepth = (discR1 - discR0) / WHEEL_TINT_RINGS;
+  // thin white seams between wedges and rings, matching the reference's
+  // own grid of separated cells instead of cells sandwiched flush together.
+  const WEDGE_GAP_DEG = 2.2;
+  const RING_GAP = 1.5;
 
   const preset = presetIndex > 0 ? CURATED_PALETTES[presetIndex - 1] : null;
   const isActiveCell = (hueDeg, ring) => activeTheme && activeTheme.type === "hue" && activeTheme.hueDeg === hueDeg && activeTheme.ring === ring;
@@ -410,6 +414,11 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
           onPointerDown={startSpin}
           onMouseDown={(e) => e.preventDefault()}
         >
+          {/* a solid backing disc so the gaps between wedges always read as
+              clean white seams, matching the reference, regardless of
+              whatever's showing through behind the wheel (dark 3D viewport
+              included) rather than the seam color depending on theme. */}
+          <circle cx={cx} cy={cy} r={discR1} fill="#f7f7f7" />
           <circle cx={cx} cy={cy} r={discR1} fill="transparent" style={{ cursor: "grab" }} />
           <g transform={`rotate(${rotation} ${cx} ${cy})`} style={{ cursor: "grab", touchAction: "none" }}>
             {preset
@@ -418,7 +427,7 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
                   return (
                     <path
                       key={`preset${slice}`}
-                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, 0)}
+                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, WEDGE_GAP_DEG)}
                       fill={hexToCss(adj(hex))}
                       stroke={isActivePreset(slice) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
                       strokeWidth={isActivePreset(slice) ? 1.5 : 1}
@@ -432,7 +441,7 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
               : WHEEL_DISC_CELLS.map((cell) => (
                   <path
                     key={`h${cell.hue}-r${cell.ring}`}
-                    d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth, discR0 + (cell.ring + 1) * ringDepth, cell.hueDeg - 90, hueSpan, 0)}
+                    d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth + RING_GAP / 2, discR0 + (cell.ring + 1) * ringDepth - RING_GAP / 2, cell.hueDeg - 90, hueSpan, WEDGE_GAP_DEG)}
                     fill={hexToCss(adj(cell.hex))}
                     stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "rgba(0,0,0,0.1)"}
                     strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 0.6}
@@ -445,7 +454,7 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
             {WHEEL_GREY_CELLS.map((g) => (
               <path
                 key={`grey${g.step}`}
-                d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 0)}
+                d={ringWedgePath(cx, cy, greyR0, greyR1 - RING_GAP, g.step * greySpan - 90, greySpan, WEDGE_GAP_DEG)}
                 fill={hexToCss(adjustHex(g.hex, 0, 1, lightMul))}
                 stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
                 strokeWidth={isActiveGrey(g.step) ? 1.5 : 0.35}
@@ -459,16 +468,17 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
         </svg>
         <div
           onPointerDown={startHubGesture}
-          title="Drag to move, tap to cycle color-scheme presets"
+          title={`Drag to move, tap to cycle color-scheme presets -- ${preset ? preset.name : "Theme"}`}
           style={{
             position: "absolute", left: cx - hubR, top: cy - hubR, width: hubR * 2, height: hubR * 2, borderRadius: "50%",
-            background: "var(--bg-floating)", border: "1px solid var(--border-control)",
+            background: "#1a1a1a", border: "1px solid var(--border-control)",
             display: "flex", alignItems: "center", justifyContent: "center", cursor: "grab", touchAction: "none",
           }}
         >
-          <span style={{ fontSize: preset ? 7.5 : 8, letterSpacing: "0.04em", color: "var(--text-secondary)", textTransform: "uppercase", pointerEvents: "none", textAlign: "center", padding: "0 3px" }}>
-            {preset ? preset.name : "Theme"}
-          </span>
+          {/* a plain plus mark, like the reference's own hub -- the preset
+              name is still there on hover (see the title above) rather
+              than cluttering the hub visually. */}
+          <span style={{ fontSize: 15, lineHeight: 1, color: "#ffffff", pointerEvents: "none", fontWeight: 300 }}>+</span>
           <button
             onClick={(e) => { e.stopPropagation(); onClose(); }}
             onPointerDown={(e) => e.stopPropagation()}
@@ -489,24 +499,23 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
       <div
         onPointerDown={(e) => e.stopPropagation()}
         style={{
-          marginTop: 10, padding: "8px 10px", borderRadius: 10, background: "var(--bg-floating)",
-          border: "1px solid var(--border-control)", display: "flex", flexDirection: "column", gap: 5,
+          marginTop: 16, display: "flex", gap: 20,
           fontFamily: "var(--font-mono)", opacity: entered ? 1 : 0, transition: "opacity 0.25s ease 0.1s",
         }}
       >
         {[
           { key: "hue", label: "hue", value: hueShift, min: -180, max: 180, fmt: (v) => `${Math.round(v)}°` },
-          { key: "sat", label: "sat", value: satMul, min: 0, max: 2, fmt: (v) => `${Math.round(v * 100)}%` },
-          { key: "light", label: "light", value: lightMul, min: 0, max: 2, fmt: (v) => `${Math.round(v * 100)}%` },
+          { key: "sat", label: "saturation", value: satMul, min: 0, max: 2, fmt: (v) => `${Math.round(v * 100)}%` },
+          { key: "light", label: "lightness", value: lightMul, min: 0, max: 2, fmt: (v) => `${Math.round(v * 100)}%` },
         ].map((s) => (
-          <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ width: 32, fontSize: 9, color: "var(--text-secondary)" }}>{s.label}</span>
+          <div key={s.key} style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            <span style={{ fontSize: 8.5, color: "var(--text-secondary)" }}>{s.label}</span>
+            <span style={{ fontSize: 11, color: "var(--text-primary)" }}>{s.fmt(s.value)}</span>
             <input
               type="range" min={s.min} max={s.max} step={(s.max - s.min) / 200} value={s.value}
               onChange={(e) => onSlider(s.key, parseFloat(e.target.value))}
-              className="rb-range" style={{ flex: 1 }}
+              className="rb-bare-range" style={{ marginTop: 6 }}
             />
-            <span style={{ width: 34, fontSize: 9, color: "var(--text-secondary)", textAlign: "right" }}>{s.fmt(s.value)}</span>
           </div>
         ))}
       </div>
@@ -560,7 +569,7 @@ export default function RoomBuilder() {
   const propsShapeRef = useRef(propsShape);
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
   const [wallThickness, setWallThickness] = useState(0.35);
-  const [ceilingOn, setCeilingOn] = useState(true);
+  const [ceilingOn, setCeilingOn] = useState(false);
   const ceilingApiRef = useRef({ setEnabled: () => {} });
   const [groundOn, setGroundOn] = useState(false);
   const groundApiRef = useRef({ setEnabled: () => {} });
@@ -1422,7 +1431,7 @@ export default function RoomBuilder() {
         props: [],        // {id, kind, x, z} -- decorative sphere/cube/cone/cylinder placed on the floor
         curvedCorners: { enabled: false, radius: 0 }, // rounds the 4 corners of the base footprint's external walls
         balconies: [], // {id, panel, u0, u1, dividerAxis} -- a staircase+platform+pillars assembly with a window/door cutout in the wall behind it
-        ceilingEnabled: true, // a purely decorative slab at wall-height -- never a raycast target
+        ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
     let idSeq = 1;
@@ -2004,7 +2013,7 @@ export default function RoomBuilder() {
         // door, rather than the window system's full column/row grid.
         if (Math.round(c.dividers || 0) >= 1) {
           const mid = (c.u0 + c.u1) / 2;
-          addMullion(mid - 0.0175, mid + 0.0175, doorBottom, doorTop);
+          addMullion(mid - 0.021, mid + 0.021, doorBottom, doorTop);
         }
         return;
       }
@@ -2022,7 +2031,7 @@ export default function RoomBuilder() {
       const axis = c.dividerAxis || "vertical";
       const doVertical = axis === "vertical" || axis === "both";
       const doHorizontal = axis === "horizontal" || axis === "both";
-      const mullionWidth = 0.035; // 30% thinner than the original 0.05
+      const mullionWidth = 0.042; // 30% thinner than the original 0.05, then 20% thicker again
 
       // vertical dividers split the opening into columns (u-spans); if off,
       // there's just one column spanning the whole width.
@@ -3625,6 +3634,13 @@ export default function RoomBuilder() {
     // -- calling it there on the very first mount would just hit the ref's
     // no-op placeholder and silently do nothing.
     applyUltraRealistic(true);
+    // same mount-ordering issue as applyUltraRealistic above -- nothing
+    // else calls this on the very first mount (its own [buildingMaterialIndex]
+    // effect fires before this ref exists), so without this direct call
+    // wallMat/mullionMat/etc. would sit at their hardcoded constructor
+    // colors (mullions included -- a plain dark grey) until the user
+    // happened to touch a material/tint/theme control.
+    recomputeWallFloorMaterials();
 
     function applyTintInactive(on, colorHex) {
       currentTintInactiveOn = on;
@@ -6551,11 +6567,10 @@ export default function RoomBuilder() {
           --bg-panel-translucent: var(--bg-content);
           --bg-strip: #e1e1e1;
           --splitter: var(--bg-strip);
-          /* color-picked directly from the reference mockup: a distinct,
-             clearly-visible hairline (not the near-invisible --splitter
-             match) for the layer/recent panels' own edge and the gap
-             above Recent. */
-          --divider-strong: #c7c7c9;
+          /* the layer/recent panels' own edge against the 3D view, and the
+             gap above Recent -- pinned to the exact same top-band color as
+             --splitter, not a separately-picked shade. */
+          --divider-strong: var(--splitter);
           --bg-thumb: #ffffff;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
@@ -6620,6 +6635,14 @@ export default function RoomBuilder() {
         }
         .rb-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         .rb-range { width: 100%; accent-color: var(--accent); height: 3px; }
+        /* the theme wheel's own hue/sat/light sliders -- a bare thin line
+           with a small dot, matching the reference exactly (no boxed
+           track fill, no big thumb). */
+        .rb-bare-range { -webkit-appearance: none; appearance: none; width: 100%; height: 14px; background: transparent; cursor: pointer; margin: 0; display: block; }
+        .rb-bare-range::-webkit-slider-runnable-track { height: 1px; background: var(--border-separator); }
+        .rb-bare-range::-webkit-slider-thumb { -webkit-appearance: none; width: 8px; height: 8px; border-radius: 50%; background: var(--text-primary); margin-top: -3.5px; cursor: pointer; }
+        .rb-bare-range::-moz-range-track { height: 1px; background: var(--border-separator); border: none; }
+        .rb-bare-range::-moz-range-thumb { width: 8px; height: 8px; border-radius: 50%; background: var(--text-primary); border: none; }
         .rb-radio {
           -webkit-appearance: none; appearance: none;
           width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; margin: 0;
@@ -6802,7 +6825,7 @@ export default function RoomBuilder() {
         style={{
           position: "absolute", bottom: RIBBON_HEIGHT, left: 0, height: RECENT_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)", display: "flex", flexDirection: "column", overflow: "hidden",
-          borderRight: "2px solid var(--divider-strong)",
+          borderRight: "1px solid var(--divider-strong)",
         }}
       >
         {/* a clearly-visible splitter with real breathing room on both
@@ -6850,7 +6873,7 @@ export default function RoomBuilder() {
           position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT + RECENT_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: "flex", flexDirection: "column", overflow: "hidden",
-          borderRight: "2px solid var(--divider-strong)",
+          borderRight: "1px solid var(--divider-strong)",
         }}
       >
         <div
@@ -6979,7 +7002,7 @@ export default function RoomBuilder() {
                   height={480}
                   style={{ borderRadius: 1, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
                 />
-                <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", height: 56, flex: 1, minWidth: 0 }}>
                   {renamingFloorId === id ? (
                     <input
                       autoFocus
@@ -7002,7 +7025,16 @@ export default function RoomBuilder() {
                     />
                   ) : (
                     <span
-                      style={{ color: "var(--text-primary)", fontSize: 9.5, cursor: "text", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      style={{
+                        color: "var(--text-primary)", fontSize: 9.5, cursor: "text",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                        // a bare flex-column child stretches to the column's
+                        // full width by default -- without this, the rename
+                        // hotspot was the whole row's width, not just the
+                        // name text itself, so clicking anywhere near it
+                        // (not just on the name) would trigger rename mode.
+                        alignSelf: "flex-start", maxWidth: "100%", display: "inline-block",
+                      }}
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
                         e.stopPropagation();
