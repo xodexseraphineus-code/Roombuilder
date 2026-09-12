@@ -46,6 +46,50 @@ const COLORS = {
 // gets more use).
 const TE_SWATCHES = [0xff6b1a, 0xffffff, 0x4a90d9, 0xf2c230, 0xe5484d];
 
+// the fixed per-shape prop colors, used both as the initial defaults and
+// as what a prop reverts to if a theme's color is ever cleared.
+const PROP_DEFAULT_COLORS = { sphere: 0xd6453c, cone: 0x3f9d5c, cube: 0x3a6bc9, cylinder: 0xd6453c };
+
+// Theme color wheel: hue "spokes" radiating outward from a hub, each with
+// a light-near-the-hub-to-dark-at-the-tip tone gradient -- loosely modeled
+// on a Copic-marker color wheel, but with a handful of curated tones per
+// hue instead of dozens of named marker codes. Picking a tone sets the
+// room's wall tint (which the existing tint system already derives a
+// matching floor shade from) and the props' color, for a one-click,
+// cohesive room palette.
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const k = (n) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const toHex = (x) => Math.round(x * 255);
+  return (toHex(f(0)) << 16) | (toHex(f(4)) << 8) | toHex(f(8));
+}
+const THEME_WHEEL_HUES = 10;
+const THEME_WHEEL_TONES = 5;
+const THEME_WHEEL_CHIPS = (() => {
+  const chips = [];
+  for (let h = 0; h < THEME_WHEEL_HUES; h++) {
+    const hueDeg = (h / THEME_WHEEL_HUES) * 360;
+    const angleDeg = hueDeg - 90; // hue 0 points straight up
+    for (let t = 0; t < THEME_WHEEL_TONES; t++) {
+      const lightness = 82 - t * 15; // light near the hub, dark toward the tip
+      const saturation = 55 + t * 6;
+      chips.push({ hue: h, tone: t, angleDeg, hex: hslToHex(hueDeg, saturation, lightness) });
+    }
+  }
+  return chips;
+})();
+// a slim neutral (grey/white/black) spoke, same tone-count, pointing up --
+// this is the only spoke drawn at hue index -1 (angle 0, straight up would
+// collide with hue 0, so it's offset half a step to sit between hue 9 and
+// hue 0 instead).
+const THEME_WHEEL_NEUTRAL_ANGLE = -90 - 360 / THEME_WHEEL_HUES / 2;
+const THEME_WHEEL_NEUTRALS = Array.from({ length: THEME_WHEEL_TONES }, (_, t) => ({
+  hue: -1, tone: t, angleDeg: THEME_WHEEL_NEUTRAL_ANGLE,
+  hex: hslToHex(0, 0, 92 - t * 20),
+}));
+
 // a short synthesized click (Web Audio, no audio file to fetch) for wall/
 // partition contact feedback -- one shared AudioContext, created lazily on
 // first use since browsers refuse to start one before a user gesture.
@@ -87,6 +131,71 @@ function QuadViewIcon() {
       <line x1="8" y1="1.5" x2="8" y2="14.5" stroke="currentColor" strokeWidth="1.4" />
       <line x1="1.5" y1="8" x2="14.5" y2="8" stroke="currentColor" strokeWidth="1.4" />
     </svg>
+  );
+}
+
+// The color-theme wheel: an overlay that pops open from the trigger button,
+// showing every THEME_WHEEL_CHIPS entry (plus the neutral spoke) as a small
+// rectangle radiating outward from a hub. Deliberately simple compared to a
+// real Copic wheel -- a fixed, fully-visible set of tones rather than
+// dozens of scrollable marker codes -- since the goal is a quick, cohesive
+// room palette, not a full swatch library.
+function ThemeWheelOverlay({ onPick, onClose }) {
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+  const size = 340;
+  const cx = size / 2, cy = size / 2;
+  const innerR = 34, chipLen = 24, chipGap = 2, chipW = 20;
+  function chipRect(chip) {
+    const r0 = innerR + chip.tone * (chipLen + chipGap);
+    return { x: -chipW / 2, y: -(r0 + chipLen), width: chipW, height: chipLen, transform: `rotate(${chip.angleDeg} ${cx} ${cy}) translate(${cx} ${cy})` };
+  }
+  const allChips = THEME_WHEEL_CHIPS.concat(THEME_WHEEL_NEUTRALS);
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "absolute", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(0,0,0,0.35)", backdropFilter: "blur(2px)",
+        opacity: entered ? 1 : 0, transition: "opacity 0.2s ease",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: "relative", width: size, height: size,
+          transform: entered ? "scale(1) rotate(0deg)" : "scale(0.35) rotate(-35deg)",
+          opacity: entered ? 1 : 0,
+          transition: "transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.25s ease",
+        }}
+      >
+        <svg width={size} height={size} style={{ overflow: "visible" }}>
+          {allChips.map((chip) => {
+            const r = chipRect(chip);
+            return (
+              <rect
+                key={`${chip.hue}-${chip.tone}`}
+                x={r.x} y={r.y} width={r.width} height={r.height} rx={2}
+                transform={r.transform}
+                fill={`#${chip.hex.toString(16).padStart(6, "0")}`}
+                stroke="rgba(0,0,0,0.15)" strokeWidth={0.75}
+                style={{ cursor: "pointer" }}
+                onClick={() => onPick(chip.hex)}
+              >
+                <title>{`#${chip.hex.toString(16).padStart(6, "0")}`}</title>
+              </rect>
+            );
+          })}
+          <circle cx={cx} cy={cy} r={innerR - 4} fill="var(--bg-floating)" stroke="var(--border-control)" strokeWidth={1} />
+        </svg>
+        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+          <span style={{ fontSize: 9, letterSpacing: "0.06em", color: "var(--text-secondary)", textTransform: "uppercase" }}>Theme</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -233,6 +342,10 @@ export default function RoomBuilder() {
   const [tintActiveColor, setTintActiveColor] = useState(0xff6b1a);
   const tintActiveApiRef = useRef(() => {});
   useEffect(() => { tintActiveApiRef.current(tintActiveOn, tintActiveColor); }, [tintActiveOn, tintActiveColor]);
+  const [themeWheelOpen, setThemeWheelOpen] = useState(false);
+  const [propTintColor, setPropTintColor] = useState(null); // null = each prop kind's own default color
+  const propTintApiRef = useRef(() => {});
+  useEffect(() => { propTintApiRef.current(propTintColor); }, [propTintColor]);
   const [viewLayout, setViewLayout] = useState("single");
   const viewLayoutRef = useRef(viewLayout);
   useEffect(() => { viewLayoutRef.current = viewLayout; }, [viewLayout]);
@@ -1126,10 +1239,10 @@ export default function RoomBuilder() {
     const stairMat = new THREE.MeshStandardMaterial({ color: 0xf2c6d6, roughness: 0.82, metalness: 0.02 });
     // prop shapes, each with its own fixed color
     const propMats = {
-      sphere: new THREE.MeshStandardMaterial({ color: 0xd6453c, roughness: 0.55, metalness: 0.05 }),
-      cone: new THREE.MeshStandardMaterial({ color: 0x3f9d5c, roughness: 0.55, metalness: 0.05 }),
-      cube: new THREE.MeshStandardMaterial({ color: 0x3a6bc9, roughness: 0.55, metalness: 0.05 }),
-      cylinder: new THREE.MeshStandardMaterial({ color: 0xd6453c, roughness: 0.55, metalness: 0.05 }),
+      sphere: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.sphere, roughness: 0.55, metalness: 0.05 }),
+      cone: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cone, roughness: 0.55, metalness: 0.05 }),
+      cube: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cube, roughness: 0.55, metalness: 0.05 }),
+      cylinder: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cylinder, roughness: 0.55, metalness: 0.05 }),
     };
     const PROP_HEIGHT = 8 * FT;
 
@@ -2825,6 +2938,17 @@ export default function RoomBuilder() {
       recomputeWallFloorMaterials();
     }
     tintActiveApiRef.current = applyTintActive;
+
+    // colors every prop kind to match a chosen theme (or, when cleared,
+    // reverts each one to its own default color) -- mutating the shared
+    // material directly, so already-placed props update immediately
+    // without needing a rebuild.
+    function applyPropTint(colorHex) {
+      Object.keys(propMats).forEach((kind) => {
+        propMats[kind].color.set(colorHex != null ? colorHex : PROP_DEFAULT_COLORS[kind]);
+      });
+    }
+    propTintApiRef.current = applyPropTint;
 
     // ---------- camera orbit / fixed orthographic views ----------
     let radius = Math.max(DEFAULT_ROOM_HALF_X, DEFAULT_ROOM_HALF_Z) * 2.2;
@@ -6092,6 +6216,8 @@ export default function RoomBuilder() {
               setUltraRealistic(true);
               setTintActiveOn(false);
               setTintInactiveOn(false);
+              setPropTintColor(null);
+              setThemeWheelOpen(false);
               setSnapEnabled(true);
               setShowMeasurements(false);
               setFloorNames({});
@@ -6208,6 +6334,15 @@ export default function RoomBuilder() {
             <span style={{ background: "#fafcff", borderRadius: 1 }} />
             <span style={{ background: "#ffe600", borderRadius: 1 }} />
           </button>
+          <button
+            className="rb-btn"
+            onClick={() => setThemeWheelOpen(true)}
+            title="Pick a room color theme (walls, floor, and props)"
+            style={{
+              padding: 0, width: 22, height: 22, minWidth: 22, borderRadius: "50%", overflow: "hidden",
+              background: "conic-gradient(from 0deg, #e5484d, #f2c230, #4caf6d, #4a90d9, #9b5de5, #e5484d)",
+            }}
+          />
           <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
           <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
           <button className={`rb-btn ${tool === "door" ? "active" : ""}`} onClick={() => setTool("door")}>Door</button>
@@ -6620,6 +6755,17 @@ export default function RoomBuilder() {
           </div>
         </div>
       </div>
+      {themeWheelOpen && (
+        <ThemeWheelOverlay
+          onPick={(hex) => {
+            setTintActiveColor(hex);
+            setTintActiveOn(true);
+            setPropTintColor(hex);
+            setThemeWheelOpen(false);
+          }}
+          onClose={() => setThemeWheelOpen(false)}
+        />
+      )}
     </div>
   );
 }
