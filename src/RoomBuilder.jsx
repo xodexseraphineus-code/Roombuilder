@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
@@ -804,13 +804,14 @@ export default function RoomBuilder() {
     scene.background = new THREE.Color(COLORS.bg);
     scene.fog = new THREE.Fog(COLORS.bg, 60, 400);
     const sceneFog = scene.fog;
-    // the empty-space backdrop and its matching fog color -- dark mode
-    // keeps the original near-black void; light mode matches the
-    // reference mockup's own flat background exactly (same neutral grey
-    // as --bg-window), rather than a distinct blue-grey of its own.
-    const VIEWPORT_BG_LIGHT = 0xe4e4e4;
+    // the empty-space backdrop and its matching fog color -- pixel-identical
+    // to the Layers/Recent panels' own --bg-panel in each theme (#e8e8e8
+    // light, #2c2c2e dark), so spinning the 3D view right up against the
+    // sidebar shows no seam at all, rather than a distinct tone of its own.
+    const VIEWPORT_BG_LIGHT = 0xe8e8e8;
+    const VIEWPORT_BG_DARK = 0x2c2c2e;
     function applyViewportTheme(theme) {
-      const c = theme === "light" ? VIEWPORT_BG_LIGHT : COLORS.bg;
+      const c = theme === "light" ? VIEWPORT_BG_LIGHT : VIEWPORT_BG_DARK;
       scene.background.set(c);
       sceneFog.color.set(c);
     }
@@ -1047,13 +1048,18 @@ export default function RoomBuilder() {
       // a ring of dark, varied-height building silhouettes -- what actually
       // gives a reflection its "cityscape" read, rather than just a plain
       // gradient with a bright spot in it.
-      const buildingCount = 28;
-      const cityMat = new THREE.MeshBasicMaterial({ color: 0x08090b });
+      // pushed out further and kept shorter than before -- at the old
+      // 16-26 distance / up-to-30 height, buildings subtended 50+ degrees
+      // from the origin and blotted out almost the entire sky, leaving no
+      // bright band for a reflection to pick up. A distant, modest-height
+      // ring reads as a proper skyline silhouette with open sky above it.
+      const buildingCount = 34;
+      const cityMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
       for (let i = 0; i < buildingCount; i++) {
         const angle = (i / buildingCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.15;
-        const dist = 16 + Math.random() * 10;
-        const h = 4 + Math.random() * 26;
-        const w = 2 + Math.random() * 3.5;
+        const dist = 30 + Math.random() * 12;
+        const h = 3 + Math.random() * 13;
+        const w = 2.5 + Math.random() * 4;
         const geo = new THREE.BoxGeometry(w, h, w);
         const mesh = new THREE.Mesh(geo, cityMat);
         mesh.position.set(Math.cos(angle) * dist, h / 2, Math.sin(angle) * dist);
@@ -1768,8 +1774,8 @@ export default function RoomBuilder() {
     // hue-tinted metal rail, e.g. neon blue), but the low roughness/high
     // metalness stays fixed so it always looks like metal hardware.
     const PILLAR_DEFAULT_COLOR = 0x333333; // 80% of the way to black
-    const pillarMat = new THREE.MeshStandardMaterial({ color: PILLAR_DEFAULT_COLOR, roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5, envMap: reflectionEnvMap });
-    const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(PILLAR_DEFAULT_COLOR).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5, envMap: reflectionEnvMap });
+    const pillarMat = new THREE.MeshStandardMaterial({ color: PILLAR_DEFAULT_COLOR, roughness: 0.32, metalness: 0.8, envMapIntensity: 1.4, envMap: reflectionEnvMap });
+    const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(PILLAR_DEFAULT_COLOR).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.32, metalness: 0.8, envMapIntensity: 1.4, envMap: reflectionEnvMap });
     // window/door mullions get their own dark frame material -- 80% of the
     // way to black by default, distinct from the railings' metal hardware
     // (less metallic, more like a painted/anodized frame than raw metal).
@@ -1809,7 +1815,13 @@ export default function RoomBuilder() {
     // metalness) -- any glass surface (window panes, balcony glass infill)
     // shares this one material, so the bump applies everywhere at once.
     const glassMat = new THREE.MeshStandardMaterial({
-      color: 0x9ec8ee, transparent: true, opacity: 0.3, roughness: 0.096, metalness: 0.06, envMapIntensity: 1.2, side: THREE.DoubleSide,
+      // metalness bumped well above a physically "correct" dielectric value
+      // -- at a realistic ~0.05 the Fresnel reflectance at normal incidence
+      // is only a few percent and the cityscape map is essentially
+      // invisible head-on; a stronger, deliberately-unrealistic metalness
+      // plus a much higher envMapIntensity make the reflection actually
+      // read as reflection detail rather than just a flat tinted pane.
+      color: 0x9ec8ee, transparent: true, opacity: 0.35, roughness: 0.08, metalness: 0.35, envMapIntensity: 3.2, side: THREE.DoubleSide,
       // its own detailed cityscape reflection map rather than the soft
       // ambient ibl -- glass should visibly reflect *something*, not just
       // tint toward a flat gradient color.
@@ -5385,7 +5397,7 @@ export default function RoomBuilder() {
       const ctx = canvas.getContext("2d");
       const W = canvas.width, H = canvas.height;
       ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = "#B9B7B0";
+      ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, W, H);
       let minX = fp.xMin, maxX = fp.xMax, minZ = fp.zMin, maxZ = fp.zMax;
       lines.forEach(([x0, z0, x1, z1]) => {
@@ -6291,13 +6303,27 @@ export default function RoomBuilder() {
 
   const RIBBON_HEIGHT = 48;
   const TOPBAR_HEIGHT = 44;
-  const RECENT_HEIGHT = 92;
+  const RECENT_HEIGHT = 120;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
   const panelResizeRef = useRef(null);
   const layersScrollRef = useRef(null);
   const scrollStripDragRef = useRef(null);
   const recentScrollInnerRef = useRef(null);
   const recentScrollDragRef = useRef(null);
+  const recentScrollTrackRef = useRef(null);
+  const recentScrollThumbRef = useRef(null);
+  const updateRecentThumb = useCallback(() => {
+    const el = recentScrollInnerRef.current, thumb = recentScrollThumbRef.current;
+    if (!el || !thumb) return;
+    const { scrollWidth, clientWidth, scrollLeft } = el;
+    if (scrollWidth <= clientWidth + 1) { thumb.style.display = "none"; return; }
+    thumb.style.display = "block";
+    const widthPct = Math.max((clientWidth / scrollWidth) * 100, 8);
+    const leftPct = (scrollLeft / (scrollWidth - clientWidth)) * (100 - widthPct);
+    thumb.style.width = `${widthPct}%`;
+    thumb.style.left = `${leftPct}%`;
+  }, []);
+  useEffect(() => { updateRecentThumb(); }, [recentScenes.length, layersPanelWidth, updateRecentThumb]);
   const newSceneBtnRef = useRef(null);
   const defaultLayersWidth = () => 210;
   useEffect(() => { setLayersPanelWidth(defaultLayersWidth()); }, []);
@@ -6443,10 +6469,19 @@ export default function RoomBuilder() {
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
         [data-theme="dark"] {
-          --bg-window: #171718;
-          --bg-panel: #2c2c2e;
-          --bg-panel-translucent: #2c2c2e;
-          --bg-strip: #222224;
+          /* ONE content color -- the layers panel, the Recent panel, the
+             3D viewport's own background, and the ribbon's fill are all
+             this exact same value, seamless against each other. The top
+             band is the one deliberately different (darker) tone, and
+             --splitter is pinned to that same value too (not a separate
+             rgba mix) so every divider reads as a hairline of the top
+             band's own color, never its own third shade. */
+          --bg-content: #2c2c2e;
+          --bg-window: var(--bg-content);
+          --bg-panel: var(--bg-content);
+          --bg-panel-translucent: var(--bg-content);
+          --bg-strip: #1c1c1e;
+          --splitter: var(--bg-strip);
           --bg-control: #3a3a3c;
           --bg-control-hover: #444446;
           --bg-control-pressed: #58585a;
@@ -6458,21 +6493,23 @@ export default function RoomBuilder() {
           --text-tertiary: rgba(235, 235, 245, 0.3);
           --scrollbar-track: rgba(255, 255, 255, 0.05);
           --bg-thumb: #ffffff;
-          /* dark theme: a lighter grey splitter reads against the dark panels */
-          --splitter: rgba(255, 255, 255, 0.22);
         }
         [data-theme="light"] {
-          /* neutral greys (R=G=B, no warm cream tint) -- window/panel/
-             thumbnail stay close to the reference mockup's own near-flat
-             tones, but the top/bottom strips are pulled clearly darker
-             than that (the mockup itself barely differentiates them,
-             which read as "not dark enough" against the panel and
-             viewport once built) so the band is unmistakably its own
-             layer of chrome rather than blending into what's next to it. */
-          --bg-window: #e4e4e4;
-          --bg-panel: #e8e8e8;
-          --bg-panel-translucent: #e8e8e8;
-          --bg-strip: #d2d2d2;
+          /* same rule as dark: one shared content color for the layers
+             panel / Recent panel / 3D viewport / ribbon fill, all
+             pixel-identical (no seam when you spin the 3D view right up
+             against the sidebar); the top band is the one clearly darker
+             tone, and every divider -- the band's own bottom edge, the
+             ribbon's top edge, the vertical rules between ribbon groups --
+             is pinned to that exact same darker value rather than a
+             separate translucent-black mix (which read as crushing to
+             near-black in practice). */
+          --bg-content: #e8e8e8;
+          --bg-window: var(--bg-content);
+          --bg-panel: var(--bg-content);
+          --bg-panel-translucent: var(--bg-content);
+          --bg-strip: #b0b0b0;
+          --splitter: var(--bg-strip);
           --bg-thumb: #ffffff;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
@@ -6484,8 +6521,6 @@ export default function RoomBuilder() {
           --text-secondary: rgba(0, 0, 0, 0.56);
           --text-tertiary: rgba(0, 0, 0, 0.3);
           --scrollbar-track: rgba(0, 0, 0, 0.04);
-          /* light theme: a thin dark grey splitter, per the reference UI */
-          --splitter: rgba(0, 0, 0, 0.32);
         }
         [data-theme] {
           /* the app's own brand accent -- kept constant across both themes
@@ -6565,7 +6600,7 @@ export default function RoomBuilder() {
         .ribbon {
           position: absolute; left: 0; right: 0; bottom: 0; height: ${RIBBON_HEIGHT}px;
           display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden;
-          background: var(--bg-strip);
+          background: var(--bg-panel);
           border-top: 1px solid var(--splitter);
         }
         .ribbon-section { display: flex; align-items: center; gap: 12px; padding: 0 12px; flex-shrink: 0; }
@@ -6732,7 +6767,12 @@ export default function RoomBuilder() {
         <div style={{ padding: "8px 9px 4px" }}>
           <span className="panel-title">Recent</span>
         </div>
-        <div className="recent-scroll" ref={recentScrollInnerRef} style={{ flex: 1, minHeight: 0, overflowX: "auto", overflowY: "hidden", display: "flex", gap: 6, padding: "0 9px 10px", alignItems: "flex-start" }}>
+        <div
+          className="recent-scroll"
+          ref={recentScrollInnerRef}
+          onScroll={updateRecentThumb}
+          style={{ flex: 1, minHeight: 0, overflowX: "auto", overflowY: "hidden", display: "flex", gap: 6, padding: "0 9px 10px", alignItems: "flex-start" }}
+        >
           {recentScenes.length === 0 && (
             <span style={{ fontSize: 9, color: "var(--text-tertiary)", alignSelf: "center" }}>Autosaves every 15s</span>
           )}
@@ -6756,6 +6796,7 @@ export default function RoomBuilder() {
           ))}
         </div>
         <div
+          ref={recentScrollTrackRef}
           title="Drag to scroll"
           onPointerDown={(e) => {
             e.currentTarget.setPointerCapture(e.pointerId);
@@ -6765,13 +6806,24 @@ export default function RoomBuilder() {
             const ds = recentScrollDragRef.current;
             if (!ds || !recentScrollInnerRef.current) return;
             recentScrollInnerRef.current.scrollLeft = ds.startScrollLeft - (e.clientX - ds.startX);
+            updateRecentThumb();
           }}
           onPointerUp={() => { recentScrollDragRef.current = null; }}
           style={{
-            position: "absolute", bottom: 0, left: 0, right: 0, height: 12,
-            touchAction: "none", cursor: "ew-resize",
+            position: "absolute", bottom: 0, left: 9, right: 9, height: 10,
+            touchAction: "none", cursor: "ew-resize", display: "flex", alignItems: "center",
           }}
-        />
+        >
+          <div style={{ position: "relative", width: "100%", height: 4, borderRadius: 2, background: "var(--scrollbar-track)" }}>
+            <div
+              ref={recentScrollThumbRef}
+              style={{
+                position: "absolute", top: 0, height: "100%", borderRadius: 2,
+                background: "var(--border-separator)", pointerEvents: "none",
+              }}
+            />
+          </div>
+        </div>
       </div>
 
       {/* LEFT: Layers panel -- docked flush to the left edge, directly
@@ -6961,12 +7013,8 @@ export default function RoomBuilder() {
                       />
                     </label>
                     <button
-                      className="rb-btn"
-                      style={{
-                        padding: "1px 5px", fontSize: 8.5,
-                        background: hiddenIds.includes(id) ? "var(--bg-selected)" : "var(--bg-control)",
-                        color: hiddenIds.includes(id) ? "var(--text-primary)" : "var(--text-secondary)",
-                      }}
+                      className={`rb-btn ${hiddenIds.includes(id) ? "active" : ""}`}
+                      style={{ padding: "1px 5px", fontSize: 8.5 }}
                       onClick={() => toggleHideRef.current(id)}
                       title="Hide this layer"
                     >
@@ -7011,7 +7059,7 @@ export default function RoomBuilder() {
           <div style={{ display: "flex", gap: 4 }}>
             <button
               className="rb-btn"
-              style={{ padding: "3px 6px", fontSize: 9, flex: 1, background: "var(--bg-control)", border: "1px solid var(--border-control)" }}
+              style={{ padding: "3px 6px", fontSize: 11, flex: "0 0 auto", background: "transparent", border: "none" }}
               onClick={() => addFloorRef.current()}
               title="Add a new layer with a default room"
             >
@@ -7021,9 +7069,9 @@ export default function RoomBuilder() {
               ref={dupBtnRef}
               className="rb-btn"
               style={{
-                padding: "3px 6px", fontSize: 9, flex: 1, background: "var(--bg-control)",
-                border: dragOverAction === "dup" ? "1px solid var(--accent)" : "1px solid var(--border-control)",
-                boxShadow: dragOverAction === "dup" ? "inset 0 0 0 1.5px var(--accent)" : "none",
+                padding: "3px 6px", fontSize: 9, flex: 1,
+                background: dragOverAction === "dup" ? "rgba(255,255,255,0.18)" : "transparent",
+                border: dragOverAction === "dup" ? "1px solid #fff" : "1px solid var(--splitter)",
               }}
               onClick={() => duplicateFloorRef.current()}
               title="Duplicate the selected layer -- or drag a layer row down onto this button"
@@ -7034,9 +7082,9 @@ export default function RoomBuilder() {
               ref={delBtnRef}
               className="rb-btn"
               style={{
-                padding: "3px 6px", fontSize: 9, flex: 1, background: "var(--bg-control)",
-                border: dragOverAction === "del" ? "1px solid var(--accent)" : "1px solid var(--border-control)",
-                boxShadow: dragOverAction === "del" ? "inset 0 0 0 1.5px var(--accent)" : "none",
+                padding: "3px 6px", fontSize: 9, flex: 1,
+                background: dragOverAction === "del" ? "rgba(255,255,255,0.18)" : "transparent",
+                border: dragOverAction === "del" ? "1px solid #fff" : "1px solid var(--splitter)",
               }}
               onClick={() => deleteFloorRef.current()}
               title="Delete the selected layer -- or drag a layer row down onto this button"
@@ -7101,13 +7149,16 @@ export default function RoomBuilder() {
           treatment as the bottom ribbon, rather than the buttons floating
           bare over the 3D view. The band itself stays pointer-events:none
           (like before) so the gap between the two button clusters still
-          lets you orbit the camera through it. */}
+          lets you orbit the camera through it. A single hairline at its
+          own bottom edge, in that same darker color, is the only divider
+          between it and the lighter content below. */}
       <div
         style={{
           position: "absolute", top: 0, left: 0, right: 0, height: TOPBAR_HEIGHT,
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "0 12px", gap: 12, pointerEvents: "none",
           background: "var(--bg-strip)",
+          borderBottom: "1px solid var(--splitter)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
