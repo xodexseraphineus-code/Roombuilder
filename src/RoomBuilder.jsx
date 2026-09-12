@@ -418,10 +418,10 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
                   return (
                     <path
                       key={`preset${slice}`}
-                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, 3)}
+                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, 0)}
                       fill={hexToCss(adj(hex))}
                       stroke={isActivePreset(slice) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
-                      strokeWidth={isActivePreset(slice) ? 1.5 : 0.75}
+                      strokeWidth={isActivePreset(slice) ? 1.5 : 1}
                       style={{ cursor: "pointer" }}
                       onClick={() => pick({ type: "preset", name: preset.name, slice })}
                     >
@@ -432,10 +432,10 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
               : WHEEL_DISC_CELLS.map((cell) => (
                   <path
                     key={`h${cell.hue}-r${cell.ring}`}
-                    d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth, discR0 + (cell.ring + 1) * ringDepth, cell.hueDeg - 90, hueSpan, 1.5)}
+                    d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth, discR0 + (cell.ring + 1) * ringDepth, cell.hueDeg - 90, hueSpan, 0)}
                     fill={hexToCss(adj(cell.hex))}
-                    stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "rgba(0,0,0,0.08)"}
-                    strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 0.4}
+                    stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "rgba(0,0,0,0.1)"}
+                    strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 0.6}
                     style={{ cursor: "pointer" }}
                     onClick={() => pick({ type: "hue", hueDeg: cell.hueDeg, ring: cell.ring })}
                   >
@@ -445,7 +445,7 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
             {WHEEL_GREY_CELLS.map((g) => (
               <path
                 key={`grey${g.step}`}
-                d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 1)}
+                d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 0)}
                 fill={hexToCss(adjustHex(g.hex, 0, 1, lightMul))}
                 stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
                 strokeWidth={isActiveGrey(g.step) ? 1.5 : 0.35}
@@ -565,6 +565,64 @@ export default function RoomBuilder() {
   const [groundOn, setGroundOn] = useState(false);
   const groundApiRef = useRef({ setEnabled: () => {} });
   const wallThicknessApiRef = useRef({ setThickness: () => {} });
+  const sceneIoApiRef = useRef({ save: () => null, load: () => {} });
+  // "Recent" scenes -- a browser-local (localStorage) autosave history,
+  // since there's no server to persist to. Every 15s the whole scene
+  // (every floor, same shape undo/redo already snapshots) plus a thumbnail
+  // gets saved under the current session's scene id; "New scene" starts a
+  // fresh id so it becomes its own new history entry instead of overwriting
+  // the one just left.
+  const RECENT_SCENES_KEY = "roombuilder.recentScenes.v1";
+  const MAX_RECENT_SCENES = 14;
+  const [recentScenes, setRecentScenes] = useState([]);
+  const currentSceneIdRef = useRef(`scene_${Date.now()}`);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(RECENT_SCENES_KEY);
+      if (raw) setRecentScenes(JSON.parse(raw));
+    } catch {
+      // localStorage unavailable (private browsing, quota, etc.) -- the
+      // Recent panel just stays empty for this session rather than erroring.
+    }
+  }, []);
+  function autosaveScene() {
+    const snap = sceneIoApiRef.current.save();
+    if (!snap) return;
+    let thumb = null;
+    try {
+      const canvas = thumbCanvasMapRef.current.get(activeFloorIdRef.current);
+      if (canvas) thumb = canvas.toDataURL("image/png");
+    } catch {
+      // canvas may be tainted or momentarily unavailable -- keep whatever
+      // thumbnail this entry already had rather than failing the save.
+    }
+    setRecentScenes((prev) => {
+      const id = currentSceneIdRef.current;
+      const idx = prev.findIndex((s) => s.id === id);
+      const entry = {
+        id,
+        name: idx >= 0 ? prev[idx].name : `Scene ${prev.length + 1}`,
+        savedAt: Date.now(),
+        snapshot: snap,
+        thumb: thumb || (idx >= 0 ? prev[idx].thumb : null),
+      };
+      const next = idx >= 0 ? [...prev.slice(0, idx), entry, ...prev.slice(idx + 1)] : [entry, ...prev].slice(0, MAX_RECENT_SCENES);
+      try { localStorage.setItem(RECENT_SCENES_KEY, JSON.stringify(next)); } catch {
+        // over quota or unavailable -- the in-memory list (this render)
+        // still works for the rest of the session, it just won't survive
+        // a reload.
+      }
+      return next;
+    });
+  }
+  useEffect(() => {
+    const interval = setInterval(autosaveScene, 15000);
+    return () => clearInterval(interval);
+  }, []);
+  function loadRecentScene(entry) {
+    currentSceneIdRef.current = entry.id;
+    sceneIoApiRef.current.load(entry.snapshot);
+  }
   const [lightAzimuth, setLightAzimuth] = useState(45);
   const lightAzimuthApiRef = useRef(() => {});
   useEffect(() => { lightAzimuthApiRef.current(lightAzimuth); }, [lightAzimuth]);
@@ -664,7 +722,13 @@ export default function RoomBuilder() {
   const tintActiveApiRef = useRef(() => {});
   useEffect(() => { tintActiveApiRef.current(tintActiveOn, tintActiveColor); }, [tintActiveOn, tintActiveColor]);
   const [themeWheelOpen, setThemeWheelOpen] = useState(false);
-  const [themeWheelPos, setThemeWheelPos] = useState({ x: 640, y: 420 });
+  // defaults near the bottom of the Layers panel rather than dead center
+  // over the 3D viewport, so it doesn't sit right in the middle of the
+  // user's work area the moment it's opened.
+  const [themeWheelPos, setThemeWheelPos] = useState(() => ({
+    x: 210,
+    y: typeof window !== "undefined" ? Math.max(320, window.innerHeight - 260) : 420,
+  }));
   // { type: "hue", hueDeg, ring } | { type: "grey", step, midLight } | { type: "preset", name } | null
   const [themeAnchor, setThemeAnchor] = useState(null);
   const themeApiRef = useRef(() => {});
@@ -688,6 +752,8 @@ export default function RoomBuilder() {
   const walkInputRef = useRef({ fwd: false, back: false, left: false, right: false });
   const [floorIds, setFloorIds] = useState([1]);
   const [activeFloorIdState, setActiveFloorIdState] = useState(1);
+  const activeFloorIdRef = useRef(activeFloorIdState);
+  useEffect(() => { activeFloorIdRef.current = activeFloorIdState; }, [activeFloorIdState]);
   const thumbCanvasMapRef = useRef(new Map());
   const refreshThumbnailApiRef = useRef(() => {});
   const duplicateFloorRef = useRef(() => {});
@@ -698,6 +764,12 @@ export default function RoomBuilder() {
   const floorDragRef = useRef(null);
   const [dragFloorId, setDragFloorId] = useState(null);
   const [dropInfo, setDropInfo] = useState(null);
+  // drag-a-layer-onto-the-Duplicate/Delete-button targets, tracked
+  // separately from the row-reorder dropInfo above since they're a
+  // different kind of drop target (a button, not another row).
+  const dupBtnRef = useRef(null);
+  const delBtnRef = useRef(null);
+  const [dragOverAction, setDragOverAction] = useState(null);
   const addFloorRef = useRef(() => {});
   const toggleIsolateRef = useRef(() => {});
   const toggleHideRef = useRef(() => {});
@@ -846,27 +918,43 @@ export default function RoomBuilder() {
     scene.add(orthoFillRight);
 
     // a 50x50m site ground plane under the room, so a building smaller than
-    // that (like the 25x15 default) reads as sitting on a lawn rather than
+    // that (like the 25x15 default) reads as sitting on a slab rather than
     // floating in the void -- sits just below the room floor slab (which
     // spans y=-0.08 to y=0) so the two never z-fight. Off by default (a
-    // toggle in the Layers panel); a radial alpha map fades it to fully
-    // transparent over the outer ~30% of its radius instead of ending in a
-    // hard square edge.
+    // toggle in the Layers panel); a high-resolution radial alpha map fades
+    // it to fully transparent over the outer 20% of its radius, then eases
+    // into full opacity moving further in -- gradual right after that
+    // transparent band, accelerating as it approaches the center, rather
+    // than a plain linear ramp or a hard edge.
     function makeRadialFadeTexture(size) {
       const canvas = document.createElement("canvas");
       canvas.width = canvas.height = size;
       const ctx = canvas.getContext("2d");
       const r = size / 2;
-      const grad = ctx.createRadialGradient(r, r, r * 0.7, r, r, r);
-      grad.addColorStop(0, "rgba(255,255,255,1)");
-      grad.addColorStop(1, "rgba(255,255,255,0)");
+      const grad = ctx.createRadialGradient(r, r, 0, r, r, r);
+      const EDGE_TRANSPARENT_FRAC = 0.2; // outer 20% of the radius stays fully transparent
+      const EASE_POWER = 2.4; // >1 => slow right off the transparent band, faster toward the center
+      const STOPS = 128;
+      for (let i = 0; i <= STOPS; i++) {
+        const rf = i / STOPS; // 0 at center, 1 at the edge
+        let alpha;
+        if (rf >= 1 - EDGE_TRANSPARENT_FRAC) {
+          alpha = 0;
+        } else {
+          const t = 1 - rf / (1 - EDGE_TRANSPARENT_FRAC); // 1 at center, 0 at the transparent band's inner edge
+          alpha = Math.pow(t, EASE_POWER);
+        }
+        grad.addColorStop(rf, `rgba(255,255,255,${alpha})`);
+      }
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, size, size);
       return new THREE.CanvasTexture(canvas);
     }
-    const groundFadeTex = makeRadialFadeTexture(256);
+    const groundFadeTex = makeRadialFadeTexture(1024);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(0x8fbf6a).multiplyScalar(0.6),
+      // a default, slightly-dark neutral grey (roughly the Layers panel's
+      // own thumbnail tone) rather than a grassy green.
+      color: 0x9a9a9a,
       roughness: 0.95,
       metalness: 0,
       envMapIntensity: 0.35,
@@ -943,17 +1031,20 @@ export default function RoomBuilder() {
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
     // default AO radius (0.25 world units) only catches tight crevices --
-    // widened so the contact shadow actually spreads out across the floor
-    // near a wall, the way a real soft ambient occlusion falloff looks.
+    // widened (3x again here) so the contact shadow spreads out softly
+    // across the floor near a wall, rather than a small sharp smudge right
+    // in the corner. A lower distanceExponent spreads the falloff out
+    // further instead of concentrating it close-in, and a lower
+    // blendIntensity keeps corners from crushing to near-black.
     const gtaoPass = new GTAOPass(scene, camera, width, height, undefined, {
-      radius: 1.1,
-      distanceExponent: 1,
+      radius: 3.3,
+      distanceExponent: 0.7,
       thickness: 1,
       distanceFallOff: 0.5,
-      scale: 1.8,
+      scale: 1.4,
     });
     gtaoPass.output = GTAOPass.OUTPUT.Default;
-    gtaoPass.blendIntensity = 1.6;
+    gtaoPass.blendIntensity = 0.9;
     gtaoPass.enabled = false;
     composer.addPass(gtaoPass);
     // High threshold + low strength: this should only catch genuinely bright
@@ -1390,6 +1481,11 @@ export default function RoomBuilder() {
     pushUndoRef.current = pushUndo;
     undoRef.current = performUndo;
     redoRef.current = performRedo;
+    // the whole-scene save/load used by the Recent-scenes autosave system --
+    // reuses the exact same {floors, activeFloorId} snapshot shape as undo/
+    // redo, since it's already a complete, plain-JSON description of every
+    // floor's rooms.
+    sceneIoApiRef.current = { save: snapshotFloors, load: applySnapshot };
 
     const wallDefs = {
       north: { normal: new THREE.Vector3(0, 0, -1), thickAxis: "z", lengthAxis: "x", get coord() { return state.footprint.zMin; }, set coord(v) { state.footprint.zMin = v; } },
@@ -3418,7 +3514,27 @@ export default function RoomBuilder() {
       }
       let rawPalette;
       if (anchor.type === "preset") {
-        rawPalette = CURATED_PALETTES.find((p) => p.name === anchor.name) || CURATED_PALETTES[0];
+        const preset = CURATED_PALETTES.find((p) => p.name === anchor.name) || CURATED_PALETTES[0];
+        // no slice (just cycled to this preset on the hub) -- the curated
+        // default, wall already its most vivid tone. A slice (the user
+        // explicitly tapped one of the four wedges) overrides that: the
+        // tapped color becomes the wall, the lightest of the remaining
+        // three becomes the floor, and the rest recolor the props/railing
+        // -- recomputed from scratch via buildPalette so stairs/platform/
+        // roof/props all stay derived consistently from the new roles
+        // rather than just overwriting wall/floor on the old palette.
+        if (anchor.slice != null && preset.wheel) {
+          const i = anchor.slice % preset.wheel.length;
+          const wall = preset.wheel[i];
+          const rest = preset.wheel.filter((_, j) => j !== i);
+          const ranked = rest.map((hex) => ({ hex, l: hexToHsl(hex).l })).sort((a, b) => b.l - a.l);
+          const floor = ranked[0].hex;
+          const prop = ranked[1] ? ranked[1].hex : ranked[0].hex;
+          const railing = ranked[2] ? ranked[2].hex : prop;
+          rawPalette = buildPalette(preset.name, wall, floor, railing, prop);
+        } else {
+          rawPalette = preset;
+        }
       } else if (anchor.type === "grey") {
         rawPalette = themeColorsFor(0, 0, anchor.midLight);
       } else {
@@ -6052,6 +6168,7 @@ export default function RoomBuilder() {
 
   const RIBBON_HEIGHT = 48;
   const TOPBAR_HEIGHT = 44;
+  const RECENT_HEIGHT = 92;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
   const panelResizeRef = useRef(null);
   const layersScrollRef = useRef(null);
@@ -6220,15 +6337,17 @@ export default function RoomBuilder() {
           --splitter: rgba(255, 255, 255, 0.22);
         }
         [data-theme="light"] {
-          /* exact neutral greys sampled from the reference mockup -- R=G=B,
-             no warm cream tint. The panel/strip/window/thumbnail shades
-             sit within a few points of each other on purpose (that's how
-             the reference itself reads); --bg-selected is the one clear,
-             deliberate step down. */
+          /* neutral greys (R=G=B, no warm cream tint) -- window/panel/
+             thumbnail stay close to the reference mockup's own near-flat
+             tones, but the top/bottom strips are pulled clearly darker
+             than that (the mockup itself barely differentiates them,
+             which read as "not dark enough" against the panel and
+             viewport once built) so the band is unmistakably its own
+             layer of chrome rather than blending into what's next to it. */
           --bg-window: #e4e4e4;
           --bg-panel: #e8e8e8;
           --bg-panel-translucent: #e8e8e8;
-          --bg-strip: #e0e0e0;
+          --bg-strip: #d2d2d2;
           --bg-thumb: #eeeeee;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
@@ -6429,30 +6548,6 @@ export default function RoomBuilder() {
       />
       <div ref={measureLayerRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }} />
 
-      {/* light direction -- floating over the viewport for now, rather than
-          living in the ribbon, since it's a scene-wide setting rather than
-          a per-tool one. */}
-      <div
-        style={{
-          position: "absolute", top: TOPBAR_HEIGHT + 12, left: "50%", transform: "translateX(-50%)",
-          display: "flex", alignItems: "center", gap: 8, width: 220,
-          background: "var(--bg-floating)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
-          padding: "6px 12px", borderRadius: 8, zIndex: 40,
-        }}
-      >
-        <span style={{ fontSize: 10, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>Light</span>
-        <input
-          className="rb-range"
-          type="range"
-          min={0}
-          max={360}
-          step={1}
-          value={lightAzimuth}
-          onChange={(e) => setLightAzimuth(parseFloat(e.target.value))}
-          style={{ flex: 1 }}
-        />
-      </div>
-
       {walkMode && (
         <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", color: "var(--text-primary)", fontSize: 9.5, background: "var(--bg-floating)", backdropFilter: "blur(12px)", padding: "5px 10px", borderRadius: 8, pointerEvents: "none" }}>
           Drag empty space to orbit the camera &middot; drag a wall or floor to edit it &middot; camera icon to exit
@@ -6492,12 +6587,50 @@ export default function RoomBuilder() {
         }}
       />
 
-      {/* LEFT: Layers panel -- docked flush to the left edge and directly
-          under the top band (not floating), PowerPoint-style slide list,
+      {/* LEFT, above the Layers panel: Recent -- a browser-local autosave
+          history (every ~15s, no server to persist to), thumbnails you can
+          click to reload that scene. Scrolls horizontally when there are
+          more than fit. */}
+      <div
+        style={{
+          position: "absolute", top: TOPBAR_HEIGHT, left: 0, height: RECENT_HEIGHT, width: layersPanelWidth,
+          background: "var(--bg-panel)", display: "flex", flexDirection: "column", overflow: "hidden",
+        }}
+      >
+        <div style={{ padding: "8px 9px 4px" }}>
+          <span className="panel-title">Recent</span>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, overflowX: "auto", overflowY: "hidden", display: "flex", gap: 6, padding: "0 9px 8px", alignItems: "flex-start" }}>
+          {recentScenes.length === 0 && (
+            <span style={{ fontSize: 9, color: "var(--text-tertiary)", alignSelf: "center" }}>Autosaves every 15s</span>
+          )}
+          {recentScenes.map((entry) => (
+            <button
+              key={entry.id}
+              className="rb-btn"
+              onClick={() => loadRecentScene(entry)}
+              title={`${entry.name} · ${new Date(entry.savedAt).toLocaleTimeString()}`}
+              style={{
+                padding: 2, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+                boxShadow: currentSceneIdRef.current === entry.id ? "inset 0 0 0 1.5px var(--ring-selected)" : "none",
+              }}
+            >
+              {entry.thumb ? (
+                <img src={entry.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 1, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
+              ) : (
+                <div style={{ width: 56, height: 56, borderRadius: 1, background: "var(--bg-thumb)" }} />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* LEFT: Layers panel -- docked flush to the left edge, directly
+          under Recent (not floating), PowerPoint-style slide list,
           resizable via the handle on its right edge */}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT + RECENT_HEIGHT, left: 0, bottom: RIBBON_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}
@@ -6523,11 +6656,6 @@ export default function RoomBuilder() {
         <div style={{ padding: "9px 9px 7px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span className="panel-title">Layers</span>
-            <div style={{ display: "flex", gap: 3 }}>
-              <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9 }} onClick={() => addFloorRef.current()} title="Add a new layer with a default room">+</button>
-              <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9 }} onClick={() => duplicateFloorRef.current()} title="Duplicate the selected layer">Dup</button>
-              <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9 }} onClick={() => deleteFloorRef.current()} title="Delete the selected layer">Del</button>
-            </div>
           </div>
           <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
             <button className="rb-btn" style={{ padding: "3px 5px", fontSize: 8.5, flex: 1 }} onClick={() => cutFloorRef.current()} title="Cut the selected layer to the clipboard">Cut</button>
@@ -6569,6 +6697,22 @@ export default function RoomBuilder() {
                     setDragFloorId(id);
                   }
                   if (ds.moved) {
+                    const overBtn = (btnRef) => {
+                      if (!btnRef.current) return false;
+                      const r = btnRef.current.getBoundingClientRect();
+                      return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+                    };
+                    if (overBtn(dupBtnRef)) {
+                      setDragOverAction("dup");
+                      setDropInfo(null);
+                      return;
+                    }
+                    if (overBtn(delBtnRef)) {
+                      setDragOverAction("del");
+                      setDropInfo(null);
+                      return;
+                    }
+                    setDragOverAction(null);
                     let found = null;
                     floorRowRefs.current.forEach((el, rid) => {
                       if (rid === id) return;
@@ -6583,7 +6727,13 @@ export default function RoomBuilder() {
                 onPointerUp={(e) => {
                   const ds = floorDragRef.current;
                   if (ds && ds.id === id) {
-                    if (ds.moved && dropInfo) {
+                    if (ds.moved && dragOverAction === "dup") {
+                      selectFloorRef.current(id);
+                      duplicateFloorRef.current();
+                    } else if (ds.moved && dragOverAction === "del") {
+                      selectFloorRef.current(id);
+                      deleteFloorRef.current();
+                    } else if (ds.moved && dropInfo) {
                       reorderFloorsRef.current(id, dropInfo.targetId, dropInfo.edge === "above" ? "after" : "before");
                     } else if (!ds.moved) {
                       selectFloorRef.current(id);
@@ -6592,6 +6742,7 @@ export default function RoomBuilder() {
                   floorDragRef.current = null;
                   setDragFloorId(null);
                   setDropInfo(null);
+                  setDragOverAction(null);
                 }}
                 style={{
                   display: "flex", flexDirection: "row", alignItems: "center", gap: 7, cursor: "grab",
@@ -6703,6 +6854,37 @@ export default function RoomBuilder() {
         </div>
 
         <div style={{ padding: "12px 11px", display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* its own little row of layer actions -- drag a layer row down
+              onto Dup or Del to duplicate/delete *that* layer, or just
+              click either button to act on whichever layer is selected;
+              + always creates a fresh default layer. */}
+          <div style={{ display: "flex", gap: 4 }}>
+            <button className="rb-btn" style={{ padding: "3px 6px", fontSize: 9, flex: 1 }} onClick={() => addFloorRef.current()} title="Add a new layer with a default room">+</button>
+            <button
+              ref={dupBtnRef}
+              className="rb-btn"
+              style={{
+                padding: "3px 6px", fontSize: 9, flex: 1,
+                boxShadow: dragOverAction === "dup" ? "inset 0 0 0 1.5px var(--ring-selected)" : "none",
+              }}
+              onClick={() => duplicateFloorRef.current()}
+              title="Duplicate the selected layer (or drag a layer here)"
+            >
+              Dup
+            </button>
+            <button
+              ref={delBtnRef}
+              className="rb-btn"
+              style={{
+                padding: "3px 6px", fontSize: 9, flex: 1,
+                boxShadow: dragOverAction === "del" ? "inset 0 0 0 1.5px var(--ring-selected)" : "none",
+              }}
+              onClick={() => deleteFloorRef.current()}
+              title="Delete the selected layer (or drag a layer here)"
+            >
+              Del
+            </button>
+          </div>
           <div style={{ display: "flex", gap: 16 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input
@@ -6774,6 +6956,7 @@ export default function RoomBuilder() {
             ref={newSceneBtnRef}
             className="rb-btn"
             onClick={() => {
+              currentSceneIdRef.current = `scene_${Date.now()}`;
               resetEverythingRef.current();
               setTool("move");
               setSelectedStairId(null);
@@ -7336,6 +7519,18 @@ export default function RoomBuilder() {
             <button className={`rb-btn ${transparentInactive ? "active" : ""}`} onClick={() => setTransparentInactive((v) => !v)}>Fade inactive</button>
             <button className={`rb-btn ${ultraRealistic ? "active" : ""}`} onClick={() => setUltraRealistic((v) => !v)}>Realistic</button>
           </div>
+          <div className="ribbon-group" style={{ minWidth: 110 }}>
+            <span className="ribbon-label">Light</span>
+            <input
+              className="rb-range"
+              type="range"
+              min={0}
+              max={360}
+              step={1}
+              value={lightAzimuth}
+              onChange={(e) => setLightAzimuth(parseFloat(e.target.value))}
+            />
+          </div>
           <div className="ribbon-group" style={{ minWidth: 150, gap: 4 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
               <input type="checkbox" className="rb-radio" checked={tintActiveOn} onChange={(e) => setTintActiveOn(e.target.checked)} />
@@ -7382,7 +7577,17 @@ export default function RoomBuilder() {
           onPosChange={setThemeWheelPos}
           activeTheme={themeAnchor}
           presetIndex={themePresetIndex}
-          onCyclePreset={() => setThemePresetIndex((i) => (i + 1) % (CURATED_PALETTES.length + 1))}
+          onCyclePreset={() => {
+            // cycling to a named preset now applies it immediately (its
+            // default, most-vivid-tone-as-wall palette) instead of waiting
+            // for a wedge tap -- tapping a specific wedge afterward still
+            // overrides which color becomes the wall.
+            setThemePresetIndex((i) => {
+              const next = (i + 1) % (CURATED_PALETTES.length + 1);
+              if (next > 0) setThemeAnchor({ type: "preset", name: CURATED_PALETTES[next - 1].name });
+              return next;
+            });
+          }}
           onPick={(anchor) => setThemeAnchor(anchor)}
           onClose={() => setThemeWheelOpen(false)}
           hueShift={themeHueShift}
