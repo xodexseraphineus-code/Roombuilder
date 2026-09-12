@@ -50,13 +50,16 @@ const TE_SWATCHES = [0xff6b1a, 0xffffff, 0x4a90d9, 0xf2c230, 0xe5484d];
 // as what a prop reverts to if a theme's color is ever cleared.
 const PROP_DEFAULT_COLORS = { sphere: 0xd6453c, cone: 0x3f9d5c, cube: 0x3a6bc9, cylinder: 0xd6453c };
 
-// Theme color wheel: hue "spokes" radiating outward from a hub, each with
-// a light-near-the-hub-to-dark-at-the-tip tone gradient -- loosely modeled
-// on a Copic-marker color wheel, but with a handful of curated tones per
-// hue instead of dozens of named marker codes. Picking a tone sets the
-// room's wall tint (which the existing tint system already derives a
-// matching floor shade from) and the props' color, for a one-click,
-// cohesive room palette.
+// Theme color wheel: an inner ring of solid primary hues, an outer ring of
+// ten greyscale steps (white to black), and hue "spokes" radiating out from
+// the primary ring, each running light-near-the-hub to dark-at-the-tip --
+// loosely modeled on a Copic-marker color wheel. Picking anywhere along a
+// hue's spoke (or its wedge on the primary ring) selects that hue as the
+// room's theme; picking a step on the grey ring selects a monochrome theme
+// anchored at that lightness. Either way, one click derives a whole set of
+// related-but-distinct tones and hands one to each of the wall, floor,
+// stairs, and every prop kind -- a cohesive palette from a single pick
+// instead of tinting each surface separately.
 function hslToHex(h, s, l) {
   s /= 100; l /= 100;
   const k = (n) => (n + h / 30) % 12;
@@ -65,8 +68,30 @@ function hslToHex(h, s, l) {
   const toHex = (x) => Math.round(x * 255);
   return (toHex(f(0)) << 16) | (toHex(f(4)) << 8) | toHex(f(8));
 }
+function hexToCss(hex) { return `#${hex.toString(16).padStart(6, "0")}`; }
 const THEME_WHEEL_HUES = 10;
 const THEME_WHEEL_TONES = 5;
+const THEME_SAT = 58; // the fixed saturation every hue-spoke theme derives its palette at
+const THEME_WALL_MIDLIGHT = 56; // the wall's lightness anchor for a hue-spoke theme
+function clampL(l) { return Math.max(4, Math.min(96, l)); }
+// derives the room's whole palette from one anchor point -- hueDeg/sat pick
+// the family, midLight pivots the whole palette lighter or darker (used by
+// the grey ring's ten steps to get ten distinct light-to-dark monochrome
+// themes from the same hueDeg=0/sat=0 pair). Offsets are deliberately
+// uneven (not a plain linear ramp) so mid-palette objects (walls, stairs)
+// stay closer together while floor/cube bracket the extremes.
+function themeColorsFor(hueDeg, sat, midLight = THEME_WALL_MIDLIGHT) {
+  const at = (dl) => hslToHex(hueDeg, sat, clampL(midLight + dl));
+  return {
+    floor: at(30),
+    stairs: at(16),
+    wall: at(0),
+    sphere: at(-16),
+    cylinder: hslToHex((hueDeg + 18) % 360, Math.max(0, sat - 10), clampL(midLight - 8)),
+    cone: hslToHex((hueDeg - 18 + 360) % 360, sat, clampL(midLight - 28)),
+    cube: at(-34),
+  };
+}
 const THEME_WHEEL_CHIPS = (() => {
   const chips = [];
   for (let h = 0; h < THEME_WHEEL_HUES; h++) {
@@ -75,20 +100,23 @@ const THEME_WHEEL_CHIPS = (() => {
     for (let t = 0; t < THEME_WHEEL_TONES; t++) {
       const lightness = 82 - t * 15; // light near the hub, dark toward the tip
       const saturation = 55 + t * 6;
-      chips.push({ hue: h, tone: t, angleDeg, hex: hslToHex(hueDeg, saturation, lightness) });
+      chips.push({ hue: h, tone: t, hueDeg, angleDeg, hex: hslToHex(hueDeg, saturation, lightness) });
     }
   }
   return chips;
 })();
-// a slim neutral (grey/white/black) spoke, same tone-count, pointing up --
-// this is the only spoke drawn at hue index -1 (angle 0, straight up would
-// collide with hue 0, so it's offset half a step to sit between hue 9 and
-// hue 0 instead).
-const THEME_WHEEL_NEUTRAL_ANGLE = -90 - 360 / THEME_WHEEL_HUES / 2;
-const THEME_WHEEL_NEUTRALS = Array.from({ length: THEME_WHEEL_TONES }, (_, t) => ({
-  hue: -1, tone: t, angleDeg: THEME_WHEEL_NEUTRAL_ANGLE,
-  hex: hslToHex(0, 0, 92 - t * 20),
-}));
+// the inner primary-hue ring -- one solid wedge per spoke, at the same
+// angle, doubling as a bigger click target for that hue's theme.
+const THEME_RING_PRIMARY = Array.from({ length: THEME_WHEEL_HUES }, (_, h) => {
+  const hueDeg = (h / THEME_WHEEL_HUES) * 360;
+  return { hue: h, hueDeg, hex: hslToHex(hueDeg, 68, 55) };
+});
+// the outer greyscale ring -- ten steps from near-white to near-black, each
+// its own selectable monochrome theme (sat=0, hueDeg irrelevant).
+const THEME_RING_GREY = Array.from({ length: 10 }, (_, i) => {
+  const midLight = clampL(92 - i * 9);
+  return { step: i, midLight, hex: hslToHex(0, 0, midLight) };
+});
 
 // a short synthesized click (Web Audio, no audio file to fetch) for wall/
 // partition contact feedback -- one shared AudioContext, created lazily on
@@ -134,66 +162,145 @@ function QuadViewIcon() {
   );
 }
 
-// The color-theme wheel: an overlay that pops open from the trigger button,
-// showing every THEME_WHEEL_CHIPS entry (plus the neutral spoke) as a small
-// rectangle radiating outward from a hub. Deliberately simple compared to a
-// real Copic wheel -- a fixed, fully-visible set of tones rather than
-// dozens of scrollable marker codes -- since the goal is a quick, cohesive
-// room palette, not a full swatch library.
-function ThemeWheelOverlay({ onPick, onClose }) {
+function polarPoint(cx, cy, r, deg) {
+  const rad = (deg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+// an annular-sector (ring wedge) path, from r0 to r1, spanning `span`
+// degrees starting at `angleDeg`, with a small gap shaved off each side.
+function ringWedgePath(cx, cy, r0, r1, angleDeg, span, gapDeg) {
+  const a0 = angleDeg + gapDeg / 2, a1 = angleDeg + span - gapDeg / 2;
+  const p0 = polarPoint(cx, cy, r0, a0), p1 = polarPoint(cx, cy, r1, a0);
+  const p2 = polarPoint(cx, cy, r1, a1), p3 = polarPoint(cx, cy, r0, a1);
+  const large = a1 - a0 > 180 ? 1 : 0;
+  return `M ${p0.x} ${p0.y} L ${p1.x} ${p1.y} A ${r1} ${r1} 0 ${large} 1 ${p2.x} ${p2.y} L ${p3.x} ${p3.y} A ${r0} ${r0} 0 ${large} 0 ${p0.x} ${p0.y} Z`;
+}
+
+// The color-theme wheel: a persistent, draggable floating widget (not a
+// modal -- no backdrop, so the 3D view stays interactive while it's open).
+// From the hub out: a ring of solid primary hues, a ring of ten greyscale
+// steps, then each hue's own spoke of light-to-dark tones -- loosely
+// modeled on a Copic-marker color wheel. Deliberately simple compared to
+// the real thing (a fixed, fully-visible set of tones rather than dozens
+// of scrollable marker codes), since the goal is a quick, cohesive room
+// palette, not a full swatch library. Dragging the hub repositions the
+// whole wheel; the small close button dismisses it.
+function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     const id = requestAnimationFrame(() => setEntered(true));
     return () => cancelAnimationFrame(id);
   }, []);
-  const size = 340;
+  const dragRef = useRef(null);
+  function startDrag(e) {
+    e.preventDefault();
+    const startX = e.clientX, startY = e.clientY, startPos = pos;
+    dragRef.current = true;
+    function onMove(ev) {
+      if (!dragRef.current) return;
+      onPosChange({ x: startPos.x + (ev.clientX - startX), y: startPos.y + (ev.clientY - startY) });
+    }
+    function onUp() {
+      dragRef.current = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  const size = 320;
   const cx = size / 2, cy = size / 2;
-  const innerR = 34, chipLen = 24, chipGap = 2, chipW = 20;
-  function chipRect(chip) {
-    const r0 = innerR + chip.tone * (chipLen + chipGap);
+  const hubR = 27;
+  const primaryR0 = 30, primaryR1 = 44;
+  const greyR0 = 46, greyR1 = 60;
+  const spokeInnerR = 64, chipLen = 22, chipGap = 2, chipW = 18;
+  const hueSpan = 360 / THEME_WHEEL_HUES;
+  const greySpan = 360 / THEME_RING_GREY.length;
+
+  function chipTransform(chip) {
+    const r0 = spokeInnerR + chip.tone * (chipLen + chipGap);
     return { x: -chipW / 2, y: -(r0 + chipLen), width: chipW, height: chipLen, transform: `rotate(${chip.angleDeg} ${cx} ${cy}) translate(${cx} ${cy})` };
   }
-  const allChips = THEME_WHEEL_CHIPS.concat(THEME_WHEEL_NEUTRALS);
+  const isActiveHue = (h) => activeTheme && activeTheme.type === "hue" && activeTheme.hue === h;
+  const isActiveGrey = (s) => activeTheme && activeTheme.type === "grey" && activeTheme.step === s;
+
   return (
     <div
-      onClick={onClose}
       style={{
-        position: "absolute", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center",
-        background: "rgba(0,0,0,0.35)", backdropFilter: "blur(2px)",
-        opacity: entered ? 1 : 0, transition: "opacity 0.2s ease",
+        position: "absolute", left: pos.x, top: pos.y, zIndex: 200, width: size, height: size,
+        transform: `translate(-50%, -50%) scale(${entered ? 1 : 0.35}) rotate(${entered ? 0 : -35}deg)`,
+        opacity: entered ? 1 : 0,
+        transition: "transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.25s ease",
+        filter: "drop-shadow(0 8px 24px rgba(0,0,0,0.35))",
       }}
     >
+      <svg width={size} height={size} style={{ overflow: "visible", position: "absolute", inset: 0 }}>
+        {THEME_WHEEL_CHIPS.map((chip) => {
+          const r = chipTransform(chip);
+          return (
+            <rect
+              key={`h${chip.hue}-t${chip.tone}`}
+              x={r.x} y={r.y} width={r.width} height={r.height} rx={2}
+              transform={r.transform}
+              fill={hexToCss(chip.hex)}
+              stroke={isActiveHue(chip.hue) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
+              strokeWidth={isActiveHue(chip.hue) ? 1.75 : 0.75}
+              style={{ cursor: "pointer" }}
+              onClick={() => onPick({ type: "hue", hue: chip.hue, hueDeg: chip.hueDeg })}
+            >
+              <title>{hexToCss(chip.hex)}</title>
+            </rect>
+          );
+        })}
+        {THEME_RING_GREY.map((g) => (
+          <path
+            key={`grey${g.step}`}
+            d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 1.5)}
+            fill={hexToCss(g.hex)}
+            stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.2)"}
+            strokeWidth={isActiveGrey(g.step) ? 1.75 : 0.5}
+            style={{ cursor: "pointer" }}
+            onClick={() => onPick({ type: "grey", step: g.step, midLight: g.midLight })}
+          >
+            <title>{hexToCss(g.hex)}</title>
+          </path>
+        ))}
+        {THEME_RING_PRIMARY.map((p) => (
+          <path
+            key={`primary${p.hue}`}
+            d={ringWedgePath(cx, cy, primaryR0, primaryR1, p.hueDeg - 90, hueSpan, 1.5)}
+            fill={hexToCss(p.hex)}
+            stroke={isActiveHue(p.hue) ? "var(--accent)" : "rgba(0,0,0,0.2)"}
+            strokeWidth={isActiveHue(p.hue) ? 1.75 : 0.5}
+            style={{ cursor: "pointer" }}
+            onClick={() => onPick({ type: "hue", hue: p.hue, hueDeg: p.hueDeg })}
+          >
+            <title>{hexToCss(p.hex)}</title>
+          </path>
+        ))}
+      </svg>
       <div
-        onClick={(e) => e.stopPropagation()}
         style={{
-          position: "relative", width: size, height: size,
-          transform: entered ? "scale(1) rotate(0deg)" : "scale(0.35) rotate(-35deg)",
-          opacity: entered ? 1 : 0,
-          transition: "transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.25s ease",
+          position: "absolute", left: cx - hubR, top: cy - hubR, width: hubR * 2, height: hubR * 2, borderRadius: "50%",
+          background: "var(--bg-floating)", border: "1px solid var(--border-control)",
+          display: "flex", alignItems: "center", justifyContent: "center",
         }}
       >
-        <svg width={size} height={size} style={{ overflow: "visible" }}>
-          {allChips.map((chip) => {
-            const r = chipRect(chip);
-            return (
-              <rect
-                key={`${chip.hue}-${chip.tone}`}
-                x={r.x} y={r.y} width={r.width} height={r.height} rx={2}
-                transform={r.transform}
-                fill={`#${chip.hex.toString(16).padStart(6, "0")}`}
-                stroke="rgba(0,0,0,0.15)" strokeWidth={0.75}
-                style={{ cursor: "pointer" }}
-                onClick={() => onPick(chip.hex)}
-              >
-                <title>{`#${chip.hex.toString(16).padStart(6, "0")}`}</title>
-              </rect>
-            );
-          })}
-          <circle cx={cx} cy={cy} r={innerR - 4} fill="var(--bg-floating)" stroke="var(--border-control)" strokeWidth={1} />
-        </svg>
-        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-          <span style={{ fontSize: 9, letterSpacing: "0.06em", color: "var(--text-secondary)", textTransform: "uppercase" }}>Theme</span>
-        </div>
+        <div onPointerDown={startDrag} title="Drag to move" style={{ position: "absolute", inset: 0, borderRadius: "50%", cursor: "grab", touchAction: "none" }} />
+        <span style={{ fontSize: 8, letterSpacing: "0.05em", color: "var(--text-secondary)", textTransform: "uppercase", pointerEvents: "none" }}>Theme</span>
+        <button
+          onClick={(e) => { e.stopPropagation(); onClose(); }}
+          onPointerDown={(e) => e.stopPropagation()}
+          title="Close"
+          style={{
+            position: "absolute", top: -5, right: -5, width: 16, height: 16, borderRadius: "50%", zIndex: 2,
+            border: "1px solid var(--border-control)", background: "var(--bg-panel)", color: "var(--text-primary)",
+            cursor: "pointer", fontSize: 10, lineHeight: 1, padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          &times;
+        </button>
       </div>
     </div>
   );
@@ -343,9 +450,11 @@ export default function RoomBuilder() {
   const tintActiveApiRef = useRef(() => {});
   useEffect(() => { tintActiveApiRef.current(tintActiveOn, tintActiveColor); }, [tintActiveOn, tintActiveColor]);
   const [themeWheelOpen, setThemeWheelOpen] = useState(false);
-  const [propTintColor, setPropTintColor] = useState(null); // null = each prop kind's own default color
-  const propTintApiRef = useRef(() => {});
-  useEffect(() => { propTintApiRef.current(propTintColor); }, [propTintColor]);
+  const [themeWheelPos, setThemeWheelPos] = useState({ x: 640, y: 420 });
+  // { type: "hue", hue, hueDeg } | { type: "grey", step, midLight } | null
+  const [themeAnchor, setThemeAnchor] = useState(null);
+  const themeApiRef = useRef(() => {});
+  useEffect(() => { themeApiRef.current(themeAnchor); }, [themeAnchor]);
   const [viewLayout, setViewLayout] = useState("single");
   const viewLayoutRef = useRef(viewLayout);
   useEffect(() => { viewLayoutRef.current = viewLayout; }, [viewLayout]);
@@ -778,6 +887,35 @@ export default function RoomBuilder() {
       return tex;
     }
     const concretePanelTex = makeConcretePanelTexture(256);
+    // a plain ceramic/grid-tile look: a light, faintly-grained base cut into
+    // an even grid by darker grout lines. Painted light and low-contrast
+    // (like the concrete texture) so it reads as pure shading once
+    // multiplied by whatever color the tile preset's material is tinted.
+    function makeGridTileTexture(size) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(size, size);
+      for (let i = 0; i < size * size; i++) {
+        const n = (Math.random() - 0.5) * 8;
+        const v = Math.min(255, Math.max(0, 236 + n));
+        img.data[i * 4 + 0] = v; img.data[i * 4 + 1] = v; img.data[i * 4 + 2] = v; img.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      ctx.strokeStyle = "rgba(60,58,55,0.35)";
+      const tiles = 4;
+      ctx.lineWidth = Math.max(1, size * 0.018);
+      for (let i = 1; i < tiles; i++) {
+        const p = (size / tiles) * i;
+        ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, size); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(size, p); ctx.stroke();
+      }
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(4, 4);
+      return tex;
+    }
+    const gridTileTex = makeGridTileTexture(256);
 
     let minorGrid = null;
     let majorGrid = null;
@@ -2785,47 +2923,43 @@ export default function RoomBuilder() {
     }
     wireframeApiRef.current = applyWireframe;
 
-    // grey concrete / black metal / white plastic / yellow -- flat color +
-    // roughness/metalness only (concrete keeps its own panel texture
-    // instead), so each reads as a clean, deliberate material rather than
-    // fighting the wall's default grain map. grey/white lean deliberately
-    // cool (a hint of blue) and carry a touch of metalness/lower roughness
-    // than a "pure matte" value -- the scene's key light is warm enough
-    // that a neutral or warm-leaning matte grey or white washes out to the
-    // same beige as the default wall color.
-    // floorLighten blends the wall color toward white by that fraction for
-    // the floor (concrete's floor is a lighter poured-slab shade of the
-    // same material); floorSame makes the floor match the wall outright
-    // (plastic, yellow); neither means the floor is left at its own
-    // default look entirely (black metal, and the default material).
+    // Matte vinyl / concrete / shiny metal / grid tile -- a *finish*,
+    // layered on top of whatever color is currently active (the theme
+    // wheel's pick, the older tint swatches, or the plain default) rather
+    // than each one owning a fixed color of its own. Concrete is the one
+    // exception (forceColor): real precast concrete doesn't take a paint
+    // tint, so it keeps its own grey regardless of the room's theme, same
+    // as before. floorLighten (concrete only) blends that fixed color
+    // toward white for a lighter poured-slab floor shade; every other
+    // finish just gives the floor its own theme/tint color like the wall,
+    // at the same roughness/metalness/map.
     const BUILDING_MATERIAL_PRESETS = [
-      null,
-      { color: 0x93999c, roughness: 0.88, metalness: 0.08, concrete: true, floorLighten: 0.2 },
-      { color: 0x141414, roughness: 0.28, metalness: 0.85 },
-      { color: 0xfafcff, roughness: 0.16, metalness: 0.15, floorSame: true },
-      { color: 0xffe600, roughness: 0.18, metalness: 0.08, floorSame: true },
+      null, // default finish -- the room's own grain map, whatever color is active
+      { key: "vinyl", roughness: 0.94, metalness: 0.0 },
+      { key: "concrete", forceColor: true, color: 0x93999c, roughness: 0.88, metalness: 0.08, concrete: true, floorLighten: 0.2 },
+      { key: "metal", roughness: 0.12, metalness: 0.92 },
+      { key: "tile", roughness: 0.32, metalness: 0.04, tile: true },
     ];
-    // the building-material preset and the tint-active/tint-inactive
-    // swatches (an older, separate feature) both ultimately want to set
-    // wallMat/floorMat's .color -- keeping them as three independent
+    // the building-material preset, the theme wheel, and the tint-active/
+    // tint-inactive swatches (an older, separate feature) all ultimately
+    // want to set wallMat/floorMat's .color -- keeping them as independent
     // "just overwrite .color" functions meant whichever ran last silently
-    // erased the other's result (tint's "off" branch in particular reset
-    // straight to the hardcoded default COLORS.wall/floor, losing whatever
-    // material -- concrete included -- was actually selected, without
-    // touching .map, so the texture was still assigned but tinted back
-    // toward near-white and easy to mistake for "gone"). All three now
-    // just record their own bit of state and recompute the materials from
-    // scratch together, so there's no order-dependent clobbering.
+    // erased the others' result. All of them now just record their own bit
+    // of state and recompute the materials from scratch together, so
+    // there's no order-dependent clobbering.
     let currentBuildingMaterialIndex = 0;
     let currentTintActiveOn = false, currentTintActiveColor = 0xff6b1a;
     let currentTintInactiveOn = false, currentTintInactiveColor = 0xff6b1a;
+    let currentThemeWallColor = null, currentThemeFloorColor = null;
     function recomputeWallFloorMaterials() {
       const preset = BUILDING_MATERIAL_PRESETS[currentBuildingMaterialIndex];
-      const mainColor = preset ? preset.color : COLORS.wall;
+      const forceColor = !!(preset && preset.forceColor);
+      const mainColor = forceColor ? preset.color : (currentThemeWallColor != null ? currentThemeWallColor : COLORS.wall);
       const roughness = preset ? preset.roughness : 0.85;
       const metalness = preset ? preset.metalness : 0.02;
       const useConcreteTex = !!(preset && preset.concrete);
-      const map = preset ? (useConcreteTex ? concretePanelTex : null) : wallGrainTex;
+      const useTileTex = !!(preset && preset.tile);
+      const map = preset ? (useConcreteTex ? concretePanelTex : useTileTex ? gridTileTex : null) : wallGrainTex;
       const roughnessMap = preset ? null : wallRoughTex;
 
       const wallColor = new THREE.Color(mainColor);
@@ -2855,16 +2989,18 @@ export default function RoomBuilder() {
       ceilingMat.metalness = metalness;
       ceilingMat.needsUpdate = true;
 
-      let floorBase = COLORS.floor, floorRough = 0.88, floorMetal = 0.0;
-      let floorMap = floorGrainTex, floorRoughnessMap = floorRoughTex;
-      if (preset && preset.floorLighten != null) {
+      let floorBase, floorRough, floorMetal, floorMap, floorRoughnessMap;
+      if (forceColor && preset.floorLighten != null) {
         floorBase = new THREE.Color(mainColor).lerp(new THREE.Color(0xffffff), preset.floorLighten);
         floorRough = roughness; floorMetal = metalness;
         floorMap = useConcreteTex ? concretePanelTex : null;
         floorRoughnessMap = null;
-      } else if (preset && preset.floorSame) {
-        floorBase = mainColor; floorRough = roughness; floorMetal = metalness;
-        floorMap = null; floorRoughnessMap = null;
+      } else {
+        floorBase = currentThemeFloorColor != null ? currentThemeFloorColor : COLORS.floor;
+        floorRough = preset ? roughness : 0.88;
+        floorMetal = preset ? metalness : 0.0;
+        floorMap = preset ? (useTileTex ? gridTileTex : null) : floorGrainTex;
+        floorRoughnessMap = preset ? null : floorRoughTex;
       }
       const floorColor = new THREE.Color(floorBase);
       if (currentTintActiveOn) floorColor.lerp(new THREE.Color(currentTintActiveColor), 0.92).multiplyScalar(0.94);
@@ -2939,16 +3075,39 @@ export default function RoomBuilder() {
     }
     tintActiveApiRef.current = applyTintActive;
 
-    // colors every prop kind to match a chosen theme (or, when cleared,
-    // reverts each one to its own default color) -- mutating the shared
-    // material directly, so already-placed props update immediately
-    // without needing a rebuild.
-    function applyPropTint(colorHex) {
+    // colors every prop kind to its own tone from a chosen theme (or, when
+    // cleared, reverts each one to its own default color) -- mutating the
+    // shared materials directly, so already-placed props update
+    // immediately without needing a rebuild.
+    const STAIR_DEFAULT_COLOR = 0xf2c6d6;
+    function applyPropColors(colors) {
       Object.keys(propMats).forEach((kind) => {
-        propMats[kind].color.set(colorHex != null ? colorHex : PROP_DEFAULT_COLORS[kind]);
+        propMats[kind].color.set(colors ? colors[kind] : PROP_DEFAULT_COLORS[kind]);
       });
     }
-    propTintApiRef.current = applyPropTint;
+    // the room color theme: one anchor point (a hue-wheel spoke, or a step
+    // on the grey ring) expands into a whole related palette -- see
+    // themeColorsFor -- with one derived tone handed to each of the wall,
+    // floor, stairs, and every prop kind.
+    function applyRoomTheme(anchor) {
+      if (!anchor) {
+        currentThemeWallColor = null;
+        currentThemeFloorColor = null;
+        recomputeWallFloorMaterials();
+        stairMat.color.set(STAIR_DEFAULT_COLOR);
+        applyPropColors(null);
+        return;
+      }
+      const palette = anchor.type === "grey"
+        ? themeColorsFor(0, 0, anchor.midLight)
+        : themeColorsFor(anchor.hueDeg, THEME_SAT, THEME_WALL_MIDLIGHT);
+      currentThemeWallColor = palette.wall;
+      currentThemeFloorColor = palette.floor;
+      recomputeWallFloorMaterials();
+      stairMat.color.set(palette.stairs);
+      applyPropColors(palette);
+    }
+    themeApiRef.current = applyRoomTheme;
 
     // ---------- camera orbit / fixed orthographic views ----------
     let radius = Math.max(DEFAULT_ROOM_HALF_X, DEFAULT_ROOM_HALF_Z) * 2.2;
@@ -6216,7 +6375,7 @@ export default function RoomBuilder() {
               setUltraRealistic(true);
               setTintActiveOn(false);
               setTintInactiveOn(false);
-              setPropTintColor(null);
+              setThemeAnchor(null);
               setThemeWheelOpen(false);
               setSnapEnabled(true);
               setShowMeasurements(false);
@@ -6322,27 +6481,28 @@ export default function RoomBuilder() {
           <span className="panel-title" style={{ marginRight: 4 }}>Exodex</span>
           <button
             className="rb-btn"
+            onClick={() => setThemeWheelOpen((v) => !v)}
+            title="Room color theme -- pick a hue or grey to tint the walls, floor, stairs, and props as one cohesive palette"
+            style={{
+              padding: 0, width: 22, height: 22, minWidth: 22, borderRadius: "50%", overflow: "hidden",
+              background: "conic-gradient(from 0deg, #e5484d, #f2c230, #4caf6d, #4a90d9, #9b5de5, #e5484d)",
+              boxShadow: themeWheelOpen ? "0 0 0 2px var(--accent)" : "none",
+            }}
+          />
+          <button
+            className="rb-btn"
             onClick={() => setBuildingMaterialIndex((i) => (i + 1) % 5)}
-            title="Cycle building material (default, concrete, black metal, white plastic, yellow)"
+            title="Cycle material finish (default, matte vinyl, concrete, shiny metal, grid tile) -- an overlay on the current theme color, except concrete which keeps its own grey"
             style={{
               padding: 2, width: 22, height: 22, minWidth: 22, display: "grid",
               gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr 1fr", gap: 1, overflow: "hidden",
             }}
           >
+            <span style={{ background: "#d8d5cf", borderRadius: 1 }} />
             <span style={{ background: "#93999c", borderRadius: 1 }} />
-            <span style={{ background: "#141414", borderRadius: 1 }} />
-            <span style={{ background: "#fafcff", borderRadius: 1 }} />
-            <span style={{ background: "#ffe600", borderRadius: 1 }} />
+            <span style={{ background: "linear-gradient(135deg, #eef0f2, #8a8d92)", borderRadius: 1 }} />
+            <span style={{ background: "#e9e9e4", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 1 }} />
           </button>
-          <button
-            className="rb-btn"
-            onClick={() => setThemeWheelOpen(true)}
-            title="Pick a room color theme (walls, floor, and props)"
-            style={{
-              padding: 0, width: 22, height: 22, minWidth: 22, borderRadius: "50%", overflow: "hidden",
-              background: "conic-gradient(from 0deg, #e5484d, #f2c230, #4caf6d, #4a90d9, #9b5de5, #e5484d)",
-            }}
-          />
           <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
           <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
           <button className={`rb-btn ${tool === "door" ? "active" : ""}`} onClick={() => setTool("door")}>Door</button>
@@ -6757,12 +6917,10 @@ export default function RoomBuilder() {
       </div>
       {themeWheelOpen && (
         <ThemeWheelOverlay
-          onPick={(hex) => {
-            setTintActiveColor(hex);
-            setTintActiveOn(true);
-            setPropTintColor(hex);
-            setThemeWheelOpen(false);
-          }}
+          pos={themeWheelPos}
+          onPosChange={setThemeWheelPos}
+          activeTheme={themeAnchor}
+          onPick={(anchor) => setThemeAnchor(anchor)}
           onClose={() => setThemeWheelOpen(false)}
         />
       )}
