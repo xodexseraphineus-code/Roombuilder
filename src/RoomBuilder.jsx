@@ -50,16 +50,15 @@ const TE_SWATCHES = [0xff6b1a, 0xffffff, 0x4a90d9, 0xf2c230, 0xe5484d];
 // as what a prop reverts to if a theme's color is ever cleared.
 const PROP_DEFAULT_COLORS = { sphere: 0xd6453c, cone: 0x3f9d5c, cube: 0x3a6bc9, cylinder: 0xd6453c };
 
-// Theme color wheel: an inner ring of solid primary hues, an outer ring of
-// ten greyscale steps (white to black), and hue "spokes" radiating out from
-// the primary ring, each running light-near-the-hub to dark-at-the-tip --
-// loosely modeled on a Copic-marker color wheel. Picking anywhere along a
-// hue's spoke (or its wedge on the primary ring) selects that hue as the
-// room's theme; picking a step on the grey ring selects a monochrome theme
-// anchored at that lightness. Either way, one click derives a whole set of
-// related-but-distinct tones and hands one to each of the wall, floor,
-// stairs, and every prop kind -- a cohesive palette from a single pick
-// instead of tinting each surface separately.
+// Theme color wheel: a full filled disc -- a small greyscale ring at the
+// hub (15 greys plus pure white and pure black) surrounded by a hue/tint
+// wheel (angle = one of twelve hues, radius = a tint gradient from vivid at
+// the rim to near-white near the hub), modeled directly on Teenage
+// Engineering's color-wheel tool. Tapping any cell selects that hue (or,
+// on the grey ring, that lightness) as the room's theme; themeColorsFor
+// then derives a small palette of related-but-distinct tones from that one
+// anchor and hands one to each of the wall, floor, stairs, balcony
+// platform, balcony railings, and every prop kind.
 function hslToHex(h, s, l) {
   s /= 100; l /= 100;
   const k = (n) => (n + h / 30) % 12;
@@ -69,54 +68,110 @@ function hslToHex(h, s, l) {
   return (toHex(f(0)) << 16) | (toHex(f(4)) << 8) | toHex(f(8));
 }
 function hexToCss(hex) { return `#${hex.toString(16).padStart(6, "0")}`; }
-const THEME_WHEEL_HUES = 10;
-const THEME_WHEEL_TONES = 5;
-const THEME_SAT = 58; // the fixed saturation every hue-spoke theme derives its palette at
-const THEME_WALL_MIDLIGHT = 56; // the wall's lightness anchor for a hue-spoke theme
+const THEME_SAT = 58; // the fixed saturation every hue theme derives its palette at
+const THEME_WALL_MIDLIGHT = 56; // the wall's lightness anchor for a hue theme
 function clampL(l) { return Math.max(4, Math.min(96, l)); }
 // derives the room's whole palette from one anchor point -- hueDeg/sat pick
 // the family, midLight pivots the whole palette lighter or darker (used by
-// the grey ring's ten steps to get ten distinct light-to-dark monochrome
-// themes from the same hueDeg=0/sat=0 pair). Offsets are deliberately
-// uneven (not a plain linear ramp) so mid-palette objects (walls, stairs)
-// stay closer together while floor/cube bracket the extremes.
+// the grey ring to get a distinct light-to-dark monochrome theme from
+// every step). Offsets are deliberately uneven (not a plain linear ramp)
+// so mid-palette objects (walls, stairs) stay closer together while
+// floor/cube bracket the extremes.
 function themeColorsFor(hueDeg, sat, midLight = THEME_WALL_MIDLIGHT) {
   const at = (dl) => hslToHex(hueDeg, sat, clampL(midLight + dl));
   return {
-    floor: at(30),
-    stairs: at(16),
+    floor: at(32),
+    platform: at(22),
+    stairs: at(14),
     wall: at(0),
-    sphere: at(-16),
-    cylinder: hslToHex((hueDeg + 18) % 360, Math.max(0, sat - 10), clampL(midLight - 8)),
-    cone: hslToHex((hueDeg - 18 + 360) % 360, sat, clampL(midLight - 28)),
-    cube: at(-34),
+    sphere: at(-14),
+    cylinder: hslToHex((hueDeg + 16) % 360, Math.max(0, sat - 10), clampL(midLight - 6)),
+    railing: hslToHex((hueDeg - 10 + 360) % 360, sat, clampL(midLight - 18)),
+    cone: hslToHex((hueDeg - 18 + 360) % 360, sat, clampL(midLight - 30)),
+    cube: at(-38),
   };
 }
-const THEME_WHEEL_CHIPS = (() => {
-  const chips = [];
-  for (let h = 0; h < THEME_WHEEL_HUES; h++) {
-    const hueDeg = (h / THEME_WHEEL_HUES) * 360;
-    const angleDeg = hueDeg - 90; // hue 0 points straight up
-    for (let t = 0; t < THEME_WHEEL_TONES; t++) {
-      const lightness = 82 - t * 15; // light near the hub, dark toward the tip
-      const saturation = 55 + t * 6;
-      chips.push({ hue: h, tone: t, hueDeg, angleDeg, hex: hslToHex(hueDeg, saturation, lightness) });
+const WHEEL_HUE_COUNT = 12;
+const WHEEL_TINT_RINGS = 10;
+const WHEEL_GREY_STEPS = 17; // 15 greys + pure white + pure black
+// the hue/tint disc -- twelve 30-degree hue sectors, each with ten tint
+// cells running from a vivid, near-fully-saturated color at the rim to a
+// pale near-white tint approaching the hub.
+const WHEEL_DISC_CELLS = (() => {
+  const cells = [];
+  for (let h = 0; h < WHEEL_HUE_COUNT; h++) {
+    const hueDeg = (h / WHEEL_HUE_COUNT) * 360;
+    for (let r = 0; r < WHEEL_TINT_RINGS; r++) {
+      const t = r / (WHEEL_TINT_RINGS - 1);
+      const lightness = 48 + t * 45;
+      cells.push({ hue: h, ring: r, hueDeg, hex: hslToHex(hueDeg, 92, lightness) });
     }
   }
-  return chips;
+  return cells;
 })();
-// the inner primary-hue ring -- one solid wedge per spoke, at the same
-// angle, doubling as a bigger click target for that hue's theme.
-const THEME_RING_PRIMARY = Array.from({ length: THEME_WHEEL_HUES }, (_, h) => {
-  const hueDeg = (h / THEME_WHEEL_HUES) * 360;
-  return { hue: h, hueDeg, hex: hslToHex(hueDeg, 68, 55) };
-});
-// the outer greyscale ring -- ten steps from near-white to near-black, each
-// its own selectable monochrome theme (sat=0, hueDeg irrelevant).
-const THEME_RING_GREY = Array.from({ length: 10 }, (_, i) => {
-  const midLight = clampL(92 - i * 9);
+// the small hub-side greyscale ring, black at one end, white at the other.
+const WHEEL_GREY_CELLS = Array.from({ length: WHEEL_GREY_STEPS }, (_, i) => {
+  const midLight = clampL((i / (WHEEL_GREY_STEPS - 1)) * 100);
   return { step: i, midLight, hex: hslToHex(0, 0, midLight) };
 });
+
+// Curated, hand-picked palettes representing recognizable color-scheme
+// styles (as opposed to the generic hue wheel's one-anchor-point math) --
+// each already defines every target color so they're guaranteed to work
+// together, rather than being derived. `wheel` is what repopulates the
+// disc while this preset is active (one flat color per hue sector,
+// replacing the vivid-to-pale gradient) so adjacent, related colors are
+// visible at a glance; tapping any lit cell applies the full preset.
+const CURATED_PALETTES = [
+  {
+    name: "Cool",
+    wall: 0x5b7c99, floor: 0xd7e4ec, stairs: 0x9fb8c9, platform: 0x3f6a82,
+    railing: 0x27435a, sphere: 0x4a90d9, cube: 0x1f3b52, cone: 0x6fb8b0, cylinder: 0x8aa9c9,
+    wheel: [0xd7e4ec, 0x9fb8c9, 0x6fb8b0, 0x5b7c99, 0x4a90d9, 0x3f6a82, 0x27435a, 0x1f3b52, 0x2c5b6b, 0x8aa9c9, 0xaecbd6, 0x7ea0b8],
+  },
+  {
+    name: "Warm",
+    wall: 0xc9764a, floor: 0xf2ddc4, stairs: 0xe0a877, platform: 0xa8532f,
+    railing: 0x6b3420, sphere: 0xe0562e, cube: 0x7a2e18, cone: 0xf2b74a, cylinder: 0xd88f5c,
+    wheel: [0xf2ddc4, 0xe0a877, 0xf2b74a, 0xc9764a, 0xe0562e, 0xa8532f, 0x6b3420, 0x7a2e18, 0x954020, 0xd88f5c, 0xe8c49a, 0xcc8a5a],
+  },
+  {
+    name: "Korean",
+    wall: 0xd9a9a0, floor: 0xf5e6dc, stairs: 0xe6c3bb, platform: 0xb8827c,
+    railing: 0x7a5a56, sphere: 0xc79a8f, cube: 0x8fa593, cone: 0xe0c9a6, cylinder: 0xcbb2a8,
+    wheel: [0xf5e6dc, 0xe6c3bb, 0xd9a9a0, 0xcbb2a8, 0xc79a8f, 0xb8827c, 0x8fa593, 0x7a5a56, 0xe0c9a6, 0xd6bfae, 0xa88a80, 0xefd9cd],
+  },
+  {
+    name: "Earth",
+    wall: 0x8a6f4e, floor: 0xd9c8a8, stairs: 0xb39d76, platform: 0x6b5636,
+    railing: 0x3f3322, sphere: 0x9c7b45, cube: 0x556b3a, cone: 0xc4914f, cylinder: 0x7a8a5c,
+    wheel: [0xd9c8a8, 0xb39d76, 0xc4914f, 0x8a6f4e, 0x9c7b45, 0x6b5636, 0x3f3322, 0x556b3a, 0x7a8a5c, 0xa68a5f, 0x4d4530, 0xbfa878],
+  },
+  {
+    name: "Pastel",
+    wall: 0xb8c9e0, floor: 0xfaf1e4, stairs: 0xf2c9d4, platform: 0xc9e0c4,
+    railing: 0x9ba8c9, sphere: 0xe8d4ec, cube: 0xf5e0a8, cone: 0xc4e0dc, cylinder: 0xf2c9d4,
+    wheel: [0xfaf1e4, 0xf2c9d4, 0xe8d4ec, 0xb8c9e0, 0xc4e0dc, 0xc9e0c4, 0xf5e0a8, 0x9ba8c9, 0xe0c4d0, 0xd4e0f2, 0xf5d9c4, 0xd0e8d8],
+  },
+  {
+    name: "Jewel",
+    wall: 0x2e6b5e, floor: 0xc9b8e0, stairs: 0x4a8577, platform: 0x1f4a40,
+    railing: 0x121f1c, sphere: 0x8b2942, cube: 0x1a3a6b, cone: 0x6b1a8b, cylinder: 0x9c2f4a,
+    wheel: [0x2e6b5e, 0x4a8577, 0x1f4a40, 0x8b2942, 0x9c2f4a, 0x1a3a6b, 0x6b1a8b, 0x121f1c, 0x2e4a8b, 0x7a1f5e, 0xc9b8e0, 0x0f5c4a],
+  },
+  {
+    name: "Scandinavian",
+    wall: 0xece6dc, floor: 0xc9b599, stairs: 0xdcd3c4, platform: 0xa88f6e,
+    railing: 0x2a2a28, sphere: 0x8a9baa, cube: 0x1c1c1a, cone: 0xd9d0c0, cylinder: 0xb8a488,
+    wheel: [0xece6dc, 0xdcd3c4, 0xc9b599, 0xa88f6e, 0x8a9baa, 0x6b7a88, 0x2a2a28, 0x1c1c1a, 0xd9d0c0, 0xb8a488, 0xf5f0e8, 0x9c8f7a],
+  },
+  {
+    name: "Monochrome",
+    wall: 0x8a8a8a, floor: 0xe4e4e4, stairs: 0xb8b8b8, platform: 0x5a5a5a,
+    railing: 0x2a2a2a, sphere: 0x707070, cube: 0x1a1a1a, cone: 0xc4c4c4, cylinder: 0x9c9c9c,
+    wheel: [0xf5f5f5, 0xe4e4e4, 0xc4c4c4, 0xb8b8b8, 0x9c9c9c, 0x8a8a8a, 0x707070, 0x5a5a5a, 0x4a4a4a, 0x2a2a2a, 0x1a1a1a, 0x0a0a0a],
+  },
+];
 
 // a short synthesized click (Web Audio, no audio file to fetch) for wall/
 // partition contact feedback -- one shared AudioContext, created lazily on
@@ -176,119 +231,190 @@ function ringWedgePath(cx, cy, r0, r1, angleDeg, span, gapDeg) {
   return `M ${p0.x} ${p0.y} L ${p1.x} ${p1.y} A ${r1} ${r1} 0 ${large} 1 ${p2.x} ${p2.y} L ${p3.x} ${p3.y} A ${r0} ${r0} 0 ${large} 0 ${p0.x} ${p0.y} Z`;
 }
 
-// The color-theme wheel: a persistent, draggable floating widget (not a
-// modal -- no backdrop, so the 3D view stays interactive while it's open).
-// From the hub out: a ring of solid primary hues, a ring of ten greyscale
-// steps, then each hue's own spoke of light-to-dark tones -- loosely
-// modeled on a Copic-marker color wheel. Deliberately simple compared to
-// the real thing (a fixed, fully-visible set of tones rather than dozens
-// of scrollable marker codes), since the goal is a quick, cohesive room
-// palette, not a full swatch library. Dragging the hub repositions the
-// whole wheel; the small close button dismisses it.
-function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme }) {
+function angleDiffDeg(a, b) {
+  let d = a - b;
+  while (d > 180) d -= 360;
+  while (d < -180) d += 360;
+  return d;
+}
+
+// The color-theme wheel: a persistent, draggable, spinnable floating disc
+// (not a modal -- no backdrop, so the 3D view stays interactive while it's
+// open), modeled on Teenage Engineering's color-wheel tool: a small
+// greyscale ring at the hub, surrounded by a full hue/tint disc (angle =
+// hue, radius = a vivid-at-the-rim-to-pale-near-the-hub tint gradient).
+// Three distinct gestures: drag the hub to reposition the whole widget;
+// tap the hub (no real movement) to cycle through curated named palettes,
+// which repopulate the disc with that palette's own colors; drag anywhere
+// on the colorful disc itself to spin it, with a bit of momentum once
+// released, like a real dial.
+function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, presetIndex, onCyclePreset }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     const id = requestAnimationFrame(() => setEntered(true));
     return () => cancelAnimationFrame(id);
   }, []);
-  const dragRef = useRef(null);
-  function startDrag(e) {
+
+  // --- hub: drag to move, tap (little/no movement) to cycle presets ---
+  function startHubGesture(e) {
     e.preventDefault();
+    e.stopPropagation();
     const startX = e.clientX, startY = e.clientY, startPos = pos;
-    dragRef.current = true;
+    let moved = 0;
     function onMove(ev) {
-      if (!dragRef.current) return;
-      onPosChange({ x: startPos.x + (ev.clientX - startX), y: startPos.y + (ev.clientY - startY) });
+      const dx = ev.clientX - startX, dy = ev.clientY - startY;
+      moved = Math.max(moved, Math.hypot(dx, dy));
+      onPosChange({ x: startPos.x + dx, y: startPos.y + dy });
     }
     function onUp() {
-      dragRef.current = false;
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      if (moved < 6) onCyclePreset();
     }
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   }
 
-  const size = 320;
-  const cx = size / 2, cy = size / 2;
-  const hubR = 27;
-  const primaryR0 = 30, primaryR1 = 44;
-  const greyR0 = 46, greyR1 = 60;
-  const spokeInnerR = 64, chipLen = 22, chipGap = 2, chipW = 18;
-  const hueSpan = 360 / THEME_WHEEL_HUES;
-  const greySpan = 360 / THEME_RING_GREY.length;
-
-  function chipTransform(chip) {
-    const r0 = spokeInnerR + chip.tone * (chipLen + chipGap);
-    return { x: -chipW / 2, y: -(r0 + chipLen), width: chipW, height: chipLen, transform: `rotate(${chip.angleDeg} ${cx} ${cy}) translate(${cx} ${cy})` };
+  // --- disc: drag to spin, with momentum on release ---
+  const svgRef = useRef(null);
+  const rotRef = useRef(0);
+  const [rotation, setRotation] = useState(0);
+  const rafRef = useRef(null);
+  const gestureMovedRef = useRef(0); // total |degrees| rotated this gesture -- suppresses an accidental pick on release
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+  function angleFromCenter(clientX, clientY) {
+    const rect = svgRef.current.getBoundingClientRect();
+    return Math.atan2(clientY - (rect.top + rect.height / 2), clientX - (rect.left + rect.width / 2)) * 180 / Math.PI;
   }
-  const isActiveHue = (h) => activeTheme && activeTheme.type === "hue" && activeTheme.hue === h;
-  const isActiveGrey = (s) => activeTheme && activeTheme.type === "grey" && activeTheme.step === s;
+  function startSpin(e) {
+    e.preventDefault();
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    gestureMovedRef.current = 0;
+    let lastAngle = angleFromCenter(e.clientX, e.clientY);
+    let lastTime = performance.now();
+    let velocity = 0;
+    function onMove(ev) {
+      const now = performance.now();
+      const angle = angleFromCenter(ev.clientX, ev.clientY);
+      const d = angleDiffDeg(angle, lastAngle);
+      velocity = d / Math.max(1, now - lastTime);
+      rotRef.current += d;
+      gestureMovedRef.current += Math.abs(d);
+      setRotation(rotRef.current);
+      lastAngle = angle;
+      lastTime = now;
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      function spin() {
+        velocity *= 0.94;
+        rotRef.current += velocity * 16;
+        setRotation(rotRef.current);
+        if (Math.abs(velocity) > 0.006) rafRef.current = requestAnimationFrame(spin);
+        else rafRef.current = null;
+      }
+      if (Math.abs(velocity) > 0.015) rafRef.current = requestAnimationFrame(spin);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+  function pick(payload) {
+    if (gestureMovedRef.current > 3) return; // a spin gesture ending on a cell isn't a pick
+    onPick(payload);
+  }
+
+  const size = 340;
+  const cx = size / 2, cy = size / 2;
+  const hubR = 24;
+  const greyR0 = 24, greyR1 = 42;
+  const discR0 = 42, discR1 = 165;
+  const hueSpan = 360 / WHEEL_HUE_COUNT;
+  const greySpan = 360 / WHEEL_GREY_STEPS;
+  const ringDepth = (discR1 - discR0) / WHEEL_TINT_RINGS;
+
+  const preset = presetIndex > 0 ? CURATED_PALETTES[presetIndex - 1] : null;
+  const isActiveCell = (hueDeg, ring) => activeTheme && activeTheme.type === "hue" && activeTheme.hueDeg === hueDeg && activeTheme.ring === ring;
+  const isActiveGrey = (step) => activeTheme && activeTheme.type === "grey" && activeTheme.step === step;
+  const isActivePreset = () => activeTheme && activeTheme.type === "preset" && activeTheme.name === (preset && preset.name);
 
   return (
     <div
       style={{
         position: "absolute", left: pos.x, top: pos.y, zIndex: 200, width: size, height: size,
-        transform: `translate(-50%, -50%) scale(${entered ? 1 : 0.35}) rotate(${entered ? 0 : -35}deg)`,
+        transform: `translate(-50%, -50%) scale(${entered ? 1 : 0.35})`,
         opacity: entered ? 1 : 0,
         transition: "transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.25s ease",
         filter: "drop-shadow(0 8px 24px rgba(0,0,0,0.35))",
+        userSelect: "none", WebkitUserSelect: "none",
       }}
     >
-      <svg width={size} height={size} style={{ overflow: "visible", position: "absolute", inset: 0 }}>
-        {THEME_WHEEL_CHIPS.map((chip) => {
-          const r = chipTransform(chip);
-          return (
-            <rect
-              key={`h${chip.hue}-t${chip.tone}`}
-              x={r.x} y={r.y} width={r.width} height={r.height} rx={2}
-              transform={r.transform}
-              fill={hexToCss(chip.hex)}
-              stroke={isActiveHue(chip.hue) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
-              strokeWidth={isActiveHue(chip.hue) ? 1.75 : 0.75}
+      <svg
+        ref={svgRef} width={size} height={size}
+        style={{ overflow: "visible", position: "absolute", inset: 0, touchAction: "none" }}
+        onPointerDown={startSpin}
+        onMouseDown={(e) => e.preventDefault()}
+      >
+        <circle cx={cx} cy={cy} r={discR1} fill="transparent" style={{ cursor: "grab" }} />
+        <g transform={`rotate(${rotation} ${cx} ${cy})`} style={{ cursor: "grab", touchAction: "none" }}>
+          {preset
+            ? Array.from({ length: WHEEL_HUE_COUNT }, (_, h) => {
+                const hueDeg = (h / WHEEL_HUE_COUNT) * 360;
+                const hex = preset.wheel[h % preset.wheel.length];
+                return (
+                  <path
+                    key={`preset${h}`}
+                    d={ringWedgePath(cx, cy, discR0, discR1, hueDeg - 90, hueSpan, 2)}
+                    fill={hexToCss(hex)}
+                    stroke={isActivePreset() ? "var(--accent)" : "rgba(0,0,0,0.15)"}
+                    strokeWidth={isActivePreset() ? 1.5 : 0.75}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => pick({ type: "preset", name: preset.name })}
+                  >
+                    <title>{`${preset.name} theme`}</title>
+                  </path>
+                );
+              })
+            : WHEEL_DISC_CELLS.map((cell) => (
+                <path
+                  key={`h${cell.hue}-r${cell.ring}`}
+                  d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth, discR0 + (cell.ring + 1) * ringDepth, cell.hueDeg - 90, hueSpan, 1.5)}
+                  fill={hexToCss(cell.hex)}
+                  stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "rgba(0,0,0,0.08)"}
+                  strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 0.4}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => pick({ type: "hue", hueDeg: cell.hueDeg, ring: cell.ring })}
+                >
+                  <title>{hexToCss(cell.hex)}</title>
+                </path>
+              ))}
+          {WHEEL_GREY_CELLS.map((g) => (
+            <path
+              key={`grey${g.step}`}
+              d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 1)}
+              fill={hexToCss(g.hex)}
+              stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
+              strokeWidth={isActiveGrey(g.step) ? 1.5 : 0.35}
               style={{ cursor: "pointer" }}
-              onClick={() => onPick({ type: "hue", hue: chip.hue, hueDeg: chip.hueDeg })}
+              onClick={() => pick({ type: "grey", step: g.step, midLight: g.midLight })}
             >
-              <title>{hexToCss(chip.hex)}</title>
-            </rect>
-          );
-        })}
-        {THEME_RING_GREY.map((g) => (
-          <path
-            key={`grey${g.step}`}
-            d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 1.5)}
-            fill={hexToCss(g.hex)}
-            stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.2)"}
-            strokeWidth={isActiveGrey(g.step) ? 1.75 : 0.5}
-            style={{ cursor: "pointer" }}
-            onClick={() => onPick({ type: "grey", step: g.step, midLight: g.midLight })}
-          >
-            <title>{hexToCss(g.hex)}</title>
-          </path>
-        ))}
-        {THEME_RING_PRIMARY.map((p) => (
-          <path
-            key={`primary${p.hue}`}
-            d={ringWedgePath(cx, cy, primaryR0, primaryR1, p.hueDeg - 90, hueSpan, 1.5)}
-            fill={hexToCss(p.hex)}
-            stroke={isActiveHue(p.hue) ? "var(--accent)" : "rgba(0,0,0,0.2)"}
-            strokeWidth={isActiveHue(p.hue) ? 1.75 : 0.5}
-            style={{ cursor: "pointer" }}
-            onClick={() => onPick({ type: "hue", hue: p.hue, hueDeg: p.hueDeg })}
-          >
-            <title>{hexToCss(p.hex)}</title>
-          </path>
-        ))}
+              <title>{hexToCss(g.hex)}</title>
+            </path>
+          ))}
+        </g>
       </svg>
       <div
+        onPointerDown={startHubGesture}
+        title="Drag to move, tap to cycle color-scheme presets"
         style={{
           position: "absolute", left: cx - hubR, top: cy - hubR, width: hubR * 2, height: hubR * 2, borderRadius: "50%",
           background: "var(--bg-floating)", border: "1px solid var(--border-control)",
-          display: "flex", alignItems: "center", justifyContent: "center",
+          display: "flex", alignItems: "center", justifyContent: "center", cursor: "grab", touchAction: "none",
         }}
       >
-        <div onPointerDown={startDrag} title="Drag to move" style={{ position: "absolute", inset: 0, borderRadius: "50%", cursor: "grab", touchAction: "none" }} />
-        <span style={{ fontSize: 8, letterSpacing: "0.05em", color: "var(--text-secondary)", textTransform: "uppercase", pointerEvents: "none" }}>Theme</span>
+        <span style={{ fontSize: preset ? 7.5 : 8, letterSpacing: "0.04em", color: "var(--text-secondary)", textTransform: "uppercase", pointerEvents: "none", textAlign: "center", padding: "0 3px" }}>
+          {preset ? preset.name : "Theme"}
+        </span>
         <button
           onClick={(e) => { e.stopPropagation(); onClose(); }}
           onPointerDown={(e) => e.stopPropagation()}
@@ -451,10 +577,12 @@ export default function RoomBuilder() {
   useEffect(() => { tintActiveApiRef.current(tintActiveOn, tintActiveColor); }, [tintActiveOn, tintActiveColor]);
   const [themeWheelOpen, setThemeWheelOpen] = useState(false);
   const [themeWheelPos, setThemeWheelPos] = useState({ x: 640, y: 420 });
-  // { type: "hue", hue, hueDeg } | { type: "grey", step, midLight } | null
+  // { type: "hue", hueDeg, ring } | { type: "grey", step, midLight } | { type: "preset", name } | null
   const [themeAnchor, setThemeAnchor] = useState(null);
   const themeApiRef = useRef(() => {});
   useEffect(() => { themeApiRef.current(themeAnchor); }, [themeAnchor]);
+  // 0 = the generic hue/tint disc; 1..N indexes into CURATED_PALETTES
+  const [themePresetIndex, setThemePresetIndex] = useState(0);
   const [viewLayout, setViewLayout] = useState("single");
   const viewLayoutRef = useRef(viewLayout);
   useEffect(() => { viewLayoutRef.current = viewLayout; }, [viewLayout]);
@@ -1346,6 +1474,10 @@ export default function RoomBuilder() {
     // doesn't also darken every actual wall.
     const pillarMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.7), roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
     const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.7).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02, envMapIntensity: 0.35 });
+    // the balcony platform gets its own material too -- a room theme colors
+    // it independently from the room's own floor, rather than the platform
+    // just always matching whatever the floor happens to be.
+    const balconyPlatformMat = new THREE.MeshStandardMaterial({ color: COLORS.floor, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
     // decorative room ceiling -- 10% transparent (90% opaque) so it doesn't
     // block editing visibility from above; never added to pickList.
     const ceilingMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.9, envMapIntensity: 0.35 });
@@ -2582,7 +2714,7 @@ export default function RoomBuilder() {
         const wholeSelected = isSelected && part == null;
         const pillarsSelected = isSelected && part === "pillars";
         const ceilingSelected = isSelected && part === "ceiling";
-        const floorLikeMat = wholeSelected ? floorMatSelected : currentFloorMat;
+        const floorLikeMat = wholeSelected ? floorMatSelected : balconyPlatformMat;
         const stepMat = wholeSelected ? wallMatSelected : currentWallMat;
         const pillarMatActive = (wholeSelected || pillarsSelected) ? pillarMatSelected : pillarMat;
         const ceilingMat = (wholeSelected || ceilingSelected) ? wallMatSelected : currentWallMat;
@@ -3085,26 +3217,37 @@ export default function RoomBuilder() {
         propMats[kind].color.set(colors ? colors[kind] : PROP_DEFAULT_COLORS[kind]);
       });
     }
-    // the room color theme: one anchor point (a hue-wheel spoke, or a step
-    // on the grey ring) expands into a whole related palette -- see
-    // themeColorsFor -- with one derived tone handed to each of the wall,
-    // floor, stairs, and every prop kind.
+    const PILLAR_DEFAULT_COLOR = new THREE.Color(COLORS.wall).multiplyScalar(0.7).getHex();
+    // the room color theme: either one anchor point (a hue-wheel cell, or a
+    // step on the grey ring) expanding into a related palette via
+    // themeColorsFor, or a curated named preset supplying every color
+    // outright -- either way, one distinct tone reaches each of the wall,
+    // floor, stairs, balcony platform, balcony railings, and every prop kind.
     function applyRoomTheme(anchor) {
       if (!anchor) {
         currentThemeWallColor = null;
         currentThemeFloorColor = null;
         recomputeWallFloorMaterials();
         stairMat.color.set(STAIR_DEFAULT_COLOR);
+        balconyPlatformMat.color.set(COLORS.floor);
+        pillarMat.color.set(PILLAR_DEFAULT_COLOR);
         applyPropColors(null);
         return;
       }
-      const palette = anchor.type === "grey"
-        ? themeColorsFor(0, 0, anchor.midLight)
-        : themeColorsFor(anchor.hueDeg, THEME_SAT, THEME_WALL_MIDLIGHT);
+      let palette;
+      if (anchor.type === "preset") {
+        palette = CURATED_PALETTES.find((p) => p.name === anchor.name) || CURATED_PALETTES[0];
+      } else if (anchor.type === "grey") {
+        palette = themeColorsFor(0, 0, anchor.midLight);
+      } else {
+        palette = themeColorsFor(anchor.hueDeg, THEME_SAT, THEME_WALL_MIDLIGHT);
+      }
       currentThemeWallColor = palette.wall;
       currentThemeFloorColor = palette.floor;
       recomputeWallFloorMaterials();
       stairMat.color.set(palette.stairs);
+      balconyPlatformMat.color.set(palette.platform);
+      pillarMat.color.set(palette.railing);
       applyPropColors(palette);
     }
     themeApiRef.current = applyRoomTheme;
@@ -5856,6 +5999,7 @@ export default function RoomBuilder() {
   return (
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
         * { box-sizing: border-box; }
         [data-theme="dark"] {
           --bg-window: #1e1e1e;
@@ -5873,18 +6017,21 @@ export default function RoomBuilder() {
           --scrollbar-track: rgba(255, 255, 255, 0.05);
         }
         [data-theme="light"] {
-          --bg-window: #ececec;
-          --bg-panel: #f5f5f7;
-          --bg-panel-translucent: rgba(245, 245, 247, 0.82);
+          /* a warm, slightly desaturated off-white -- the Teenage
+             Engineering color-wheel tool's own background tone -- rather
+             than a cooler, more neutral system grey. */
+          --bg-window: #eae9e4;
+          --bg-panel: #f4f3ee;
+          --bg-panel-translucent: rgba(244, 243, 238, 0.85);
           --bg-control: #ffffff;
-          --bg-control-hover: #e5e5ea;
-          --bg-control-pressed: #d1d1d6;
-          --bg-floating: rgba(255, 255, 255, 0.82);
-          --border-separator: rgba(60, 60, 67, 0.29);
-          --border-control: rgba(0, 0, 0, 0.1);
-          --text-primary: rgba(0, 0, 0, 0.92);
-          --text-secondary: rgba(60, 60, 67, 0.6);
-          --text-tertiary: rgba(60, 60, 67, 0.3);
+          --bg-control-hover: #e7e5de;
+          --bg-control-pressed: #d6d3ca;
+          --bg-floating: rgba(255, 255, 255, 0.85);
+          --border-separator: rgba(40, 38, 30, 0.16);
+          --border-control: rgba(20, 18, 12, 0.14);
+          --text-primary: rgba(20, 18, 12, 0.92);
+          --text-secondary: rgba(50, 46, 38, 0.6);
+          --text-tertiary: rgba(50, 46, 38, 0.32);
           --scrollbar-track: rgba(0, 0, 0, 0.04);
         }
         [data-theme] {
@@ -5895,14 +6042,21 @@ export default function RoomBuilder() {
              fight the rest of the app's visual language. */
           --accent: #FF6B1A;
           --accent-contrast: #141414;
-          --font-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+          /* a technical monospace, matching the Teenage Engineering
+             color-wheel reference's look -- applied to the whole interface
+             in both themes (the dark theme keeps its own dark colors,
+             just set in this same typeface). */
+          --font-system: "Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
         }
         .rb-btn {
           font-family: var(--font-system);
-          font-size: 12.5px;
-          font-weight: 500;
-          letter-spacing: 0;
-          padding: 6px 11px;
+          /* a touch smaller/tighter than before -- the monospace typeface
+             runs wider per character than the old system sans-serif, so
+             this claws back some of the ribbon's horizontal density. */
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: -0.02em;
+          padding: 6px 9px;
           border-radius: 6px;
           border: 0.5px solid var(--border-control);
           background: var(--bg-control);
@@ -6376,6 +6530,7 @@ export default function RoomBuilder() {
               setTintActiveOn(false);
               setTintInactiveOn(false);
               setThemeAnchor(null);
+              setThemePresetIndex(0);
               setThemeWheelOpen(false);
               setSnapEnabled(true);
               setShowMeasurements(false);
@@ -6920,6 +7075,8 @@ export default function RoomBuilder() {
           pos={themeWheelPos}
           onPosChange={setThemeWheelPos}
           activeTheme={themeAnchor}
+          presetIndex={themePresetIndex}
+          onCyclePreset={() => setThemePresetIndex((i) => (i + 1) % (CURATED_PALETTES.length + 1))}
           onPick={(anchor) => setThemeAnchor(anchor)}
           onClose={() => setThemeWheelOpen(false)}
         />
