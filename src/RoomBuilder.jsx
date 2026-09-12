@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Circle, Square, Triangle, Cylinder } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -50,15 +50,22 @@ const TE_SWATCHES = [0xff6b1a, 0xffffff, 0x4a90d9, 0xf2c230, 0xe5484d];
 // as what a prop reverts to if a theme's color is ever cleared.
 const PROP_DEFAULT_COLORS = { sphere: 0xd6453c, cone: 0x3f9d5c, cube: 0x3a6bc9, cylinder: 0xd6453c };
 
+// display names for the six building-material finishes -- kept in this
+// same order as the Three.js closure's own BUILDING_MATERIAL_PRESETS array
+// so the ribbon button (rendered outside that closure) can label/cycle them.
+const BUILDING_MATERIAL_NAMES = ["Matte", "Concrete", "Metal", "Plastic", "Vinyl", "Wood"];
+
 // Theme color wheel: a full filled disc -- a small greyscale ring at the
-// hub (15 greys plus pure white and pure black) surrounded by a hue/tint
-// wheel (angle = one of twelve hues, radius = a tint gradient from vivid at
-// the rim to near-white near the hub), modeled directly on Teenage
-// Engineering's color-wheel tool. Tapping any cell selects that hue (or,
-// on the grey ring, that lightness) as the room's theme; themeColorsFor
-// then derives a small palette of related-but-distinct tones from that one
-// anchor and hands one to each of the wall, floor, stairs, balcony
-// platform, balcony railings, and every prop kind.
+// hub (15 greys plus pure white and pure black) surrounded by a hue wheel
+// (angle = one of twelve hues, radius = four tones running from a vivid,
+// near-fully-saturated color at the rim to a pale near-white tint close to
+// the hub), modeled directly on Teenage Engineering's color-wheel tool.
+// Tapping any cell selects that hue (or, on the grey ring, that lightness)
+// as the room's theme; themeColorsFor then derives a small palette of
+// related tones from that one anchor -- lightest to the floor, a midtone
+// to the walls, a complementary hue for the balcony roof, and the rest
+// (with a little randomness for variety) spread across the remaining
+// props and elements.
 function hslToHex(h, s, l) {
   s /= 100; l /= 100;
   const k = (n) => (n + h / 30) % 12;
@@ -68,33 +75,63 @@ function hslToHex(h, s, l) {
   return (toHex(f(0)) << 16) | (toHex(f(4)) << 8) | toHex(f(8));
 }
 function hexToCss(hex) { return `#${hex.toString(16).padStart(6, "0")}`; }
-const THEME_SAT = 58; // the fixed saturation every hue theme derives its palette at
+function hexToHsl(hex) {
+  const r = ((hex >> 16) & 255) / 255, g = ((hex >> 8) & 255) / 255, b = (hex & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  const d = max - min;
+  if (d > 0.0001) {
+    s = d / (1 - Math.abs(2 * l - 1));
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s: s * 100, l: l * 100 };
+}
+// shifts a hex color's hue/saturation/lightness by the wheel's global
+// adjustment sliders -- used both for the generic disc's colors and for a
+// curated preset's, so the sliders affect whatever is currently shown.
+function adjustHex(hex, hueShift, satMul, lightMul) {
+  const { h, s, l } = hexToHsl(hex);
+  return hslToHex((h + hueShift + 360) % 360, Math.max(0, Math.min(100, s * satMul)), Math.max(2, Math.min(98, l * lightMul)));
+}
+const THEME_SAT = 62; // the fixed saturation every hue theme derives its palette at
 const THEME_WALL_MIDLIGHT = 56; // the wall's lightness anchor for a hue theme
 function clampL(l) { return Math.max(4, Math.min(96, l)); }
+function clampS(s) { return Math.max(0, Math.min(100, s)); }
 // derives the room's whole palette from one anchor point -- hueDeg/sat pick
 // the family, midLight pivots the whole palette lighter or darker (used by
 // the grey ring to get a distinct light-to-dark monochrome theme from
-// every step). Offsets are deliberately uneven (not a plain linear ramp)
-// so mid-palette objects (walls, stairs) stay closer together while
-// floor/cube bracket the extremes.
+// every step). Each category gets a small random jitter on top of its
+// base offset -- so re-picking the same spot still gives a slightly
+// different, still-cohesive palette -- and the balcony roof is anchored to
+// the complementary hue (opposite the rest of the room) rather than a
+// tint of the same one.
 function themeColorsFor(hueDeg, sat, midLight = THEME_WALL_MIDLIGHT) {
-  const at = (dl) => hslToHex(hueDeg, sat, clampL(midLight + dl));
+  const jitter = (range) => (Math.random() - 0.5) * range;
+  const tone = (dl, dh = 0, ds = 0) => hslToHex((hueDeg + dh + 360) % 360, clampS(sat + ds), clampL(midLight + dl));
   return {
-    floor: at(32),
-    platform: at(22),
-    stairs: at(14),
-    wall: at(0),
-    sphere: at(-14),
-    cylinder: hslToHex((hueDeg + 16) % 360, Math.max(0, sat - 10), clampL(midLight - 6)),
-    railing: hslToHex((hueDeg - 10 + 360) % 360, sat, clampL(midLight - 18)),
-    cone: hslToHex((hueDeg - 18 + 360) % 360, sat, clampL(midLight - 30)),
-    cube: at(-38),
+    floor: tone(32 + jitter(6), jitter(6), jitter(8)),
+    platform: tone(20 + jitter(6), jitter(10), jitter(8)),
+    stairs: tone(14 + jitter(6), jitter(8), jitter(8)),
+    wall: tone(0 + jitter(3), 0, jitter(4)),
+    sphere: tone(-12 + jitter(8), 14 + jitter(10), jitter(10)),
+    cylinder: tone(-6 + jitter(8), 24 + jitter(12), jitter(10)),
+    railing: tone(-20 + jitter(6), -16 + jitter(10), jitter(8)),
+    cone: tone(-30 + jitter(8), -24 + jitter(12), jitter(10)),
+    cube: tone(-38 + jitter(6), jitter(10), jitter(8)),
+    // the complementary hue -- opposite side of the wheel -- so the roof
+    // reads as a deliberate accent rather than another shade of the room.
+    roof: hslToHex((hueDeg + 180 + jitter(20) + 360) % 360, clampS(sat + jitter(15)), clampL(midLight + 4 + jitter(20))),
   };
 }
 const WHEEL_HUE_COUNT = 12;
-const WHEEL_TINT_RINGS = 10;
+const WHEEL_TINT_RINGS = 4; // four tones per hue -- vivid at the rim, pale near the hub
 const WHEEL_GREY_STEPS = 17; // 15 greys + pure white + pure black
-// the hue/tint disc -- twelve 30-degree hue sectors, each with ten tint
+// the hue/tint disc -- twelve 30-degree hue sectors, each with four tone
 // cells running from a vivid, near-fully-saturated color at the rim to a
 // pale near-white tint approaching the hub.
 const WHEEL_DISC_CELLS = (() => {
@@ -103,8 +140,8 @@ const WHEEL_DISC_CELLS = (() => {
     const hueDeg = (h / WHEEL_HUE_COUNT) * 360;
     for (let r = 0; r < WHEEL_TINT_RINGS; r++) {
       const t = r / (WHEEL_TINT_RINGS - 1);
-      const lightness = 48 + t * 45;
-      cells.push({ hue: h, ring: r, hueDeg, hex: hslToHex(hueDeg, 92, lightness) });
+      const lightness = 90 - t * 42; // pale near the hub (r=0) -> vivid at the rim (r=max)
+      cells.push({ hue: h, ring: r, hueDeg, hex: hslToHex(hueDeg, 88, lightness) });
     }
   }
   return cells;
@@ -119,57 +156,81 @@ const WHEEL_GREY_CELLS = Array.from({ length: WHEEL_GREY_STEPS }, (_, i) => {
 // styles (as opposed to the generic hue wheel's one-anchor-point math) --
 // each already defines every target color so they're guaranteed to work
 // together, rather than being derived. `wheel` is what repopulates the
-// disc while this preset is active (one flat color per hue sector,
-// replacing the vivid-to-pale gradient) so adjacent, related colors are
-// visible at a glance; tapping any lit cell applies the full preset.
+// disc while this preset is active: four flat quarter-wedges (not the
+// usual twelve sectors) so the palette reads as a small, deliberate set
+// rather than a full spectrum; tapping any lit wedge applies the preset.
 const CURATED_PALETTES = [
   {
-    name: "Cool",
-    wall: 0x5b7c99, floor: 0xd7e4ec, stairs: 0x9fb8c9, platform: 0x3f6a82,
-    railing: 0x27435a, sphere: 0x4a90d9, cube: 0x1f3b52, cone: 0x6fb8b0, cylinder: 0x8aa9c9,
-    wheel: [0xd7e4ec, 0x9fb8c9, 0x6fb8b0, 0x5b7c99, 0x4a90d9, 0x3f6a82, 0x27435a, 0x1f3b52, 0x2c5b6b, 0x8aa9c9, 0xaecbd6, 0x7ea0b8],
+    name: "Mono",
+    wall: 0x8a8a8a, floor: 0xe8e8e8, stairs: 0xb8b8b8, platform: 0x5a5a5a,
+    railing: 0x2a2a2a, roof: 0x1a1a1a, sphere: 0x707070, cube: 0x1a1a1a, cone: 0xc4c4c4, cylinder: 0x9c9c9c,
+    wheel: [0xf0f0f0, 0xb0b0b0, 0x707070, 0x2a2a2a],
   },
   {
-    name: "Warm",
-    wall: 0xc9764a, floor: 0xf2ddc4, stairs: 0xe0a877, platform: 0xa8532f,
-    railing: 0x6b3420, sphere: 0xe0562e, cube: 0x7a2e18, cone: 0xf2b74a, cylinder: 0xd88f5c,
-    wheel: [0xf2ddc4, 0xe0a877, 0xf2b74a, 0xc9764a, 0xe0562e, 0xa8532f, 0x6b3420, 0x7a2e18, 0x954020, 0xd88f5c, 0xe8c49a, 0xcc8a5a],
+    name: "Ocean",
+    wall: 0x3a6b8a, floor: 0xd4e8ec, stairs: 0x8ab8cc, platform: 0x24506b,
+    railing: 0x14304a, roof: 0xe8955c, sphere: 0x4a9bb8, cube: 0x0f2438, cone: 0x6fc9d4, cylinder: 0x1a4a5e,
+    wheel: [0xd4e8ec, 0x6fc9d4, 0x3a6b8a, 0x14304a],
   },
   {
-    name: "Korean",
-    wall: 0xd9a9a0, floor: 0xf5e6dc, stairs: 0xe6c3bb, platform: 0xb8827c,
-    railing: 0x7a5a56, sphere: 0xc79a8f, cube: 0x8fa593, cone: 0xe0c9a6, cylinder: 0xcbb2a8,
-    wheel: [0xf5e6dc, 0xe6c3bb, 0xd9a9a0, 0xcbb2a8, 0xc79a8f, 0xb8827c, 0x8fa593, 0x7a5a56, 0xe0c9a6, 0xd6bfae, 0xa88a80, 0xefd9cd],
+    name: "Forest",
+    wall: 0x4a6b45, floor: 0xd8e4cc, stairs: 0x8aab7c, platform: 0x334d2f,
+    railing: 0x1f3320, roof: 0xb8724a, sphere: 0x6b8c5a, cube: 0x1a2818, cone: 0x9cb87c, cylinder: 0x2f4d2a,
+    wheel: [0xd8e4cc, 0x9cb87c, 0x4a6b45, 0x1f3320],
   },
   {
-    name: "Earth",
-    wall: 0x8a6f4e, floor: 0xd9c8a8, stairs: 0xb39d76, platform: 0x6b5636,
-    railing: 0x3f3322, sphere: 0x9c7b45, cube: 0x556b3a, cone: 0xc4914f, cylinder: 0x7a8a5c,
-    wheel: [0xd9c8a8, 0xb39d76, 0xc4914f, 0x8a6f4e, 0x9c7b45, 0x6b5636, 0x3f3322, 0x556b3a, 0x7a8a5c, 0xa68a5f, 0x4d4530, 0xbfa878],
+    name: "Desert",
+    wall: 0xc98a5c, floor: 0xf0dcc0, stairs: 0xe0b88a, platform: 0xa8663c,
+    railing: 0x6b3d24, roof: 0x5c8ab0, sphere: 0xd4a06c, cube: 0x4a2818, cone: 0xe8c495, cylinder: 0x8a5230,
+    wheel: [0xf0dcc0, 0xe0b88a, 0xc98a5c, 0x6b3d24],
   },
   {
     name: "Pastel",
-    wall: 0xb8c9e0, floor: 0xfaf1e4, stairs: 0xf2c9d4, platform: 0xc9e0c4,
-    railing: 0x9ba8c9, sphere: 0xe8d4ec, cube: 0xf5e0a8, cone: 0xc4e0dc, cylinder: 0xf2c9d4,
-    wheel: [0xfaf1e4, 0xf2c9d4, 0xe8d4ec, 0xb8c9e0, 0xc4e0dc, 0xc9e0c4, 0xf5e0a8, 0x9ba8c9, 0xe0c4d0, 0xd4e0f2, 0xf5d9c4, 0xd0e8d8],
+    wall: 0xb8cce0, floor: 0xfaf3e8, stairs: 0xf0c9d8, platform: 0x9cc9c4,
+    railing: 0x8a9cc0, roof: 0xf5d9a8, sphere: 0xe0cdec, cube: 0xa8c9d4, cone: 0xf5e0a8, cylinder: 0xf0c9d8,
+    wheel: [0xfaf3e8, 0xe0cdec, 0xb8cce0, 0x9cc9c4],
   },
   {
-    name: "Jewel",
-    wall: 0x2e6b5e, floor: 0xc9b8e0, stairs: 0x4a8577, platform: 0x1f4a40,
-    railing: 0x121f1c, sphere: 0x8b2942, cube: 0x1a3a6b, cone: 0x6b1a8b, cylinder: 0x9c2f4a,
-    wheel: [0x2e6b5e, 0x4a8577, 0x1f4a40, 0x8b2942, 0x9c2f4a, 0x1a3a6b, 0x6b1a8b, 0x121f1c, 0x2e4a8b, 0x7a1f5e, 0xc9b8e0, 0x0f5c4a],
+    name: "Rich",
+    wall: 0x2e5b4e, floor: 0xb89ccc, stairs: 0x4a8577, platform: 0x1a3d34,
+    railing: 0x0f1f1c, roof: 0x8b2942, sphere: 0x6b1a8b, cube: 0x0f1f1c, cone: 0x1a3a6b, cylinder: 0x9c2f4a,
+    wheel: [0x2e5b4e, 0x6b1a8b, 0x8b2942, 0x1a3a6b],
   },
   {
-    name: "Scandinavian",
-    wall: 0xece6dc, floor: 0xc9b599, stairs: 0xdcd3c4, platform: 0xa88f6e,
-    railing: 0x2a2a28, sphere: 0x8a9baa, cube: 0x1c1c1a, cone: 0xd9d0c0, cylinder: 0xb8a488,
-    wheel: [0xece6dc, 0xdcd3c4, 0xc9b599, 0xa88f6e, 0x8a9baa, 0x6b7a88, 0x2a2a28, 0x1c1c1a, 0xd9d0c0, 0xb8a488, 0xf5f0e8, 0x9c8f7a],
+    name: "Neon",
+    wall: 0xff2ec4, floor: 0xf0f0f0, stairs: 0x2ee6ff, platform: 0xccff2e,
+    railing: 0x1a1a1a, roof: 0xffe62e, sphere: 0x2eff8f, cube: 0x1a1a1a, cone: 0xff6b2e, cylinder: 0x8f2eff,
+    wheel: [0xff2ec4, 0x2ee6ff, 0xccff2e, 0xffe62e],
   },
   {
-    name: "Monochrome",
-    wall: 0x8a8a8a, floor: 0xe4e4e4, stairs: 0xb8b8b8, platform: 0x5a5a5a,
-    railing: 0x2a2a2a, sphere: 0x707070, cube: 0x1a1a1a, cone: 0xc4c4c4, cylinder: 0x9c9c9c,
-    wheel: [0xf5f5f5, 0xe4e4e4, 0xc4c4c4, 0xb8b8b8, 0x9c9c9c, 0x8a8a8a, 0x707070, 0x5a5a5a, 0x4a4a4a, 0x2a2a2a, 0x1a1a1a, 0x0a0a0a],
+    name: "Kitchen",
+    wall: 0xede4d3, floor: 0xc9a876, stairs: 0xd9c9a8, platform: 0x8a6b45,
+    railing: 0x3a3530, roof: 0x5c7a6b, sphere: 0xb8443a, cube: 0x2a2622, cone: 0xe0d4b8, cylinder: 0x7a8a72,
+    wheel: [0xede4d3, 0xc9a876, 0xb8443a, 0x5c7a6b],
+  },
+  {
+    name: "Office",
+    wall: 0xd4d0c4, floor: 0xa89c88, stairs: 0xc4bcac, platform: 0x6b6458,
+    railing: 0x2a2824, roof: 0x3a5f7a, sphere: 0x8a8478, cube: 0x1a1816, cone: 0xb8b0a0, cylinder: 0x4a4640,
+    wheel: [0xd4d0c4, 0xa89c88, 0x6b6458, 0x2a2824],
+  },
+  {
+    name: "Living room",
+    wall: 0xc4a888, floor: 0xe8dcc8, stairs: 0xd4bc9c, platform: 0x8a6b4a,
+    railing: 0x4a3826, roof: 0x5c7458, sphere: 0xb08560, cube: 0x2e2018, cone: 0xecd9b0, cylinder: 0x6b503a,
+    wheel: [0xe8dcc8, 0xd4bc9c, 0xc4a888, 0x8a6b4a],
+  },
+  {
+    name: "Bedroom",
+    wall: 0xc9b8cc, floor: 0xf0e8ec, stairs: 0xddc9d9, platform: 0x9c8aa0,
+    railing: 0x4a3d4e, roof: 0xa8c4a0, sphere: 0xb89cc0, cube: 0x2e2630, cone: 0xe0d4e0, cylinder: 0x807088,
+    wheel: [0xf0e8ec, 0xddc9d9, 0xc9b8cc, 0x9c8aa0],
+  },
+  {
+    name: "Exterior",
+    wall: 0x9c9488, floor: 0xc4bcac, stairs: 0xb0a894, platform: 0x6b6458,
+    railing: 0x2a2824, roof: 0x3a4a3a, sphere: 0x7a7268, cube: 0x1a1816, cone: 0xd4ccb8, cylinder: 0x4a4438,
+    wheel: [0xc4bcac, 0xb0a894, 0x9c9488, 0x6b6458],
   },
 ];
 
@@ -248,7 +309,7 @@ function angleDiffDeg(a, b) {
 // which repopulate the disc with that palette's own colors; drag anywhere
 // on the colorful disc itself to spin it, with a bit of momentum once
 // released, like a real dial.
-function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, presetIndex, onCyclePreset }) {
+function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, presetIndex, onCyclePreset, hueShift, satMul, lightMul, onSlider }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     const id = requestAnimationFrame(() => setEntered(true));
@@ -336,97 +397,131 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
   const preset = presetIndex > 0 ? CURATED_PALETTES[presetIndex - 1] : null;
   const isActiveCell = (hueDeg, ring) => activeTheme && activeTheme.type === "hue" && activeTheme.hueDeg === hueDeg && activeTheme.ring === ring;
   const isActiveGrey = (step) => activeTheme && activeTheme.type === "grey" && activeTheme.step === step;
-  const isActivePreset = () => activeTheme && activeTheme.type === "preset" && activeTheme.name === (preset && preset.name);
+  const isActivePreset = (slice) => activeTheme && activeTheme.type === "preset" && activeTheme.name === (preset && preset.name) && activeTheme.slice === slice;
+  const adj = (hex) => adjustHex(hex, hueShift, satMul, lightMul);
 
   return (
     <div
       style={{
-        position: "absolute", left: pos.x, top: pos.y, zIndex: 200, width: size, height: size,
-        transform: `translate(-50%, -50%) scale(${entered ? 1 : 0.35})`,
-        opacity: entered ? 1 : 0,
-        transition: "transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.25s ease",
-        filter: "drop-shadow(0 8px 24px rgba(0,0,0,0.35))",
+        position: "absolute", left: pos.x, top: pos.y, zIndex: 200, width: size,
+        transform: "translate(-50%, -50%)",
         userSelect: "none", WebkitUserSelect: "none",
       }}
     >
-      <svg
-        ref={svgRef} width={size} height={size}
-        style={{ overflow: "visible", position: "absolute", inset: 0, touchAction: "none" }}
-        onPointerDown={startSpin}
-        onMouseDown={(e) => e.preventDefault()}
-      >
-        <circle cx={cx} cy={cy} r={discR1} fill="transparent" style={{ cursor: "grab" }} />
-        <g transform={`rotate(${rotation} ${cx} ${cy})`} style={{ cursor: "grab", touchAction: "none" }}>
-          {preset
-            ? Array.from({ length: WHEEL_HUE_COUNT }, (_, h) => {
-                const hueDeg = (h / WHEEL_HUE_COUNT) * 360;
-                const hex = preset.wheel[h % preset.wheel.length];
-                return (
-                  <path
-                    key={`preset${h}`}
-                    d={ringWedgePath(cx, cy, discR0, discR1, hueDeg - 90, hueSpan, 2)}
-                    fill={hexToCss(hex)}
-                    stroke={isActivePreset() ? "var(--accent)" : "rgba(0,0,0,0.15)"}
-                    strokeWidth={isActivePreset() ? 1.5 : 0.75}
-                    style={{ cursor: "pointer" }}
-                    onClick={() => pick({ type: "preset", name: preset.name })}
-                  >
-                    <title>{`${preset.name} theme`}</title>
-                  </path>
-                );
-              })
-            : WHEEL_DISC_CELLS.map((cell) => (
-                <path
-                  key={`h${cell.hue}-r${cell.ring}`}
-                  d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth, discR0 + (cell.ring + 1) * ringDepth, cell.hueDeg - 90, hueSpan, 1.5)}
-                  fill={hexToCss(cell.hex)}
-                  stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "rgba(0,0,0,0.08)"}
-                  strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 0.4}
-                  style={{ cursor: "pointer" }}
-                  onClick={() => pick({ type: "hue", hueDeg: cell.hueDeg, ring: cell.ring })}
-                >
-                  <title>{hexToCss(cell.hex)}</title>
-                </path>
-              ))}
-          {WHEEL_GREY_CELLS.map((g) => (
-            <path
-              key={`grey${g.step}`}
-              d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 1)}
-              fill={hexToCss(g.hex)}
-              stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
-              strokeWidth={isActiveGrey(g.step) ? 1.5 : 0.35}
-              style={{ cursor: "pointer" }}
-              onClick={() => pick({ type: "grey", step: g.step, midLight: g.midLight })}
-            >
-              <title>{hexToCss(g.hex)}</title>
-            </path>
-          ))}
-        </g>
-      </svg>
       <div
-        onPointerDown={startHubGesture}
-        title="Drag to move, tap to cycle color-scheme presets"
         style={{
-          position: "absolute", left: cx - hubR, top: cy - hubR, width: hubR * 2, height: hubR * 2, borderRadius: "50%",
-          background: "var(--bg-floating)", border: "1px solid var(--border-control)",
-          display: "flex", alignItems: "center", justifyContent: "center", cursor: "grab", touchAction: "none",
+          width: size, height: size, position: "relative",
+          transform: `scale(${entered ? 1 : 0.35})`,
+          opacity: entered ? 1 : 0,
+          transition: "transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.25s ease",
+          filter: "drop-shadow(0 8px 24px rgba(0,0,0,0.35))",
         }}
       >
-        <span style={{ fontSize: preset ? 7.5 : 8, letterSpacing: "0.04em", color: "var(--text-secondary)", textTransform: "uppercase", pointerEvents: "none", textAlign: "center", padding: "0 3px" }}>
-          {preset ? preset.name : "Theme"}
-        </span>
-        <button
-          onClick={(e) => { e.stopPropagation(); onClose(); }}
-          onPointerDown={(e) => e.stopPropagation()}
-          title="Close"
+        <svg
+          ref={svgRef} width={size} height={size}
+          style={{ overflow: "visible", position: "absolute", inset: 0, touchAction: "none" }}
+          onPointerDown={startSpin}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <circle cx={cx} cy={cy} r={discR1} fill="transparent" style={{ cursor: "grab" }} />
+          <g transform={`rotate(${rotation} ${cx} ${cy})`} style={{ cursor: "grab", touchAction: "none" }}>
+            {preset
+              ? Array.from({ length: 4 }, (_, slice) => {
+                  const hex = preset.wheel[slice % preset.wheel.length];
+                  return (
+                    <path
+                      key={`preset${slice}`}
+                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, 3)}
+                      fill={hexToCss(adj(hex))}
+                      stroke={isActivePreset(slice) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
+                      strokeWidth={isActivePreset(slice) ? 1.5 : 0.75}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => pick({ type: "preset", name: preset.name, slice })}
+                    >
+                      <title>{`${preset.name} theme`}</title>
+                    </path>
+                  );
+                })
+              : WHEEL_DISC_CELLS.map((cell) => (
+                  <path
+                    key={`h${cell.hue}-r${cell.ring}`}
+                    d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth, discR0 + (cell.ring + 1) * ringDepth, cell.hueDeg - 90, hueSpan, 1.5)}
+                    fill={hexToCss(adj(cell.hex))}
+                    stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "rgba(0,0,0,0.08)"}
+                    strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 0.4}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => pick({ type: "hue", hueDeg: cell.hueDeg, ring: cell.ring })}
+                  >
+                    <title>{hexToCss(adj(cell.hex))}</title>
+                  </path>
+                ))}
+            {WHEEL_GREY_CELLS.map((g) => (
+              <path
+                key={`grey${g.step}`}
+                d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 1)}
+                fill={hexToCss(adjustHex(g.hex, 0, 1, lightMul))}
+                stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
+                strokeWidth={isActiveGrey(g.step) ? 1.5 : 0.35}
+                style={{ cursor: "pointer" }}
+                onClick={() => pick({ type: "grey", step: g.step, midLight: g.midLight })}
+              >
+                <title>{hexToCss(g.hex)}</title>
+              </path>
+            ))}
+          </g>
+        </svg>
+        <div
+          onPointerDown={startHubGesture}
+          title="Drag to move, tap to cycle color-scheme presets"
           style={{
-            position: "absolute", top: -5, right: -5, width: 16, height: 16, borderRadius: "50%", zIndex: 2,
-            border: "1px solid var(--border-control)", background: "var(--bg-panel)", color: "var(--text-primary)",
-            cursor: "pointer", fontSize: 10, lineHeight: 1, padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            position: "absolute", left: cx - hubR, top: cy - hubR, width: hubR * 2, height: hubR * 2, borderRadius: "50%",
+            background: "var(--bg-floating)", border: "1px solid var(--border-control)",
+            display: "flex", alignItems: "center", justifyContent: "center", cursor: "grab", touchAction: "none",
           }}
         >
-          &times;
-        </button>
+          <span style={{ fontSize: preset ? 7.5 : 8, letterSpacing: "0.04em", color: "var(--text-secondary)", textTransform: "uppercase", pointerEvents: "none", textAlign: "center", padding: "0 3px" }}>
+            {preset ? preset.name : "Theme"}
+          </span>
+          <button
+            onClick={(e) => { e.stopPropagation(); onClose(); }}
+            onPointerDown={(e) => e.stopPropagation()}
+            title="Close"
+            style={{
+              position: "absolute", top: -5, right: -5, width: 16, height: 16, borderRadius: "50%", zIndex: 2,
+              border: "1px solid var(--border-control)", background: "var(--bg-panel)", color: "var(--text-primary)",
+              cursor: "pointer", fontSize: 10, lineHeight: 1, padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+          >
+            &times;
+          </button>
+        </div>
+      </div>
+      {/* global adjustment sliders -- shift/scale every color the wheel is
+          currently showing (and so the next pick applies), without
+          touching whatever theme is already applied to the room. */}
+      <div
+        onPointerDown={(e) => e.stopPropagation()}
+        style={{
+          marginTop: 10, padding: "8px 10px", borderRadius: 10, background: "var(--bg-floating)",
+          border: "1px solid var(--border-control)", display: "flex", flexDirection: "column", gap: 5,
+          fontFamily: "var(--font-mono)", opacity: entered ? 1 : 0, transition: "opacity 0.25s ease 0.1s",
+        }}
+      >
+        {[
+          { key: "hue", label: "hue", value: hueShift, min: -180, max: 180, fmt: (v) => `${Math.round(v)}°` },
+          { key: "sat", label: "sat", value: satMul, min: 0, max: 2, fmt: (v) => `${Math.round(v * 100)}%` },
+          { key: "light", label: "light", value: lightMul, min: 0, max: 2, fmt: (v) => `${Math.round(v * 100)}%` },
+        ].map((s) => (
+          <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ width: 32, fontSize: 9, color: "var(--text-secondary)" }}>{s.label}</span>
+            <input
+              type="range" min={s.min} max={s.max} step={(s.max - s.min) / 200} value={s.value}
+              onChange={(e) => onSlider(s.key, parseFloat(e.target.value))}
+              className="rb-range" style={{ flex: 1 }}
+            />
+            <span style={{ width: 34, fontSize: 9, color: "var(--text-secondary)", textAlign: "right" }}>{s.fmt(s.value)}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -580,7 +675,14 @@ export default function RoomBuilder() {
   // { type: "hue", hueDeg, ring } | { type: "grey", step, midLight } | { type: "preset", name } | null
   const [themeAnchor, setThemeAnchor] = useState(null);
   const themeApiRef = useRef(() => {});
-  useEffect(() => { themeApiRef.current(themeAnchor); }, [themeAnchor]);
+  // global wheel sliders -- re-tint whatever's currently picked (anchor or
+  // preset) without changing what's picked itself.
+  const [themeHueShift, setThemeHueShift] = useState(0);
+  const [themeSatMul, setThemeSatMul] = useState(1);
+  const [themeLightMul, setThemeLightMul] = useState(1);
+  useEffect(() => {
+    themeApiRef.current(themeAnchor, { hueShift: themeHueShift, satMul: themeSatMul, lightMul: themeLightMul });
+  }, [themeAnchor, themeHueShift, themeSatMul, themeLightMul]);
   // 0 = the generic hue/tint disc; 1..N indexes into CURATED_PALETTES
   const [themePresetIndex, setThemePresetIndex] = useState(0);
   const [viewLayout, setViewLayout] = useState("single");
@@ -1044,6 +1146,43 @@ export default function RoomBuilder() {
       return tex;
     }
     const gridTileTex = makeGridTileTexture(256);
+    // warm wood-plank look: horizontal streaky grain (layered sine noise,
+    // stretched along one axis) cut into a few long planks by darker seam
+    // lines -- painted light/low-contrast like the other finish textures so
+    // it reads as pure shading once multiplied by the room's active color.
+    function makeWoodTexture(size) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const grain =
+            Math.sin(y * 0.35 + Math.sin(x * 0.05) * 3) * 10 +
+            Math.sin(y * 1.7 + x * 0.02) * 6 +
+            (Math.random() - 0.5) * 10;
+          const v = Math.min(255, Math.max(0, 222 + grain));
+          const i = (y * size + x) * 4;
+          img.data[i + 0] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      ctx.strokeStyle = "rgba(70,55,38,0.35)";
+      ctx.lineWidth = Math.max(1, size * 0.01);
+      const planks = 5;
+      for (let i = 1; i < planks; i++) {
+        const y = (size / planks) * i;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(size, y);
+        ctx.stroke();
+      }
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(4, 4);
+      return tex;
+    }
+    const woodTex = makeWoodTexture(256);
 
     let minorGrid = null;
     let majorGrid = null;
@@ -1478,6 +1617,10 @@ export default function RoomBuilder() {
     // it independently from the room's own floor, rather than the platform
     // just always matching whatever the floor happens to be.
     const balconyPlatformMat = new THREE.MeshStandardMaterial({ color: COLORS.floor, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
+    // a balcony's own covered ceiling gets its own material too, rather
+    // than always just following the walls -- a room theme can give it a
+    // deliberately contrasting (often complementary-hue) "roof" color.
+    const balconyRoofMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
     // decorative room ceiling -- 10% transparent (90% opaque) so it doesn't
     // block editing visibility from above; never added to pickList.
     const ceilingMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.9, envMapIntensity: 0.35 });
@@ -2717,7 +2860,7 @@ export default function RoomBuilder() {
         const floorLikeMat = wholeSelected ? floorMatSelected : balconyPlatformMat;
         const stepMat = wholeSelected ? wallMatSelected : currentWallMat;
         const pillarMatActive = (wholeSelected || pillarsSelected) ? pillarMatSelected : pillarMat;
-        const ceilingMat = (wholeSelected || ceilingSelected) ? wallMatSelected : currentWallMat;
+        const ceilingMat = (wholeSelected || ceilingSelected) ? wallMatSelected : balconyRoofMat;
         function toWorld(u, d) {
           if (axis === "x") return { x: u, z: info.coord + nz * d };
           return { x: info.coord + nx * d, z: u };
@@ -3055,23 +3198,38 @@ export default function RoomBuilder() {
     }
     wireframeApiRef.current = applyWireframe;
 
-    // Matte vinyl / concrete / shiny metal / grid tile -- a *finish*,
-    // layered on top of whatever color is currently active (the theme
-    // wheel's pick, the older tint swatches, or the plain default) rather
-    // than each one owning a fixed color of its own. Concrete is the one
-    // exception (forceColor): real precast concrete doesn't take a paint
-    // tint, so it keeps its own grey regardless of the room's theme, same
-    // as before. floorLighten (concrete only) blends that fixed color
-    // toward white for a lighter poured-slab floor shade; every other
-    // finish just gives the floor its own theme/tint color like the wall,
-    // at the same roughness/metalness/map.
+    // Six finishes -- a *material*, layered on top of whatever color is
+    // currently active (the theme wheel's pick, the older tint swatches, or
+    // the plain default) rather than each one owning a fixed color of its
+    // own. Concrete is the one exception (forceColor): real precast
+    // concrete doesn't take a paint tint, so it keeps its own grey
+    // regardless of the room's theme. floorLighten (concrete only) blends
+    // that fixed color toward white for a lighter poured-slab floor shade;
+    // every other finish just gives the floor its own theme/tint color like
+    // the wall, at the same roughness/metalness/texture. Order matches the
+    // module-level BUILDING_MATERIAL_NAMES array the ribbon button reads.
     const BUILDING_MATERIAL_PRESETS = [
-      null, // default finish -- the room's own grain map, whatever color is active
-      { key: "vinyl", roughness: 0.94, metalness: 0.0 },
-      { key: "concrete", forceColor: true, color: 0x93999c, roughness: 0.88, metalness: 0.08, concrete: true, floorLighten: 0.2 },
+      { key: "matte", roughness: 0.9, metalness: 0.0, texKey: "grain" }, // default finish -- the room's own soft grain map
+      { key: "concrete", forceColor: true, color: 0x93999c, roughness: 0.88, metalness: 0.08, texKey: "concrete", floorLighten: 0.2 },
       { key: "metal", roughness: 0.12, metalness: 0.92 },
-      { key: "tile", roughness: 0.32, metalness: 0.04, tile: true },
+      { key: "plastic", roughness: 0.22, metalness: 0.06 },
+      { key: "vinyl", roughness: 0.55, metalness: 0.0, texKey: "tile" },
+      { key: "wood", roughness: 0.48, metalness: 0.02, texKey: "wood" },
     ];
+    function wallTexForKey(texKey) {
+      if (texKey === "grain") return wallGrainTex;
+      if (texKey === "concrete") return concretePanelTex;
+      if (texKey === "tile") return gridTileTex;
+      if (texKey === "wood") return woodTex;
+      return null;
+    }
+    function floorTexForKey(texKey) {
+      if (texKey === "grain") return floorGrainTex;
+      if (texKey === "concrete") return concretePanelTex;
+      if (texKey === "tile") return gridTileTex;
+      if (texKey === "wood") return woodTex;
+      return null;
+    }
     // the building-material preset, the theme wheel, and the tint-active/
     // tint-inactive swatches (an older, separate feature) all ultimately
     // want to set wallMat/floorMat's .color -- keeping them as independent
@@ -3085,14 +3243,13 @@ export default function RoomBuilder() {
     let currentThemeWallColor = null, currentThemeFloorColor = null;
     function recomputeWallFloorMaterials() {
       const preset = BUILDING_MATERIAL_PRESETS[currentBuildingMaterialIndex];
-      const forceColor = !!(preset && preset.forceColor);
+      const forceColor = !!preset.forceColor;
       const mainColor = forceColor ? preset.color : (currentThemeWallColor != null ? currentThemeWallColor : COLORS.wall);
-      const roughness = preset ? preset.roughness : 0.85;
-      const metalness = preset ? preset.metalness : 0.02;
-      const useConcreteTex = !!(preset && preset.concrete);
-      const useTileTex = !!(preset && preset.tile);
-      const map = preset ? (useConcreteTex ? concretePanelTex : useTileTex ? gridTileTex : null) : wallGrainTex;
-      const roughnessMap = preset ? null : wallRoughTex;
+      const roughness = preset.roughness;
+      const metalness = preset.metalness;
+      const isGrain = preset.texKey === "grain";
+      const map = wallTexForKey(preset.texKey);
+      const roughnessMap = isGrain ? wallRoughTex : null;
 
       const wallColor = new THREE.Color(mainColor);
       if (currentTintActiveOn) wallColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
@@ -3125,14 +3282,14 @@ export default function RoomBuilder() {
       if (forceColor && preset.floorLighten != null) {
         floorBase = new THREE.Color(mainColor).lerp(new THREE.Color(0xffffff), preset.floorLighten);
         floorRough = roughness; floorMetal = metalness;
-        floorMap = useConcreteTex ? concretePanelTex : null;
+        floorMap = floorTexForKey(preset.texKey);
         floorRoughnessMap = null;
       } else {
         floorBase = currentThemeFloorColor != null ? currentThemeFloorColor : COLORS.floor;
-        floorRough = preset ? roughness : 0.88;
-        floorMetal = preset ? metalness : 0.0;
-        floorMap = preset ? (useTileTex ? gridTileTex : null) : floorGrainTex;
-        floorRoughnessMap = preset ? null : floorRoughTex;
+        floorRough = roughness;
+        floorMetal = metalness;
+        floorMap = floorTexForKey(preset.texKey);
+        floorRoughnessMap = isGrain ? floorRoughTex : null;
       }
       const floorColor = new THREE.Color(floorBase);
       if (currentTintActiveOn) floorColor.lerp(new THREE.Color(currentTintActiveColor), 0.92).multiplyScalar(0.94);
@@ -3223,7 +3380,7 @@ export default function RoomBuilder() {
     // themeColorsFor, or a curated named preset supplying every color
     // outright -- either way, one distinct tone reaches each of the wall,
     // floor, stairs, balcony platform, balcony railings, and every prop kind.
-    function applyRoomTheme(anchor) {
+    function applyRoomTheme(anchor, slider) {
       if (!anchor) {
         currentThemeWallColor = null;
         currentThemeFloorColor = null;
@@ -3231,23 +3388,37 @@ export default function RoomBuilder() {
         stairMat.color.set(STAIR_DEFAULT_COLOR);
         balconyPlatformMat.color.set(COLORS.floor);
         pillarMat.color.set(PILLAR_DEFAULT_COLOR);
+        balconyRoofMat.color.set(COLORS.wall);
         applyPropColors(null);
         return;
       }
-      let palette;
+      let rawPalette;
       if (anchor.type === "preset") {
-        palette = CURATED_PALETTES.find((p) => p.name === anchor.name) || CURATED_PALETTES[0];
+        rawPalette = CURATED_PALETTES.find((p) => p.name === anchor.name) || CURATED_PALETTES[0];
       } else if (anchor.type === "grey") {
-        palette = themeColorsFor(0, 0, anchor.midLight);
+        rawPalette = themeColorsFor(0, 0, anchor.midLight);
       } else {
-        palette = themeColorsFor(anchor.hueDeg, THEME_SAT, THEME_WALL_MIDLIGHT);
+        rawPalette = themeColorsFor(anchor.hueDeg, THEME_SAT, THEME_WALL_MIDLIGHT);
       }
+      // the global wheel sliders (hue/sat/light) re-tint every category of
+      // whatever's picked -- a preset's own hand-authored colors included --
+      // so what got applied always matches what the wheel showed at pick time.
+      const hueShift = (slider && slider.hueShift) || 0;
+      const satMul = slider && slider.satMul != null ? slider.satMul : 1;
+      const lightMul = slider && slider.lightMul != null ? slider.lightMul : 1;
+      const adj = (hex) => adjustHex(hex, hueShift, satMul, lightMul);
+      const palette = {
+        wall: adj(rawPalette.wall), floor: adj(rawPalette.floor), stairs: adj(rawPalette.stairs),
+        platform: adj(rawPalette.platform), railing: adj(rawPalette.railing), roof: adj(rawPalette.roof),
+        sphere: adj(rawPalette.sphere), cube: adj(rawPalette.cube), cone: adj(rawPalette.cone), cylinder: adj(rawPalette.cylinder),
+      };
       currentThemeWallColor = palette.wall;
       currentThemeFloorColor = palette.floor;
       recomputeWallFloorMaterials();
       stairMat.color.set(palette.stairs);
       balconyPlatformMat.color.set(palette.platform);
       pillarMat.color.set(palette.railing);
+      balconyRoofMat.color.set(palette.roof);
       applyPropColors(palette);
     }
     themeApiRef.current = applyRoomTheme;
@@ -5827,6 +5998,7 @@ export default function RoomBuilder() {
       pillarMat.dispose();
       pillarMatSelected.dispose();
       ceilingMat.dispose();
+      balconyRoofMat.dispose();
       selMat.dispose();
       selMatPreview.dispose();
       glassMat.dispose();
@@ -5999,7 +6171,7 @@ export default function RoomBuilder() {
   return (
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
         [data-theme="dark"] {
           --bg-window: #1e1e1e;
@@ -6015,6 +6187,8 @@ export default function RoomBuilder() {
           --text-secondary: rgba(235, 235, 245, 0.6);
           --text-tertiary: rgba(235, 235, 245, 0.3);
           --scrollbar-track: rgba(255, 255, 255, 0.05);
+          /* dark theme: a lighter grey splitter reads against the dark panels */
+          --splitter: rgba(255, 255, 255, 0.22);
         }
         [data-theme="light"] {
           /* a warm, slightly desaturated off-white -- the Teenage
@@ -6033,6 +6207,8 @@ export default function RoomBuilder() {
           --text-secondary: rgba(50, 46, 38, 0.6);
           --text-tertiary: rgba(50, 46, 38, 0.32);
           --scrollbar-track: rgba(0, 0, 0, 0.04);
+          /* light theme: a thin dark grey splitter, per the reference UI */
+          --splitter: rgba(40, 38, 30, 0.35);
         }
         [data-theme] {
           /* the app's own brand accent -- kept constant across both themes
@@ -6042,20 +6218,27 @@ export default function RoomBuilder() {
              fight the rest of the app's visual language. */
           --accent: #FF6B1A;
           --accent-contrast: #141414;
-          /* a technical monospace, matching the Teenage Engineering
-             color-wheel reference's look -- applied to the whole interface
-             in both themes (the dark theme keeps its own dark colors,
-             just set in this same typeface). */
-          --font-system: "Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+          /* the reference UI's own clean grotesque sans, applied to the
+             whole interface in both themes; the color wheel's own internal
+             labels keep a separate monospace (--font-mono) for that
+             Teenage-Engineering-tool feel. */
+          --font-system: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          --font-mono: "Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+          /* neutral grey selection fill -- a darker/lighter grey against the
+             panel's own background, used for the active ribbon button and
+             the selected layer row, in place of a solid orange fill. */
+          --bg-selected: rgba(20, 18, 12, 0.16);
+          --bg-selected-hover: rgba(20, 18, 12, 0.22);
+        }
+        [data-theme="dark"] {
+          --bg-selected: rgba(255, 255, 255, 0.16);
+          --bg-selected-hover: rgba(255, 255, 255, 0.24);
         }
         .rb-btn {
           font-family: var(--font-system);
-          /* a touch smaller/tighter than before -- the monospace typeface
-             runs wider per character than the old system sans-serif, so
-             this claws back some of the ribbon's horizontal density. */
-          font-size: 11px;
-          font-weight: 700;
-          letter-spacing: -0.02em;
+          font-size: 12px;
+          font-weight: 500;
+          letter-spacing: 0;
           padding: 6px 9px;
           border-radius: 6px;
           border: 0.5px solid var(--border-control);
@@ -6066,7 +6249,7 @@ export default function RoomBuilder() {
           white-space: nowrap;
         }
         .rb-btn:hover { background: var(--bg-control-hover); }
-        .rb-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+        .rb-btn.active { background: var(--bg-selected); border-color: var(--border-control); color: var(--text-primary); font-weight: 600; }
         .rb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         .rb-btn:disabled { opacity: 0.35; cursor: default; }
         .rb-input {
@@ -6095,7 +6278,7 @@ export default function RoomBuilder() {
           border-top: 0.5px solid var(--border-separator);
         }
         .ribbon-section { display: flex; align-items: center; gap: 12px; padding: 0 12px; flex-shrink: 0; }
-        .ribbon-divider { width: 0.5px; align-self: stretch; margin: 8px 0; background: var(--border-separator); flex-shrink: 0; }
+        .ribbon-divider { width: 1px; align-self: stretch; margin: 8px 0; background: var(--splitter); flex-shrink: 0; }
         .ribbon-group { display: flex; flex-direction: column; gap: 3px; min-width: 108px; flex-shrink: 0; justify-content: center; }
         .ribbon-label {
           font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--text-secondary); font-weight: 500; white-space: nowrap;
@@ -6342,8 +6525,8 @@ export default function RoomBuilder() {
                   display: "flex", flexDirection: "row", alignItems: "center", gap: 7, cursor: "grab",
                   padding: 5, borderRadius: 2, touchAction: "none",
                   opacity: dragFloorId === id ? 0.4 : 1,
-                  border: id === activeFloorIdState ? "1px solid #FF6B1A" : "1px solid transparent",
-                  background: id === activeFloorIdState ? "rgba(255,107,26,0.14)" : "transparent",
+                  border: "1px solid transparent",
+                  background: id === activeFloorIdState ? "var(--bg-selected)" : "transparent",
                 }}
               >
                 <canvas
@@ -6405,8 +6588,8 @@ export default function RoomBuilder() {
                       className="rb-btn"
                       style={{
                         padding: "1px 5px", fontSize: 8.5,
-                        background: hiddenIds.includes(id) ? "var(--accent)" : "var(--bg-control)",
-                        color: hiddenIds.includes(id) ? "var(--accent-contrast)" : "var(--text-secondary)",
+                        background: hiddenIds.includes(id) ? "var(--bg-selected)" : "var(--bg-control)",
+                        color: hiddenIds.includes(id) ? "var(--text-primary)" : "var(--text-secondary)",
                       }}
                       onClick={() => toggleHideRef.current(id)}
                       title="Hide this layer"
@@ -6492,13 +6675,18 @@ export default function RoomBuilder() {
       </div>
 
       {/* TOP: full-width row so the resizable layers panel below can never
-          overlap these controls, no matter how wide it's dragged -- no
-          background here, the buttons float directly over the 3D view */}
+          overlap these controls, no matter how wide it's dragged -- a
+          translucent band behind it, same treatment as the bottom ribbon,
+          rather than the buttons floating bare over the 3D view. The band
+          itself stays pointer-events:none (like before) so the gap between
+          the two button clusters still lets you orbit the camera through it. */}
       <div
         style={{
           position: "absolute", top: 0, left: 0, right: 0, height: TOPBAR_HEIGHT,
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "0 12px", gap: 12, pointerEvents: "none",
+          background: "var(--bg-panel-translucent)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+          borderBottom: "0.5px solid var(--border-separator)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
@@ -6646,17 +6834,23 @@ export default function RoomBuilder() {
           />
           <button
             className="rb-btn"
-            onClick={() => setBuildingMaterialIndex((i) => (i + 1) % 5)}
-            title="Cycle material finish (default, matte vinyl, concrete, shiny metal, grid tile) -- an overlay on the current theme color, except concrete which keeps its own grey"
+            onClick={() => setBuildingMaterialIndex((i) => (i + 1) % BUILDING_MATERIAL_NAMES.length)}
+            title={`Finish: ${BUILDING_MATERIAL_NAMES[buildingMaterialIndex]} (click to cycle: ${BUILDING_MATERIAL_NAMES.join(", ")}) -- an overlay on the current theme color, except concrete which keeps its own grey`}
             style={{
               padding: 2, width: 22, height: 22, minWidth: 22, display: "grid",
-              gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr 1fr", gap: 1, overflow: "hidden",
+              gridTemplateColumns: "1fr 1fr 1fr", gridTemplateRows: "1fr 1fr", gap: 1, overflow: "hidden",
             }}
           >
-            <span style={{ background: "#d8d5cf", borderRadius: 1 }} />
-            <span style={{ background: "#93999c", borderRadius: 1 }} />
-            <span style={{ background: "linear-gradient(135deg, #eef0f2, #8a8d92)", borderRadius: 1 }} />
-            <span style={{ background: "#e9e9e4", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 1 }} />
+            {["#d8d5cf", "#93999c", "linear-gradient(135deg, #eef0f2, #8a8d92)", "#f0eee8", "#e9e9e4", "#a87c4f"].map((bg, i) => (
+              <span
+                key={i}
+                style={{
+                  background: bg, borderRadius: 1,
+                  outline: buildingMaterialIndex === i ? "1px solid var(--accent)" : "none",
+                  outlineOffset: -1,
+                }}
+              />
+            ))}
           </button>
           <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
           <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
@@ -6866,15 +7060,28 @@ export default function RoomBuilder() {
             <div className="ribbon-group" style={{ minWidth: 220 }}>
               <span className="ribbon-label">Prop shape</span>
               <div style={{ display: "flex", gap: 6 }}>
-                {["sphere", "cube", "cone", "cylinder", "balcony"].map((s) => (
+                {[
+                  { key: "sphere", Icon: Circle },
+                  { key: "cube", Icon: Square },
+                  { key: "cone", Icon: Triangle },
+                  { key: "cylinder", Icon: Cylinder },
+                ].map(({ key: s, Icon }) => (
                   <button
                     key={s}
                     className={`rb-btn ${propsShape === s ? "active" : ""}`}
                     onClick={() => setPropsShape(s)}
+                    title={s.charAt(0).toUpperCase() + s.slice(1)}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, padding: 0 }}
                   >
-                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                    <Icon size={16} strokeWidth={2} />
                   </button>
                 ))}
+                <button
+                  className={`rb-btn ${propsShape === "balcony" ? "active" : ""}`}
+                  onClick={() => setPropsShape("balcony")}
+                >
+                  Balcony
+                </button>
               </div>
             </div>
           )}
@@ -7079,6 +7286,14 @@ export default function RoomBuilder() {
           onCyclePreset={() => setThemePresetIndex((i) => (i + 1) % (CURATED_PALETTES.length + 1))}
           onPick={(anchor) => setThemeAnchor(anchor)}
           onClose={() => setThemeWheelOpen(false)}
+          hueShift={themeHueShift}
+          satMul={themeSatMul}
+          lightMul={themeLightMul}
+          onSlider={(key, value) => {
+            if (key === "hue") setThemeHueShift(value);
+            else if (key === "sat") setThemeSatMul(value);
+            else if (key === "light") setThemeLightMul(value);
+          }}
         />
       )}
     </div>
