@@ -569,6 +569,11 @@ export default function RoomBuilder() {
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
   const [wallThickness, setWallThickness] = useState(0.35);
   const [ceilingOn, setCeilingOn] = useState(false);
+  // mirrors ceilingEnabled across every floor (not just the active one) so
+  // each layer row's own ceiling toggle can render checked/unchecked
+  // correctly without switching floors first.
+  const [ceilingFloorIds, setCeilingFloorIds] = useState([]);
+  const toggleFloorCeilingRef = useRef(() => {});
   const ceilingApiRef = useRef({ setEnabled: () => {} });
   const [groundOn, setGroundOn] = useState(false);
   const groundApiRef = useRef({ setEnabled: () => {} });
@@ -5401,6 +5406,7 @@ export default function RoomBuilder() {
     function syncFloorsToReact() {
       setFloorIds(floors.map((f) => f.id));
       setActiveFloorIdState(activeFloorId);
+      setCeilingFloorIds(floors.filter((f) => f.data.ceilingEnabled).map((f) => f.id));
       const entry = floors.find((f) => f.id === activeFloorId);
       if (entry) {
         setFloorHeight(entry.data.height);
@@ -6201,6 +6207,18 @@ export default function RoomBuilder() {
     }
     ceilingApiRef.current = { setEnabled: setActiveFloorCeiling };
 
+    // toggles ceiling for any layer row directly (not just the active
+    // floor), so each row's own checkbox works without switching floors.
+    function toggleFloorCeiling(id) {
+      const entry = floors.find((f) => f.id === id);
+      if (!entry) return;
+      entry.data.ceilingEnabled = !entry.data.ceilingEnabled;
+      if (id === activeFloorId) rebuild();
+      else rebuildFloorEntry(entry, false);
+      syncFloorsToReact();
+    }
+    toggleFloorCeilingRef.current = toggleFloorCeiling;
+
     function updateHeightLabel() {
       const el = heightLabelRef.current;
       if (!el) return;
@@ -6562,7 +6580,6 @@ export default function RoomBuilder() {
   const showToolPanel =
     (tool === "move" && selectedRoomId != null && selectedPanel == null) ||
     (tool === "move" && selectedPanel != null) ||
-    (tool === "move" && selectedRoomId == null && selectedPanel == null) ||
     ((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) ||
     ((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) ||
     tool === "props" ||
@@ -6626,7 +6643,7 @@ export default function RoomBuilder() {
              gap above Recent -- pinned to the exact same top-band color as
              --splitter, not a separately-picked shade. */
           --divider-strong: var(--splitter);
-          --wheel-seam: #ffffff;
+          --wheel-seam: #cccccc;
           --bg-thumb: #ffffff;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
@@ -6731,16 +6748,17 @@ export default function RoomBuilder() {
         .ribbon-divider { width: 1px; align-self: stretch; margin: 8px 0; background: var(--splitter); flex-shrink: 0; }
         .ribbon-group { display: flex; flex-direction: column; gap: 3px; min-width: 108px; flex-shrink: 0; justify-content: center; }
         .ribbon-label {
-          font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--text-secondary); font-weight: 500; white-space: nowrap;
+          font-family: var(--font-mono); font-size: 9.5px; text-transform: none; letter-spacing: 0;
+          color: var(--text-secondary); font-weight: 500; white-space: nowrap;
         }
         .panel-title {
           font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text-primary); font-weight: 600;
         }
         .layers-scroll { position: absolute; inset: 0; overflow-y: auto; padding: 8px 34px 8px 8px; -webkit-overflow-scrolling: touch; touch-action: pan-y; overscroll-behavior: contain; }
-        .layers-scroll::-webkit-scrollbar { width: 20px; }
-        .layers-scroll::-webkit-scrollbar-thumb { background: rgba(255, 107, 26, 0.55); border-radius: 4px; border: 6px solid transparent; background-clip: padding-box; }
-        .layers-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 107, 26, 0.8); background-clip: padding-box; }
-        .layers-scroll::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+        .layers-scroll::-webkit-scrollbar { width: 6px; }
+        .layers-scroll::-webkit-scrollbar-thumb { background: var(--border-separator); border-radius: 3px; }
+        .layers-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+        .layers-scroll::-webkit-scrollbar-track { background: transparent; }
         .rb-walk-btn {
           width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
           background: var(--bg-floating); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -6950,17 +6968,17 @@ export default function RoomBuilder() {
             cursor: "ew-resize", touchAction: "none", zIndex: 1,
           }}
         />
-        <div style={{ padding: "9px 9px 7px" }}>
+        <div style={{ padding: "12px 12px 9px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span className="panel-title">Layers</span>
             {/* drag a layer row down onto Dup or Del to duplicate/delete
                 *that* layer, or just click either button to act on
                 whichever layer is selected; + always creates a fresh
                 default layer. */}
-            <div style={{ display: "flex", gap: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button
                 className="rb-btn"
-                style={{ padding: "2px 5px", fontSize: 12, flex: "0 0 auto", background: "transparent", border: "none" }}
+                style={{ padding: "2px 4px", fontSize: 13, flex: "0 0 auto", background: "transparent", border: "none" }}
                 onClick={() => addFloorRef.current()}
                 title="Add a new layer with a default room"
               >
@@ -6970,7 +6988,7 @@ export default function RoomBuilder() {
                 ref={dupBtnRef}
                 className="rb-btn"
                 style={{
-                  padding: "2px 6px", fontSize: 9, flex: "0 0 auto",
+                  padding: "2px 7px", fontSize: 9, flex: "0 0 auto",
                   background: dragOverAction === "dup" ? "rgba(255,255,255,0.18)" : "transparent",
                   border: dragOverAction === "dup" ? "1px solid #fff" : "1px solid var(--splitter)",
                 }}
@@ -6983,7 +7001,7 @@ export default function RoomBuilder() {
                 ref={delBtnRef}
                 className="rb-btn"
                 style={{
-                  padding: "2px 6px", fontSize: 9, flex: "0 0 auto",
+                  padding: "2px 7px", fontSize: 9, flex: "0 0 auto",
                   background: dragOverAction === "del" ? "rgba(255,255,255,0.18)" : "transparent",
                   border: dragOverAction === "del" ? "1px solid #fff" : "1px solid var(--splitter)",
                 }}
@@ -7085,7 +7103,7 @@ export default function RoomBuilder() {
                   height={480}
                   style={{ borderRadius: 1, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
                 />
-                <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", height: 56, flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, height: 56, flex: 1, minWidth: 0 }}>
                   {renamingFloorId === id ? (
                     <input
                       autoFocus
@@ -7143,6 +7161,16 @@ export default function RoomBuilder() {
                         title="Isolate this layer (multiple can be isolated together)"
                       />
                     </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
+                      Ceil
+                      <input
+                        type="checkbox"
+                        className="rb-radio"
+                        checked={ceilingFloorIds.includes(id)}
+                        onChange={() => toggleFloorCeilingRef.current(id)}
+                        title="Toggle this layer's ceiling"
+                      />
+                    </label>
                     <button
                       className={`rb-btn ${hiddenIds.includes(id) ? "active" : ""}`}
                       style={{ padding: "1px 5px", fontSize: 8.5 }}
@@ -7182,34 +7210,19 @@ export default function RoomBuilder() {
           />
         </div>
 
-        <div style={{ padding: "12px 11px", display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", gap: 16 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                className="rb-radio"
-                checked={ceilingOn}
-                onChange={(e) => {
-                  pushUndoRef.current();
-                  setCeilingOn(e.target.checked);
-                  ceilingApiRef.current.setEnabled(e.target.checked);
-                }}
-              />
-              Ceiling
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                className="rb-radio"
-                checked={groundOn}
-                onChange={(e) => {
-                  setGroundOn(e.target.checked);
-                  groundApiRef.current.setEnabled(e.target.checked);
-                }}
-              />
-              Ground
-            </label>
-          </div>
+        <div style={{ padding: "12px 12px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              className="rb-radio"
+              checked={groundOn}
+              onChange={(e) => {
+                setGroundOn(e.target.checked);
+                groundApiRef.current.setEnabled(e.target.checked);
+              }}
+            />
+            Ground
+          </label>
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9.5, marginBottom: 4 }}>
               <span>Layer height</span>
@@ -7227,6 +7240,30 @@ export default function RoomBuilder() {
                 const v = parseFloat(e.target.value);
                 setFloorHeight(v);
                 floorHeightApiRef.current.setHeight(v);
+              }}
+            />
+          </div>
+          <div>
+            {/* wall thickness applies to every layer at once (see
+                setActiveFloorThickness), so it lives here rather than in
+                the per-tool floating panel -- it's a whole-building spec,
+                not a transient Wall-tool parameter. */}
+            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9.5, marginBottom: 4 }}>
+              <span>Wall thickness</span>
+              <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)" }}>{wallThickness.toFixed(2)} m</span>
+            </div>
+            <input
+              className="rb-range"
+              type="range"
+              min={0.03}
+              max={3}
+              step={0.01}
+              value={wallThickness}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                setWallThickness(v);
+                wallThicknessApiRef.current.setThickness(v);
               }}
             />
           </div>
@@ -7291,7 +7328,7 @@ export default function RoomBuilder() {
               setOpeningDividers(3);
               setOpeningAxisVertical(true);
               setOpeningAxisHorizontal(false);
-              setDoorHeight(14 * FT);
+              setDoorHeight(12 * FT);
               setDoorSplit(false);
               setPropsShape("cube");
               setCurvedCornersOn(false);
@@ -7391,15 +7428,17 @@ export default function RoomBuilder() {
           or not they apply right now. */}
       <div
         style={{
-          position: "absolute", left: layersPanelWidth + 20, bottom: RIBBON_HEIGHT + 16, zIndex: 5,
-          display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+          position: "absolute", left: layersPanelWidth + 20, bottom: RIBBON_HEIGHT + 20, zIndex: 5,
+          display: "flex", alignItems: "flex-end", gap: 22, flexWrap: "wrap",
           maxWidth: `calc(100% - ${layersPanelWidth + 40}px)`,
-          background: "var(--bg-floating)", border: "1px solid var(--border-control)", borderRadius: 10,
-          padding: "10px 14px", boxShadow: "0 8px 24px rgba(0,0,0,0.28)", backdropFilter: "blur(6px)",
+          // no panel chrome -- text and thin sliders float directly over
+          // the 3D view, same treatment as the color wheel's own
+          // hue/saturation/lightness sliders.
           opacity: showToolPanel ? 1 : 0,
           transform: showToolPanel ? "translateY(0)" : "translateY(8px)",
           pointerEvents: showToolPanel ? "auto" : "none",
           transition: "opacity 0.18s ease, transform 0.18s ease",
+          filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.4))",
         }}
       >
         {tool === "move" && selectedRoomId != null && selectedPanel == null && (
@@ -7418,7 +7457,7 @@ export default function RoomBuilder() {
             <div className="ribbon-group">
               <span className="ribbon-label">Room height &middot; {roomHeight.toFixed(2)} m</span>
               <input
-                className="rb-range"
+                className="rb-bare-range"
                 type="range"
                 min={MIN_WALL_HEIGHT}
                 max={MAX_WALL_HEIGHT}
@@ -7449,7 +7488,7 @@ export default function RoomBuilder() {
                 </label>
               </span>
               <input
-                className="rb-range"
+                className="rb-bare-range"
                 type="range"
                 min={0.1}
                 max={2.5}
@@ -7470,7 +7509,7 @@ export default function RoomBuilder() {
             <span className="ribbon-label">Wall height &middot; {selectedHeight.toFixed(2)} m</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input
-                className="rb-range"
+                className="rb-bare-range"
                 type="range"
                 min={MIN_WALL_HEIGHT}
                 max={MAX_WALL_HEIGHT}
@@ -7487,32 +7526,13 @@ export default function RoomBuilder() {
             </div>
           </div>
         )}
-        {tool === "move" && selectedRoomId == null && selectedPanel == null && (
-          <div className="ribbon-group">
-            <span className="ribbon-label">Thickness &middot; {wallThickness.toFixed(2)} m</span>
-            <input
-              className="rb-range"
-              type="range"
-              min={0.03}
-              max={3}
-              step={0.01}
-              value={wallThickness}
-              onPointerDown={() => pushUndoRef.current()}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                setWallThickness(v);
-                wallThicknessApiRef.current.setThickness(v);
-              }}
-            />
-          </div>
-        )}
         {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
           <div className="ribbon-group">
             <span className="ribbon-label">
               {selectedOpeningId != null ? "Selected window height" : "Opening height"} &middot; {(openingHeight / FT).toFixed(2)} ft
             </span>
             <input
-              className="rb-range"
+              className="rb-bare-range"
               type="range"
               min={0}
               max={Math.max(0.2, (floorHeight - 0.1) / FT)}
@@ -7532,7 +7552,7 @@ export default function RoomBuilder() {
           <div className="ribbon-group">
             <span className="ribbon-label">Dividers &middot; {openingDividers}</span>
             <input
-              className="rb-range"
+              className="rb-bare-range"
               type="range"
               min={0}
               max={20}
@@ -7582,7 +7602,7 @@ export default function RoomBuilder() {
               {selectedOpeningId != null ? "Selected door height" : "Door height"} &middot; {(doorHeight / FT).toFixed(2)} ft
             </span>
             <input
-              className="rb-range"
+              className="rb-bare-range"
               type="range"
               min={3}
               max={Math.max(3.2, (floorHeight - 0.05) / FT)}
@@ -7647,7 +7667,7 @@ export default function RoomBuilder() {
             <span className="ribbon-label">Steps &middot; {stairSteps}</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input
-                className="rb-range"
+                className="rb-bare-range"
                 type="range"
                 min={2}
                 max={60}
@@ -7670,7 +7690,7 @@ export default function RoomBuilder() {
             <span className="ribbon-label">Staircase height &middot; {(balconyStairHeight / FT).toFixed(2)} ft</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input
-                className="rb-range"
+                className="rb-bare-range"
                 type="range"
                 min={1}
                 max={Math.max(1.5, (floorHeight - 1.5 * FT) / FT)}
@@ -7692,7 +7712,7 @@ export default function RoomBuilder() {
           <div className="ribbon-group" style={{ minWidth: 220 }}>
             <span className="ribbon-label">Platform width &middot; {(balconyPlatformWidth / FT).toFixed(2)} ft</span>
             <input
-              className="rb-range"
+              className="rb-bare-range"
               type="range"
               min={3}
               max={60}
@@ -7711,7 +7731,7 @@ export default function RoomBuilder() {
           <div className="ribbon-group" style={{ minWidth: 200 }}>
             <span className="ribbon-label">Pillars &middot; {balconyPillarCount}</span>
             <input
-              className="rb-range"
+              className="rb-bare-range"
               type="range"
               min={2}
               max={60}
@@ -7730,7 +7750,7 @@ export default function RoomBuilder() {
           <div className="ribbon-group" style={{ minWidth: 200 }}>
             <span className="ribbon-label">Pillar height &middot; {(balconyPillarHeight / FT).toFixed(2)} ft</span>
             <input
-              className="rb-range"
+              className="rb-bare-range"
               type="range"
               min={1}
               max={50}
