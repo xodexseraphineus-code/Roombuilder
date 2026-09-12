@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Circle, Square, Triangle, Cylinder } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -72,7 +72,12 @@ function hslToHex(h, s, l) {
   const a = s * Math.min(l, 1 - l);
   const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
   const toHex = (x) => Math.round(x * 255);
-  return (toHex(f(0)) << 16) | (toHex(f(4)) << 8) | toHex(f(8));
+  // R=f(0), G=f(8), B=f(4) -- per the standard CSS HSL->RGB formula; the
+  // green/blue channels were swapped here before (f(4) as G, f(8) as B),
+  // which silently mirrored every hue with G != B (e.g. picking "green"
+  // actually produced blue) despite the wheel still looking rainbow-ish
+  // at a glance.
+  return (toHex(f(0)) << 16) | (toHex(f(8)) << 8) | toHex(f(4));
 }
 function hexToCss(hex) { return `#${hex.toString(16).padStart(6, "0")}`; }
 function hexToHsl(hex) {
@@ -114,10 +119,12 @@ function themeColorsFor(hueDeg, sat, midLight = THEME_WALL_MIDLIGHT) {
   const jitter = (range) => (Math.random() - 0.5) * range;
   const tone = (dl, dh = 0, ds = 0) => hslToHex((hueDeg + dh + 360) % 360, clampS(sat + ds), clampL(midLight + dl));
   return {
+    // ranked lightest to darkest: floor lightest, then wall (the second
+    // lightest, not the darkest of the bunch), then stairs, then platform.
     floor: tone(32 + jitter(6), jitter(6), jitter(8)),
-    platform: tone(20 + jitter(6), jitter(10), jitter(8)),
+    wall: tone(22 + jitter(4), 0, jitter(4)),
     stairs: tone(14 + jitter(6), jitter(8), jitter(8)),
-    wall: tone(0 + jitter(3), 0, jitter(4)),
+    platform: tone(6 + jitter(6), jitter(10), jitter(8)),
     sphere: tone(-12 + jitter(8), 14 + jitter(10), jitter(10)),
     cylinder: tone(-6 + jitter(8), 24 + jitter(12), jitter(10)),
     railing: tone(-20 + jitter(6), -16 + jitter(10), jitter(8)),
@@ -152,86 +159,59 @@ const WHEEL_GREY_CELLS = Array.from({ length: WHEEL_GREY_STEPS }, (_, i) => {
   return { step: i, midLight, hex: hslToHex(0, 0, midLight) };
 });
 
+// nudges a hex color's lightness toward white (amt > 0) or black (amt < 0),
+// amt in [-1, 1] -- used to derive the rest of a curated palette's tones
+// (stairs, platform, and the individual prop shapes) from just its four
+// named roles, so every preset only needs to name a wall/floor/railing/
+// prop color and the rest stays visually cohesive with it automatically.
+function liteHex(hex, amt) {
+  const { h, s, l } = hexToHsl(hex);
+  const newL = amt >= 0 ? l + (100 - l) * amt : l + l * amt;
+  return hslToHex(h, s, clampL(newL));
+}
+// builds a full 10-category palette from just the four roles a curated
+// preset actually cares about naming: the wall, the floor, the railing/
+// balcony-hardware accent, and the props' base hue. Stairs reads as a
+// lighter break from the wall; the balcony platform a darker break from
+// the floor; the balcony roof matches the railing (both read as one piece
+// of "hardware" against the room); each prop shape gets a small lightness
+// step off the shared prop hue so a room full of them doesn't look like
+// four copies of the same object.
+function buildPalette(name, wall, floor, railing, prop) {
+  return {
+    name, wall, floor, railing,
+    stairs: liteHex(wall, 0.35),
+    platform: liteHex(floor, -0.28),
+    roof: railing,
+    sphere: prop,
+    cube: liteHex(prop, -0.14),
+    cone: liteHex(prop, 0.18),
+    cylinder: liteHex(prop, -0.26),
+    wheel: [wall, floor, railing, prop],
+  };
+}
 // Curated, hand-picked palettes representing recognizable color-scheme
-// styles (as opposed to the generic hue wheel's one-anchor-point math) --
-// each already defines every target color so they're guaranteed to work
-// together, rather than being derived. `wheel` is what repopulates the
-// disc while this preset is active: four flat quarter-wedges (not the
-// usual twelve sectors) so the palette reads as a small, deliberate set
-// rather than a full spectrum; tapping any lit wedge applies the preset.
+// styles (as opposed to the generic hue wheel's one-anchor-point math),
+// each named for wall/floor/railing/prop straight off the reference
+// mockup's own theme-palette swatches. `wheel` is what repopulates the
+// disc while a preset is active: four flat quarter-wedges (not the usual
+// twelve sectors) so the palette reads as a small, deliberate set rather
+// than a full spectrum; tapping any lit wedge applies the preset.
 const CURATED_PALETTES = [
-  {
-    name: "Mono",
-    wall: 0x8a8a8a, floor: 0xe8e8e8, stairs: 0xb8b8b8, platform: 0x5a5a5a,
-    railing: 0x2a2a2a, roof: 0x1a1a1a, sphere: 0x707070, cube: 0x1a1a1a, cone: 0xc4c4c4, cylinder: 0x9c9c9c,
-    wheel: [0xf0f0f0, 0xb0b0b0, 0x707070, 0x2a2a2a],
-  },
-  {
-    name: "Ocean",
-    wall: 0x3a6b8a, floor: 0xd4e8ec, stairs: 0x8ab8cc, platform: 0x24506b,
-    railing: 0x14304a, roof: 0xe8955c, sphere: 0x4a9bb8, cube: 0x0f2438, cone: 0x6fc9d4, cylinder: 0x1a4a5e,
-    wheel: [0xd4e8ec, 0x6fc9d4, 0x3a6b8a, 0x14304a],
-  },
-  {
-    name: "Forest",
-    wall: 0x4a6b45, floor: 0xd8e4cc, stairs: 0x8aab7c, platform: 0x334d2f,
-    railing: 0x1f3320, roof: 0xb8724a, sphere: 0x6b8c5a, cube: 0x1a2818, cone: 0x9cb87c, cylinder: 0x2f4d2a,
-    wheel: [0xd8e4cc, 0x9cb87c, 0x4a6b45, 0x1f3320],
-  },
-  {
-    name: "Desert",
-    wall: 0xc98a5c, floor: 0xf0dcc0, stairs: 0xe0b88a, platform: 0xa8663c,
-    railing: 0x6b3d24, roof: 0x5c8ab0, sphere: 0xd4a06c, cube: 0x4a2818, cone: 0xe8c495, cylinder: 0x8a5230,
-    wheel: [0xf0dcc0, 0xe0b88a, 0xc98a5c, 0x6b3d24],
-  },
-  {
-    name: "Pastel",
-    wall: 0xb8cce0, floor: 0xfaf3e8, stairs: 0xf0c9d8, platform: 0x9cc9c4,
-    railing: 0x8a9cc0, roof: 0xf5d9a8, sphere: 0xe0cdec, cube: 0xa8c9d4, cone: 0xf5e0a8, cylinder: 0xf0c9d8,
-    wheel: [0xfaf3e8, 0xe0cdec, 0xb8cce0, 0x9cc9c4],
-  },
-  {
-    name: "Rich",
-    wall: 0x2e5b4e, floor: 0xb89ccc, stairs: 0x4a8577, platform: 0x1a3d34,
-    railing: 0x0f1f1c, roof: 0x8b2942, sphere: 0x6b1a8b, cube: 0x0f1f1c, cone: 0x1a3a6b, cylinder: 0x9c2f4a,
-    wheel: [0x2e5b4e, 0x6b1a8b, 0x8b2942, 0x1a3a6b],
-  },
-  {
-    name: "Neon",
-    wall: 0xff2ec4, floor: 0xf0f0f0, stairs: 0x2ee6ff, platform: 0xccff2e,
-    railing: 0x1a1a1a, roof: 0xffe62e, sphere: 0x2eff8f, cube: 0x1a1a1a, cone: 0xff6b2e, cylinder: 0x8f2eff,
-    wheel: [0xff2ec4, 0x2ee6ff, 0xccff2e, 0xffe62e],
-  },
-  {
-    name: "Kitchen",
-    wall: 0xede4d3, floor: 0xc9a876, stairs: 0xd9c9a8, platform: 0x8a6b45,
-    railing: 0x3a3530, roof: 0x5c7a6b, sphere: 0xb8443a, cube: 0x2a2622, cone: 0xe0d4b8, cylinder: 0x7a8a72,
-    wheel: [0xede4d3, 0xc9a876, 0xb8443a, 0x5c7a6b],
-  },
-  {
-    name: "Office",
-    wall: 0xd4d0c4, floor: 0xa89c88, stairs: 0xc4bcac, platform: 0x6b6458,
-    railing: 0x2a2824, roof: 0x3a5f7a, sphere: 0x8a8478, cube: 0x1a1816, cone: 0xb8b0a0, cylinder: 0x4a4640,
-    wheel: [0xd4d0c4, 0xa89c88, 0x6b6458, 0x2a2824],
-  },
-  {
-    name: "Living room",
-    wall: 0xc4a888, floor: 0xe8dcc8, stairs: 0xd4bc9c, platform: 0x8a6b4a,
-    railing: 0x4a3826, roof: 0x5c7458, sphere: 0xb08560, cube: 0x2e2018, cone: 0xecd9b0, cylinder: 0x6b503a,
-    wheel: [0xe8dcc8, 0xd4bc9c, 0xc4a888, 0x8a6b4a],
-  },
-  {
-    name: "Bedroom",
-    wall: 0xc9b8cc, floor: 0xf0e8ec, stairs: 0xddc9d9, platform: 0x9c8aa0,
-    railing: 0x4a3d4e, roof: 0xa8c4a0, sphere: 0xb89cc0, cube: 0x2e2630, cone: 0xe0d4e0, cylinder: 0x807088,
-    wheel: [0xf0e8ec, 0xddc9d9, 0xc9b8cc, 0x9c8aa0],
-  },
-  {
-    name: "Exterior",
-    wall: 0x9c9488, floor: 0xc4bcac, stairs: 0xb0a894, platform: 0x6b6458,
-    railing: 0x2a2824, roof: 0x3a4a3a, sphere: 0x7a7268, cube: 0x1a1816, cone: 0xd4ccb8, cylinder: 0x4a4438,
-    wheel: [0xc4bcac, 0xb0a894, 0x9c9488, 0x6b6458],
-  },
+  buildPalette("Mono", 0x9a9a9a, 0xe8e8e8, 0x2a2a2a, 0x5c5c5c),
+  buildPalette("Ocean", 0x3f7ea6, 0xdcecf0, 0x123a52, 0x6fc7d4),
+  buildPalette("Forest", 0x5a7a4a, 0xe2e8d4, 0x233620, 0x8fae5a),
+  buildPalette("Desert", 0xd99a5c, 0xf3e0c4, 0x7a4326, 0xe0603c),
+  buildPalette("Pastel", 0xaed4e0, 0xfbeee0, 0x8fb8ae, 0xf3b6c2),
+  buildPalette("Rich", 0x1f3d3a, 0xcbb8dc, 0x140f1a, 0x8b1f3d),
+  // explicit per-role mapping requested for Neon: pink walls, orange-yellow
+  // floor, neon-blue railing, neon-green props.
+  buildPalette("Neon", 0xff2ec4, 0xffb020, 0x2ee6ff, 0x39ff6a),
+  buildPalette("Kitchen", 0xd9cfc0, 0x8a6b4a, 0x2e2a26, 0xb3453a),
+  buildPalette("Office", 0xc7c2b8, 0x8f8a7c, 0x24211d, 0x4a6fa5),
+  buildPalette("Living room", 0xc9a978, 0xe8d9c0, 0x4a3826, 0x7a8f6e),
+  buildPalette("Bedroom", 0xcdb8cc, 0xf1e7ec, 0x4a3d4e, 0xa88bb8),
+  buildPalette("Exterior", 0x9c9488, 0xb0a894, 0x2a2824, 0x5c7a4a),
 ];
 
 // a short synthesized click (Web Audio, no audio file to fetch) for wall/
@@ -1611,8 +1591,13 @@ export default function RoomBuilder() {
     // balcony pillars/handrail get their own material (30% darker than the
     // wall color) rather than reusing wallMat directly, so darkening them
     // doesn't also darken every actual wall.
-    const pillarMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.7), roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
-    const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.7).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02, envMapIntensity: 0.35 });
+    // dark metal by default -- reads better against a concrete finish than
+    // a wall-tinted panel did; a room theme still tints .color on top (a
+    // hue-tinted metal rail, e.g. neon blue), but the low roughness/high
+    // metalness stays fixed so it always looks like metal hardware.
+    const PILLAR_DEFAULT_COLOR = 0x26282b;
+    const pillarMat = new THREE.MeshStandardMaterial({ color: PILLAR_DEFAULT_COLOR, roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5 });
+    const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(PILLAR_DEFAULT_COLOR).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.32, metalness: 0.8, envMapIntensity: 0.5 });
     // the balcony platform gets its own material too -- a room theme colors
     // it independently from the room's own floor, rather than the platform
     // just always matching whatever the floor happens to be.
@@ -2582,7 +2567,7 @@ export default function RoomBuilder() {
       });
 
       if (buildingActiveFloor && hudRef.current) {
-        hudRef.current.textContent = `${w.toFixed(1)} m \u00d7 ${d.toFixed(1)} m  \u00b7  ${state.height.toFixed(1)} m high`;
+        hudRef.current.textContent = `${w.toFixed(1)} m\u00a0\u00a0\u00d7\u00a0\u00a0${d.toFixed(1)} m\u00a0\u00a0\u00b7\u00a0\u00a0${state.height.toFixed(1)} m high`;
       }
 
       if (buildingActiveFloor) {
@@ -3374,7 +3359,6 @@ export default function RoomBuilder() {
         propMats[kind].color.set(colors ? colors[kind] : PROP_DEFAULT_COLORS[kind]);
       });
     }
-    const PILLAR_DEFAULT_COLOR = new THREE.Color(COLORS.wall).multiplyScalar(0.7).getHex();
     // the room color theme: either one anchor point (a hue-wheel cell, or a
     // step on the grey ring) expanding into a related palette via
     // themeColorsFor, or a curated named preset supplying every color
@@ -6174,11 +6158,12 @@ export default function RoomBuilder() {
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
         [data-theme="dark"] {
-          --bg-window: #1e1e1e;
+          --bg-window: #171718;
           --bg-panel: #2c2c2e;
-          --bg-panel-translucent: rgba(44, 44, 46, 0.82);
+          --bg-panel-translucent: #2c2c2e;
+          --bg-strip: #222224;
           --bg-control: #3a3a3c;
-          --bg-control-hover: #48484a;
+          --bg-control-hover: #444446;
           --bg-control-pressed: #58585a;
           --bg-floating: rgba(30, 30, 30, 0.78);
           --border-separator: rgba(84, 84, 88, 0.65);
@@ -6196,7 +6181,8 @@ export default function RoomBuilder() {
              than a cooler, more neutral system grey. */
           --bg-window: #eae9e4;
           --bg-panel: #f4f3ee;
-          --bg-panel-translucent: rgba(244, 243, 238, 0.85);
+          --bg-panel-translucent: #f4f3ee;
+          --bg-strip: #e8e6df;
           --bg-control: #ffffff;
           --bg-control-hover: #e7e5de;
           --bg-control-pressed: #d6d3ca;
@@ -6224,15 +6210,17 @@ export default function RoomBuilder() {
              Teenage-Engineering-tool feel. */
           --font-system: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
           --font-mono: "Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
-          /* neutral grey selection fill -- a darker/lighter grey against the
-             panel's own background, used for the active ribbon button and
-             the selected layer row, in place of a solid orange fill. */
+          /* neutral grey selection fill, used for the selected layer row */
           --bg-selected: rgba(20, 18, 12, 0.16);
           --bg-selected-hover: rgba(20, 18, 12, 0.22);
+          /* a dark selection ring around a plain text/icon option -- the
+             mockup's own "no button chrome, just a ring when picked" look */
+          --ring-selected: rgba(20, 18, 12, 0.55);
         }
         [data-theme="dark"] {
           --bg-selected: rgba(255, 255, 255, 0.16);
           --bg-selected-hover: rgba(255, 255, 255, 0.24);
+          --ring-selected: rgba(255, 255, 255, 0.5);
         }
         .rb-btn {
           font-family: var(--font-system);
@@ -6241,15 +6229,16 @@ export default function RoomBuilder() {
           letter-spacing: 0;
           padding: 6px 9px;
           border-radius: 6px;
-          border: 0.5px solid var(--border-control);
-          background: var(--bg-control);
-          color: var(--text-primary);
+          border: none;
+          background: transparent;
+          color: var(--text-secondary);
           cursor: pointer;
-          transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+          transition: box-shadow 0.12s ease, color 0.12s ease, background 0.12s ease;
           white-space: nowrap;
         }
-        .rb-btn:hover { background: var(--bg-control-hover); }
-        .rb-btn.active { background: var(--bg-selected); border-color: var(--border-control); color: var(--text-primary); font-weight: 600; }
+        .rb-btn:hover { background: var(--bg-control-hover); color: var(--text-primary); }
+        .rb-btn.active { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ring-selected); color: var(--text-primary); font-weight: 600; }
+        .rb-btn.active:hover { background: var(--bg-control-hover); }
         .rb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         .rb-btn:disabled { opacity: 0.35; cursor: default; }
         .rb-input {
@@ -6274,8 +6263,8 @@ export default function RoomBuilder() {
         .ribbon {
           position: absolute; left: 0; right: 0; bottom: 0; height: ${RIBBON_HEIGHT}px;
           display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden;
-          background: var(--bg-panel-translucent); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-          border-top: 0.5px solid var(--border-separator);
+          background: var(--bg-strip);
+          border-top: 1px solid var(--splitter);
         }
         .ribbon-section { display: flex; align-items: center; gap: 12px; padding: 0 12px; flex-shrink: 0; }
         .ribbon-divider { width: 1px; align-self: stretch; margin: 8px 0; background: var(--splitter); flex-shrink: 0; }
@@ -6425,8 +6414,8 @@ export default function RoomBuilder() {
       <div
         style={{
           position: "absolute", top: TOPBAR_HEIGHT + 8, left: 16, bottom: RIBBON_HEIGHT + 16, width: layersPanelWidth,
-          background: "var(--bg-panel-translucent)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
-          border: "0.5px solid var(--border-separator)", borderRadius: 10,
+          background: "var(--bg-panel)",
+          border: "1px solid var(--splitter)", borderRadius: 10,
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}
       >
@@ -6448,7 +6437,7 @@ export default function RoomBuilder() {
             cursor: "ew-resize", touchAction: "none", zIndex: 1,
           }}
         />
-        <div style={{ padding: "9px 9px 7px", borderBottom: "0.5px solid var(--border-separator)" }}>
+        <div style={{ padding: "9px 9px 7px", borderBottom: "1px solid var(--splitter)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span className="panel-title">Layers</span>
             <div style={{ display: "flex", gap: 3 }}>
@@ -6627,7 +6616,7 @@ export default function RoomBuilder() {
           />
         </div>
 
-        <div style={{ padding: "9px 11px", borderTop: "0.5px solid var(--border-separator)" }}>
+        <div style={{ padding: "9px 11px", borderTop: "1px solid var(--splitter)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9 }}>
             <span>Layer height</span>
             <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)" }}>{floorHeight.toFixed(2)} m</span>
@@ -6675,18 +6664,19 @@ export default function RoomBuilder() {
       </div>
 
       {/* TOP: full-width row so the resizable layers panel below can never
-          overlap these controls, no matter how wide it's dragged -- a
-          translucent band behind it, same treatment as the bottom ribbon,
-          rather than the buttons floating bare over the 3D view. The band
-          itself stays pointer-events:none (like before) so the gap between
-          the two button clusters still lets you orbit the camera through it. */}
+          overlap these controls, no matter how wide it's dragged -- a flat
+          band behind it (a shade darker than the layers panel below), same
+          treatment as the bottom ribbon, rather than the buttons floating
+          bare over the 3D view. The band itself stays pointer-events:none
+          (like before) so the gap between the two button clusters still
+          lets you orbit the camera through it. */}
       <div
         style={{
           position: "absolute", top: 0, left: 0, right: 0, height: TOPBAR_HEIGHT,
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "0 12px", gap: 12, pointerEvents: "none",
-          background: "var(--bg-panel-translucent)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
-          borderBottom: "0.5px solid var(--border-separator)",
+          background: "var(--bg-strip)",
+          borderBottom: "1px solid var(--splitter)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
@@ -6813,7 +6803,7 @@ export default function RoomBuilder() {
           any themed chrome panel, so they stay a fixed light color in both
           themes rather than following --text-secondary/tertiary (which
           would go dark-on-dark and vanish in light mode). */}
-      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.7)" : "rgba(255,255,255,0.75)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }} />
+      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.7)" : "rgba(255,255,255,0.75)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 11.5, letterSpacing: "0.01em", fontVariantNumeric: "tabular-nums" }} />
       <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 8.5, textAlign: "right" }}>
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
@@ -6829,7 +6819,7 @@ export default function RoomBuilder() {
             style={{
               padding: 0, width: 22, height: 22, minWidth: 22, borderRadius: "50%", overflow: "hidden",
               background: "conic-gradient(from 0deg, #e5484d, #f2c230, #4caf6d, #4a90d9, #9b5de5, #e5484d)",
-              boxShadow: themeWheelOpen ? "0 0 0 2px var(--accent)" : "none",
+              boxShadow: themeWheelOpen ? "0 0 0 2px var(--ring-selected)" : "none",
             }}
           />
           <button
@@ -6846,7 +6836,7 @@ export default function RoomBuilder() {
                 key={i}
                 style={{
                   background: bg, borderRadius: 1,
-                  outline: buildingMaterialIndex === i ? "1px solid var(--accent)" : "none",
+                  outline: buildingMaterialIndex === i ? "1px solid var(--ring-selected)" : "none",
                   outlineOffset: -1,
                 }}
               />
@@ -7061,9 +7051,9 @@ export default function RoomBuilder() {
               <span className="ribbon-label">Prop shape</span>
               <div style={{ display: "flex", gap: 6 }}>
                 {[
-                  { key: "sphere", Icon: Circle },
-                  { key: "cube", Icon: Square },
-                  { key: "cone", Icon: Triangle },
+                  { key: "sphere", Icon: Globe },
+                  { key: "cube", Icon: Box },
+                  { key: "cone", Icon: Cone },
                   { key: "cylinder", Icon: Cylinder },
                 ].map(({ key: s, Icon }) => (
                   <button
