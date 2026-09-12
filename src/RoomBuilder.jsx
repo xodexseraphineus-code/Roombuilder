@@ -475,19 +475,22 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
               name is still there on hover (see the title above) rather
               than cluttering the hub visually. */}
           <span style={{ fontSize: 15, lineHeight: 1, color: "#ffffff", pointerEvents: "none", fontWeight: 300 }}>+</span>
-          <button
-            onClick={(e) => { e.stopPropagation(); onClose(); }}
-            onPointerDown={(e) => e.stopPropagation()}
-            title="Close"
-            style={{
-              position: "absolute", top: -5, right: -5, width: 16, height: 16, borderRadius: "50%", zIndex: 2,
-              border: "1px solid var(--border-control)", background: "var(--bg-panel)", color: "var(--text-primary)",
-              cursor: "pointer", fontSize: 10, lineHeight: 1, padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >
-            &times;
-          </button>
         </div>
+        {/* close button lives outside the disc, upper-right, rather than
+            crowding the hub -- the hub is just drag/cycle now. */}
+        <button
+          onClick={(e) => { e.stopPropagation(); onClose(); }}
+          onPointerDown={(e) => e.stopPropagation()}
+          title="Close"
+          style={{
+            position: "absolute", top: -10, right: -10, width: 24, height: 24, borderRadius: "50%", zIndex: 2,
+            border: "1px solid var(--border-control)", background: "var(--bg-panel)", color: "var(--text-primary)",
+            cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+          }}
+        >
+          &times;
+        </button>
       </div>
       {/* global adjustment sliders -- shift/scale every color the wheel is
           currently showing (and so the next pick applies), without
@@ -555,7 +558,7 @@ export default function RoomBuilder() {
   const [openingAxisHorizontal, setOpeningAxisHorizontal] = useState(false);
   const openingAxisHorizontalRef = useRef(openingAxisHorizontal);
   useEffect(() => { openingAxisHorizontalRef.current = openingAxisHorizontal; }, [openingAxisHorizontal]);
-  const [doorHeight, setDoorHeight] = useState(14 * FT);
+  const [doorHeight, setDoorHeight] = useState(12 * FT);
   const doorHeightRef = useRef(doorHeight);
   useEffect(() => { doorHeightRef.current = doorHeight; }, [doorHeight]);
   const [doorSplit, setDoorSplit] = useState(false);
@@ -4641,20 +4644,12 @@ export default function RoomBuilder() {
         // and drag immediately starts marking the opening's width
         dragState = { type: "pending-cut", panelKey, info, hitPoint: hp, startScreen: { x: e.clientX, y: e.clientY } };
       } else if (toolRef.current === "door") {
-        // doors are a fixed width (6ft), floor to lintel at the current
-        // door-height setting -- a single tap places one centered on the
-        // tap point, no drag needed.
-        pushUndo();
-        const doorWidth = 6 * FT;
-        const u = panelU(info, hp);
-        let u0 = u - doorWidth / 2, u1 = u + doorWidth / 2;
-        if (u0 < info.u0) { u0 = info.u0; u1 = u0 + doorWidth; }
-        if (u1 > info.u1) { u1 = info.u1; u0 = u1 - doorWidth; }
-        if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(panelKey, u0, u1)) {
-          state.openings = state.openings.filter((o) => !(o.panel === panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
-          state.openings.push({ id: idSeq++, panel: panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
-          rebuild();
-        }
+        // a plain tap places a fixed-width (6ft) door centered on the tap
+        // point, floor to the current door-height setting; tap AND drag
+        // instead draws a door whose width matches the drag distance --
+        // either way floor-to-doorHeight, never scaled by the drag's
+        // vertical extent.
+        dragState = { type: "pending-door", panelKey, info, hitPoint: hp, startScreen: { x: e.clientX, y: e.clientY } };
       } else if (toolRef.current === "props" && propsShapeRef.current === "balcony") {
         // the staircase-balcony assembly is drawn along a wall exactly like
         // a window (tap and drag to mark its span), not placed on the
@@ -4840,7 +4835,22 @@ export default function RoomBuilder() {
           const info = dragState.info;
           const u = panelU(info, dragState.hitPoint);
           dragState = { type: "opening-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
-          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: openingHeightRef.current };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: openingHeightRef.current, bottomOverride: 0 };
+          rebuild();
+        }
+        return;
+      }
+
+      if (dragState.type === "pending-door") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "door-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: doorHeightRef.current, isDoor: true };
           rebuild();
         }
         return;
@@ -4915,7 +4925,16 @@ export default function RoomBuilder() {
         if (!info) return;
         const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
         dragState.u1 = u;
-        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: openingHeightRef.current };
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: openingHeightRef.current, bottomOverride: 0 };
+        rebuild();
+      } else if (dragState.type === "door-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: doorHeightRef.current, isDoor: true };
         rebuild();
       } else if (dragState.type === "balcony-draw") {
         const pt = new THREE.Vector3();
@@ -5142,6 +5161,20 @@ export default function RoomBuilder() {
         selectPanelForHeight(dragState.panelKey);
       } else if (dragState.type === "pending-cut") {
         selectPanelForHeight(dragState.panelKey);
+      } else if (dragState.type === "pending-door") {
+        // a tap with no meaningful drag -- place the fixed-width default
+        // door centered on the tap point, same as the old tap-only behavior.
+        pushUndo();
+        const info = dragState.info;
+        const doorWidth = 6 * FT;
+        const u = panelU(info, dragState.hitPoint);
+        let u0 = u - doorWidth / 2, u1 = u + doorWidth / 2;
+        if (u0 < info.u0) { u0 = info.u0; u1 = u0 + doorWidth; }
+        if (u1 > info.u1) { u1 = info.u1; u0 = u1 - doorWidth; }
+        if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
+          state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
+          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
+        }
       } else if (dragState.type === "select-drag") {
         const u0 = Math.min(dragState.u0, dragState.u1);
         const u1 = Math.max(dragState.u0, dragState.u1);
@@ -5167,9 +5200,20 @@ export default function RoomBuilder() {
           // window over a narrower one simply supersedes it.
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
           state.openings.push({
-            id: idSeq++, panel: dragState.panelKey, u0, u1, height: openingHeightRef.current, dividers: openingDividersRef.current,
+            // floor-anchored (bottomOverride 0) rather than vertically
+            // centered in the wall, which is what a bare `height` with no
+            // override falls back to.
+            id: idSeq++, panel: dragState.panelKey, u0, u1, height: openingHeightRef.current, bottomOverride: 0, dividers: openingDividersRef.current,
             dividerAxis: openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical",
           });
+        }
+        previewOpening = null;
+      } else if (dragState.type === "door-draw") {
+        const u0 = Math.min(dragState.u0, dragState.u1);
+        const u1 = Math.max(dragState.u0, dragState.u1);
+        if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
+          state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
+          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
         }
         previewOpening = null;
       } else if (dragState.type === "balcony-draw") {
@@ -5703,7 +5747,7 @@ export default function RoomBuilder() {
         const u0 = center - winW / 2, u1 = center + winW / 2;
         if (wouldOverlapBumpout(wall, u0, u1)) continue;
         state.openings = state.openings.filter((o) => !(o.panel === wall && rangesOverlap(u0, u1, o.u0, o.u1)));
-        state.openings.push({ id: idSeq++, panel: wall, u0, u1, height: DEFAULT_OPENING_HEIGHT, dividers: 1, dividerAxis: "vertical" });
+        state.openings.push({ id: idSeq++, panel: wall, u0, u1, height: DEFAULT_OPENING_HEIGHT, bottomOverride: 0, dividers: 1, dividerAxis: "vertical" });
       }
       rebuild();
     }
@@ -6549,7 +6593,7 @@ export default function RoomBuilder() {
              gap above Recent -- pinned to the exact same top-band color as
              --splitter, not a separately-picked shade. */
           --divider-strong: var(--splitter);
-          --wheel-seam: #ffffff;
+          --wheel-seam: #000000;
           --bg-control: #3a3a3c;
           --bg-control-hover: #444446;
           --bg-control-pressed: #58585a;
@@ -6582,7 +6626,7 @@ export default function RoomBuilder() {
              gap above Recent -- pinned to the exact same top-band color as
              --splitter, not a separately-picked shade. */
           --divider-strong: var(--splitter);
-          --wheel-seam: #000000;
+          --wheel-seam: #ffffff;
           --bg-thumb: #ffffff;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
@@ -6909,6 +6953,46 @@ export default function RoomBuilder() {
         <div style={{ padding: "9px 9px 7px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span className="panel-title">Layers</span>
+            {/* drag a layer row down onto Dup or Del to duplicate/delete
+                *that* layer, or just click either button to act on
+                whichever layer is selected; + always creates a fresh
+                default layer. */}
+            <div style={{ display: "flex", gap: 4 }}>
+              <button
+                className="rb-btn"
+                style={{ padding: "2px 5px", fontSize: 12, flex: "0 0 auto", background: "transparent", border: "none" }}
+                onClick={() => addFloorRef.current()}
+                title="Add a new layer with a default room"
+              >
+                +
+              </button>
+              <button
+                ref={dupBtnRef}
+                className="rb-btn"
+                style={{
+                  padding: "2px 6px", fontSize: 9, flex: "0 0 auto",
+                  background: dragOverAction === "dup" ? "rgba(255,255,255,0.18)" : "transparent",
+                  border: dragOverAction === "dup" ? "1px solid #fff" : "1px solid var(--splitter)",
+                }}
+                onClick={() => duplicateFloorRef.current()}
+                title="Duplicate the selected layer -- or drag a layer row down onto this button"
+              >
+                Dup
+              </button>
+              <button
+                ref={delBtnRef}
+                className="rb-btn"
+                style={{
+                  padding: "2px 6px", fontSize: 9, flex: "0 0 auto",
+                  background: dragOverAction === "del" ? "rgba(255,255,255,0.18)" : "transparent",
+                  border: dragOverAction === "del" ? "1px solid #fff" : "1px solid var(--splitter)",
+                }}
+                onClick={() => deleteFloorRef.current()}
+                title="Delete the selected layer -- or drag a layer row down onto this button"
+              >
+                Del
+              </button>
+            </div>
           </div>
         </div>
 
@@ -7099,46 +7183,6 @@ export default function RoomBuilder() {
         </div>
 
         <div style={{ padding: "12px 11px", display: "flex", flexDirection: "column", gap: 12 }}>
-          {/* its own little row of layer actions -- drag a layer row down
-              onto Dup or Del to duplicate/delete *that* layer, or just
-              click either button to act on whichever layer is selected;
-              + always creates a fresh default layer. */}
-          <div style={{ display: "flex", gap: 4 }}>
-            <button
-              className="rb-btn"
-              style={{ padding: "3px 6px", fontSize: 11, flex: "0 0 auto", background: "transparent", border: "none" }}
-              onClick={() => addFloorRef.current()}
-              title="Add a new layer with a default room"
-            >
-              +
-            </button>
-            <button
-              ref={dupBtnRef}
-              className="rb-btn"
-              style={{
-                padding: "3px 6px", fontSize: 9, flex: 1,
-                background: dragOverAction === "dup" ? "rgba(255,255,255,0.18)" : "transparent",
-                border: dragOverAction === "dup" ? "1px solid #fff" : "1px solid var(--splitter)",
-              }}
-              onClick={() => duplicateFloorRef.current()}
-              title="Duplicate the selected layer -- or drag a layer row down onto this button"
-            >
-              Dup
-            </button>
-            <button
-              ref={delBtnRef}
-              className="rb-btn"
-              style={{
-                padding: "3px 6px", fontSize: 9, flex: 1,
-                background: dragOverAction === "del" ? "rgba(255,255,255,0.18)" : "transparent",
-                border: dragOverAction === "del" ? "1px solid #fff" : "1px solid var(--splitter)",
-              }}
-              onClick={() => deleteFloorRef.current()}
-              title="Delete the selected layer -- or drag a layer row down onto this button"
-            >
-              Del
-            </button>
-          </div>
           <div style={{ display: "flex", gap: 16 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input
@@ -7347,10 +7391,11 @@ export default function RoomBuilder() {
           or not they apply right now. */}
       <div
         style={{
-          position: "absolute", left: 160, bottom: RIBBON_HEIGHT + 10, zIndex: 5,
-          display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", maxWidth: "min(900px, calc(100% - 200px))",
+          position: "absolute", left: layersPanelWidth + 20, bottom: RIBBON_HEIGHT + 16, zIndex: 5,
+          display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+          maxWidth: `calc(100% - ${layersPanelWidth + 40}px)`,
           background: "var(--bg-floating)", border: "1px solid var(--border-control)", borderRadius: 10,
-          padding: "9px 12px", boxShadow: "0 8px 24px rgba(0,0,0,0.28)", backdropFilter: "blur(6px)",
+          padding: "10px 14px", boxShadow: "0 8px 24px rgba(0,0,0,0.28)", backdropFilter: "blur(6px)",
           opacity: showToolPanel ? 1 : 0,
           transform: showToolPanel ? "translateY(0)" : "translateY(8px)",
           pointerEvents: showToolPanel ? "auto" : "none",
@@ -7745,21 +7790,11 @@ export default function RoomBuilder() {
             onClick={() => setBuildingMaterialIndex((i) => (i + 1) % BUILDING_MATERIAL_NAMES.length)}
             title={`Finish: ${BUILDING_MATERIAL_NAMES[buildingMaterialIndex]} (click to cycle: ${BUILDING_MATERIAL_NAMES.join(", ")}) -- an overlay on the current theme color, except concrete which keeps its own grey`}
             style={{
-              padding: 2, width: 22, height: 22, minWidth: 22, display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr", gridTemplateRows: "1fr 1fr", gap: 1, overflow: "hidden",
+              padding: 0, width: 28, height: 28, minWidth: 28, borderRadius: "50%", overflow: "hidden",
+              background: "conic-gradient(from 0deg, #9a9a9a 0turn 0.25turn, #232323 0.25turn 0.5turn, #f2c230 0.5turn 0.75turn, #f5f5f2 0.75turn 1turn)",
+              border: "1px solid var(--border-control)",
             }}
-          >
-            {["#d8d5cf", "#93999c", "linear-gradient(135deg, #eef0f2, #8a8d92)", "#f0eee8", "#e9e9e4", "#a87c4f"].map((bg, i) => (
-              <span
-                key={i}
-                style={{
-                  background: bg, borderRadius: 1,
-                  outline: buildingMaterialIndex === i ? "1px solid var(--ring-selected)" : "none",
-                  outlineOffset: -1,
-                }}
-              />
-            ))}
-          </button>
+          />
           <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
           <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
           <button className={`rb-btn ${tool === "door" ? "active" : ""}`} onClick={() => setTool("door")}>Door</button>
