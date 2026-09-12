@@ -380,10 +380,11 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
   const hueSpan = 360 / WHEEL_HUE_COUNT;
   const greySpan = 360 / WHEEL_GREY_STEPS;
   const ringDepth = (discR1 - discR0) / WHEEL_TINT_RINGS;
-  // thin white seams between wedges and rings, matching the reference's
-  // own grid of separated cells instead of cells sandwiched flush together.
-  const WEDGE_GAP_DEG = 2.2;
-  const RING_GAP = 1.5;
+  // seams between wedges are drawn as a constant-width stroke on each cell
+  // (see WHEEL_SEAM below), not a geometric angle/radius gap -- an angular
+  // gap widens with radius (arc length scales with r), which is what was
+  // reading as "triangular wedges" between cells instead of a uniform
+  // single-pixel line.
 
   const preset = presetIndex > 0 ? CURATED_PALETTES[presetIndex - 1] : null;
   const isActiveCell = (hueDeg, ring) => activeTheme && activeTheme.type === "hue" && activeTheme.hueDeg === hueDeg && activeTheme.ring === ring;
@@ -414,11 +415,6 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
           onPointerDown={startSpin}
           onMouseDown={(e) => e.preventDefault()}
         >
-          {/* a solid backing disc so the gaps between wedges always read as
-              clean white seams, matching the reference, regardless of
-              whatever's showing through behind the wheel (dark 3D viewport
-              included) rather than the seam color depending on theme. */}
-          <circle cx={cx} cy={cy} r={discR1} fill="#f7f7f7" />
           <circle cx={cx} cy={cy} r={discR1} fill="transparent" style={{ cursor: "grab" }} />
           <g transform={`rotate(${rotation} ${cx} ${cy})`} style={{ cursor: "grab", touchAction: "none" }}>
             {preset
@@ -427,9 +423,9 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
                   return (
                     <path
                       key={`preset${slice}`}
-                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, WEDGE_GAP_DEG)}
+                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, 0)}
                       fill={hexToCss(adj(hex))}
-                      stroke={isActivePreset(slice) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
+                      stroke={isActivePreset(slice) ? "var(--accent)" : "var(--wheel-seam)"}
                       strokeWidth={isActivePreset(slice) ? 1.5 : 1}
                       style={{ cursor: "pointer" }}
                       onClick={() => pick({ type: "preset", name: preset.name, slice })}
@@ -441,10 +437,10 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
               : WHEEL_DISC_CELLS.map((cell) => (
                   <path
                     key={`h${cell.hue}-r${cell.ring}`}
-                    d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth + RING_GAP / 2, discR0 + (cell.ring + 1) * ringDepth - RING_GAP / 2, cell.hueDeg - 90, hueSpan, WEDGE_GAP_DEG)}
+                    d={ringWedgePath(cx, cy, discR0 + cell.ring * ringDepth, discR0 + (cell.ring + 1) * ringDepth, cell.hueDeg - 90, hueSpan, 0)}
                     fill={hexToCss(adj(cell.hex))}
-                    stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "rgba(0,0,0,0.1)"}
-                    strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 0.6}
+                    stroke={isActiveCell(cell.hueDeg, cell.ring) ? "var(--accent)" : "var(--wheel-seam)"}
+                    strokeWidth={isActiveCell(cell.hueDeg, cell.ring) ? 1.75 : 1}
                     style={{ cursor: "pointer" }}
                     onClick={() => pick({ type: "hue", hueDeg: cell.hueDeg, ring: cell.ring })}
                   >
@@ -454,10 +450,10 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
             {WHEEL_GREY_CELLS.map((g) => (
               <path
                 key={`grey${g.step}`}
-                d={ringWedgePath(cx, cy, greyR0, greyR1 - RING_GAP, g.step * greySpan - 90, greySpan, WEDGE_GAP_DEG)}
+                d={ringWedgePath(cx, cy, greyR0, greyR1, g.step * greySpan - 90, greySpan, 0)}
                 fill={hexToCss(adjustHex(g.hex, 0, 1, lightMul))}
-                stroke={isActiveGrey(g.step) ? "var(--accent)" : "rgba(0,0,0,0.15)"}
-                strokeWidth={isActiveGrey(g.step) ? 1.5 : 0.35}
+                stroke={isActiveGrey(g.step) ? "var(--accent)" : "var(--wheel-seam)"}
+                strokeWidth={isActiveGrey(g.step) ? 1.5 : 1}
                 style={{ cursor: "pointer" }}
                 onClick={() => pick({ type: "grey", step: g.step, midLight: g.midLight })}
               >
@@ -6145,9 +6141,10 @@ export default function RoomBuilder() {
     };
 
     function setActiveFloorThickness(t) {
-      const entry = floors.find((f) => f.id === activeFloorId);
-      if (!entry) return;
-      entry.data.thickness = Math.max(0.03, Math.min(3, t));
+      // applies to every layer's walls, not just the active one -- wall
+      // thickness reads as a whole-building spec, not a per-room override.
+      const clamped = Math.max(0.03, Math.min(3, t));
+      floors.forEach((entry) => { entry.data.thickness = clamped; });
       rebuild();
     }
     wallThicknessApiRef.current = { setThickness: setActiveFloorThickness };
@@ -6514,6 +6511,21 @@ export default function RoomBuilder() {
     if (voiceRecognitionRef.current) voiceRecognitionRef.current.stop();
   }
 
+  // whether the floating tool-parameters panel above the ribbon has
+  // anything to show for the current tool/selection -- mirrors the exact
+  // conditions each param group below renders under, so the panel fades
+  // out fully (rather than sitting there empty) when none of them apply.
+  const showToolPanel =
+    (tool === "move" && selectedRoomId != null && selectedPanel == null) ||
+    (tool === "move" && selectedPanel != null) ||
+    (tool === "move" && selectedRoomId == null && selectedPanel == null) ||
+    ((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) ||
+    ((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) ||
+    tool === "props" ||
+    selectedStairId != null ||
+    selectedBalconyId != null ||
+    selectedOpeningId != null;
+
   return (
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
@@ -6533,12 +6545,11 @@ export default function RoomBuilder() {
           --bg-panel-translucent: var(--bg-content);
           --bg-strip: #1c1c1e;
           --splitter: var(--bg-strip);
-          /* a distinctly-visible hairline for the layer/recent panels'
-             own edge against the 3D view, and the gap above Recent --
-             lighter than the panel fill (the inverse of light mode's
-             darker hairline), not just the subtle top-band-matching
-             --splitter which reads as almost no line at all. */
-          --divider-strong: #59595d;
+          /* the layer/recent panels' own edge against the 3D view, and the
+             gap above Recent -- pinned to the exact same top-band color as
+             --splitter, not a separately-picked shade. */
+          --divider-strong: var(--splitter);
+          --wheel-seam: #ffffff;
           --bg-control: #3a3a3c;
           --bg-control-hover: #444446;
           --bg-control-pressed: #58585a;
@@ -6571,6 +6582,7 @@ export default function RoomBuilder() {
              gap above Recent -- pinned to the exact same top-band color as
              --splitter, not a separately-picked shade. */
           --divider-strong: var(--splitter);
+          --wheel-seam: #000000;
           --bg-thumb: #ffffff;
           --bg-control: #ffffff;
           --bg-control-hover: #dcdcdc;
@@ -6897,19 +6909,6 @@ export default function RoomBuilder() {
         <div style={{ padding: "9px 9px 7px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span className="panel-title">Layers</span>
-          </div>
-          <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
-            <button className="rb-btn" style={{ padding: "3px 5px", fontSize: 8.5, flex: 1 }} onClick={() => cutFloorRef.current()} title="Cut the selected layer to the clipboard">Cut</button>
-            <button className="rb-btn" style={{ padding: "3px 5px", fontSize: 8.5, flex: 1 }} onClick={() => copyFloorRef.current()} title="Copy the selected layer to the clipboard">Copy</button>
-            <button
-              className="rb-btn"
-              disabled={!hasClipboard}
-              style={{ padding: "3px 5px", fontSize: 8.5, flex: 1 }}
-              onClick={() => pasteFloorRef.current()}
-              title="Paste the clipboard as a new layer"
-            >
-              Paste
-            </button>
           </div>
         </div>
 
@@ -7341,7 +7340,393 @@ export default function RoomBuilder() {
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
 
-      {/* BOTTOM: ribbon -- tools, then context settings, then view options, then everything else */}
+      {/* floating tool-parameters panel -- fades up above the ribbon,
+          roughly aligned over the Wall/Window/Door/Stairs/Props group,
+          showing whatever's relevant to the active tool/selection instead
+          of a fixed row of controls that's always in the ribbon whether
+          or not they apply right now. */}
+      <div
+        style={{
+          position: "absolute", left: 160, bottom: RIBBON_HEIGHT + 10, zIndex: 5,
+          display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", maxWidth: "min(900px, calc(100% - 200px))",
+          background: "var(--bg-floating)", border: "1px solid var(--border-control)", borderRadius: 10,
+          padding: "9px 12px", boxShadow: "0 8px 24px rgba(0,0,0,0.28)", backdropFilter: "blur(6px)",
+          opacity: showToolPanel ? 1 : 0,
+          transform: showToolPanel ? "translateY(0)" : "translateY(8px)",
+          pointerEvents: showToolPanel ? "auto" : "none",
+          transition: "opacity 0.18s ease, transform 0.18s ease",
+        }}
+      >
+        {tool === "move" && selectedRoomId != null && selectedPanel == null && (
+          <>
+            <div className="ribbon-group" style={{ minWidth: 340 }}>
+              <span className="ribbon-label">Room</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="rb-btn" onClick={() => cutRoomRef.current()}>Cut</button>
+                <button className="rb-btn" onClick={() => copyRoomRef.current()}>Copy</button>
+                <button className="rb-btn" disabled={!hasRoomClipboard} onClick={() => pasteRoomRef.current()}>Paste</button>
+                <button className="rb-btn" onClick={() => duplicateRoomRef.current()}>Duplicate</button>
+                <button className="rb-btn" onClick={() => deleteRoomRef.current()}>Delete</button>
+                <button className="rb-btn" onClick={() => switchActiveRoomRef.current(null)}>Done</button>
+              </div>
+            </div>
+            <div className="ribbon-group">
+              <span className="ribbon-label">Room height &middot; {roomHeight.toFixed(2)} m</span>
+              <input
+                className="rb-range"
+                type="range"
+                min={MIN_WALL_HEIGHT}
+                max={MAX_WALL_HEIGHT}
+                step={0.05}
+                value={roomHeight}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setRoomHeight(v);
+                  roomHeightApiRef.current.setHeight(v);
+                }}
+              />
+            </div>
+            <div className="ribbon-group" style={{ minWidth: 190 }}>
+              <span className="ribbon-label">
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    className="rb-radio"
+                    checked={curvedCornersOn}
+                    onChange={(e) => {
+                      pushUndoRef.current();
+                      setCurvedCornersOn(e.target.checked);
+                      curvedCornersApiRef.current.setEnabled(e.target.checked);
+                    }}
+                  />
+                  Curved corners &middot; {curvedCornersRadius.toFixed(2)} m
+                </label>
+              </span>
+              <input
+                className="rb-range"
+                type="range"
+                min={0.1}
+                max={2.5}
+                step={0.05}
+                value={curvedCornersRadius}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setCurvedCornersRadius(v);
+                  curvedCornersApiRef.current.setRadius(v);
+                }}
+              />
+            </div>
+          </>
+        )}
+        {tool === "move" && selectedPanel != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Wall height &middot; {selectedHeight.toFixed(2)} m</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-range"
+                type="range"
+                min={MIN_WALL_HEIGHT}
+                max={MAX_WALL_HEIGHT}
+                step={0.05}
+                value={selectedHeight}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setSelectedHeight(v);
+                  panelHeightApiRef.current.setHeight(selectedPanel, v);
+                }}
+              />
+              <button className="rb-btn" onClick={() => setSelectedPanel(null)}>Done</button>
+            </div>
+          </div>
+        )}
+        {tool === "move" && selectedRoomId == null && selectedPanel == null && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">Thickness &middot; {wallThickness.toFixed(2)} m</span>
+            <input
+              className="rb-range"
+              type="range"
+              min={0.03}
+              max={3}
+              step={0.01}
+              value={wallThickness}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                setWallThickness(v);
+                wallThicknessApiRef.current.setThickness(v);
+              }}
+            />
+          </div>
+        )}
+        {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">
+              {selectedOpeningId != null ? "Selected window height" : "Opening height"} &middot; {(openingHeight / FT).toFixed(2)} ft
+            </span>
+            <input
+              className="rb-range"
+              type="range"
+              min={0}
+              max={Math.max(0.2, (floorHeight - 0.1) / FT)}
+              step={0.05}
+              value={openingHeight / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const ft = parseFloat(e.target.value);
+                const h = Math.max(0, ft * FT);
+                setOpeningHeight(h);
+                if (selectedOpeningId != null) openingEditApiRef.current.setHeight(h);
+              }}
+            />
+          </div>
+        )}
+        {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">Dividers &middot; {openingDividers}</span>
+            <input
+              className="rb-range"
+              type="range"
+              min={0}
+              max={20}
+              step={1}
+              value={openingDividers}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                setOpeningDividers(n);
+                if (selectedOpeningId != null) openingEditApiRef.current.setDividers(n);
+              }}
+            />
+          </div>
+        )}
+        {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">Divider direction</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                className={`rb-btn ${openingAxisVertical ? "active" : ""}`}
+                onClick={() => {
+                  pushUndoRef.current();
+                  const v = !openingAxisVertical;
+                  setOpeningAxisVertical(v);
+                  if (selectedOpeningId != null) openingEditApiRef.current.setAxis(v, openingAxisHorizontal);
+                }}
+              >
+                Vertical
+              </button>
+              <button
+                className={`rb-btn ${openingAxisHorizontal ? "active" : ""}`}
+                onClick={() => {
+                  pushUndoRef.current();
+                  const h = !openingAxisHorizontal;
+                  setOpeningAxisHorizontal(h);
+                  if (selectedOpeningId != null) openingEditApiRef.current.setAxis(openingAxisVertical, h);
+                }}
+              >
+                Horizontal
+              </button>
+            </div>
+          </div>
+        )}
+        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">
+              {selectedOpeningId != null ? "Selected door height" : "Door height"} &middot; {(doorHeight / FT).toFixed(2)} ft
+            </span>
+            <input
+              className="rb-range"
+              type="range"
+              min={3}
+              max={Math.max(3.2, (floorHeight - 0.05) / FT)}
+              step={0.05}
+              value={doorHeight / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const h = Math.max(0, parseFloat(e.target.value) * FT);
+                setDoorHeight(h);
+                if (selectedOpeningId != null) openingEditApiRef.current.setHeight(h);
+              }}
+            />
+          </div>
+        )}
+        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">Style</span>
+            <button
+              className={`rb-btn ${doorSplit ? "active" : ""}`}
+              onClick={() => {
+                pushUndoRef.current();
+                const v = !doorSplit;
+                setDoorSplit(v);
+                if (selectedOpeningId != null) openingEditApiRef.current.setDividers(v ? 1 : 0);
+              }}
+            >
+              Split door
+            </button>
+          </div>
+        )}
+        {tool === "props" && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Prop shape</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[
+                { key: "sphere", Icon: Globe },
+                { key: "cube", Icon: Box },
+                { key: "cone", Icon: Cone },
+                { key: "cylinder", Icon: Cylinder },
+              ].map(({ key: s, Icon }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${propsShape === s ? "active" : ""}`}
+                  onClick={() => setPropsShape(s)}
+                  title={s.charAt(0).toUpperCase() + s.slice(1)}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, padding: 0 }}
+                >
+                  <Icon size={16} strokeWidth={2} />
+                </button>
+              ))}
+              <button
+                className={`rb-btn ${propsShape === "balcony" ? "active" : ""}`}
+                onClick={() => setPropsShape("balcony")}
+              >
+                Balcony
+              </button>
+            </div>
+          </div>
+        )}
+        {selectedStairId != null && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Steps &middot; {stairSteps}</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-range"
+                type="range"
+                min={2}
+                max={60}
+                step={1}
+                value={stairSteps}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  setStairSteps(n);
+                  stairStepsApiRef.current.setSteps(n);
+                }}
+              />
+              <button className="rb-btn" onClick={() => deleteStairRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedStairId(null)}>Done</button>
+            </div>
+          </div>
+        )}
+        {selectedBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 260 }}>
+            <span className="ribbon-label">Staircase height &middot; {(balconyStairHeight / FT).toFixed(2)} ft</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-range"
+                type="range"
+                min={1}
+                max={Math.max(1.5, (floorHeight - 1.5 * FT) / FT)}
+                step={0.1}
+                value={balconyStairHeight / FT}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setBalconyStairHeight(ft * FT);
+                  balconyHeightApiRef.current.setHeight(ft * FT);
+                }}
+              />
+              <button className="rb-btn" onClick={() => deleteBalconyRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedBalconyId(null)}>Done</button>
+            </div>
+          </div>
+        )}
+        {selectedBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Platform width &middot; {(balconyPlatformWidth / FT).toFixed(2)} ft</span>
+            <input
+              className="rb-range"
+              type="range"
+              min={3}
+              max={60}
+              step={0.5}
+              value={balconyPlatformWidth / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const ft = parseFloat(e.target.value);
+                setBalconyPlatformWidth(ft * FT);
+                balconyWidthApiRef.current.setWidth(ft * FT);
+              }}
+            />
+          </div>
+        )}
+        {selectedBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Pillars &middot; {balconyPillarCount}</span>
+            <input
+              className="rb-range"
+              type="range"
+              min={2}
+              max={60}
+              step={1}
+              value={balconyPillarCount}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                setBalconyPillarCount(n);
+                balconyPillarCountApiRef.current.setCount(n);
+              }}
+            />
+          </div>
+        )}
+        {selectedBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Pillar height &middot; {(balconyPillarHeight / FT).toFixed(2)} ft</span>
+            <input
+              className="rb-range"
+              type="range"
+              min={1}
+              max={50}
+              step={0.1}
+              value={balconyPillarHeight / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const ft = parseFloat(e.target.value);
+                setBalconyPillarHeight(ft * FT);
+                balconyPillarHeightApiRef.current.setHeight(ft * FT);
+              }}
+            />
+          </div>
+        )}
+        {selectedBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 80 }}>
+            <button
+              className={`rb-btn ${balconyGlassInfill ? "active" : ""}`}
+              onClick={() => {
+                pushUndoRef.current();
+                const on = !balconyGlassInfill;
+                setBalconyGlassInfill(on);
+                balconyGlassApiRef.current.setEnabled(on);
+              }}
+            >
+              Glass
+            </button>
+          </div>
+        )}
+        {selectedOpeningId != null && (
+          <div className="ribbon-group" style={{ minWidth: 160 }}>
+            <span className="ribbon-label">Opening selected</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button className="rb-btn" onClick={() => deleteOpeningRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedOpeningId(null)}>Done</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* BOTTOM: ribbon -- tools, then snapping/measurements, then viewport controls */}
       <div className="ribbon">
         <div className="ribbon-section">
           <span className="panel-title" style={{ marginRight: 4 }}>Exodex</span>
@@ -7385,378 +7770,6 @@ export default function RoomBuilder() {
         <div className="ribbon-divider" />
 
         <div className="ribbon-section">
-          {tool === "move" && selectedRoomId != null && selectedPanel == null && (
-            <>
-              <div className="ribbon-group" style={{ minWidth: 340 }}>
-                <span className="ribbon-label">Room</span>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button className="rb-btn" onClick={() => cutRoomRef.current()}>Cut</button>
-                  <button className="rb-btn" onClick={() => copyRoomRef.current()}>Copy</button>
-                  <button className="rb-btn" disabled={!hasRoomClipboard} onClick={() => pasteRoomRef.current()}>Paste</button>
-                  <button className="rb-btn" onClick={() => duplicateRoomRef.current()}>Duplicate</button>
-                  <button className="rb-btn" onClick={() => deleteRoomRef.current()}>Delete</button>
-                  <button className="rb-btn" onClick={() => switchActiveRoomRef.current(null)}>Done</button>
-                </div>
-              </div>
-              <div className="ribbon-group">
-                <span className="ribbon-label">Room height &middot; {roomHeight.toFixed(2)} m</span>
-                <input
-                  className="rb-range"
-                  type="range"
-                  min={MIN_WALL_HEIGHT}
-                  max={MAX_WALL_HEIGHT}
-                  step={0.05}
-                  value={roomHeight}
-                  onPointerDown={() => pushUndoRef.current()}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setRoomHeight(v);
-                    roomHeightApiRef.current.setHeight(v);
-                  }}
-                />
-              </div>
-              <div className="ribbon-group" style={{ minWidth: 190 }}>
-                <span className="ribbon-label">
-                  <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
-                    <input
-                      type="checkbox"
-                      className="rb-radio"
-                      checked={curvedCornersOn}
-                      onChange={(e) => {
-                        pushUndoRef.current();
-                        setCurvedCornersOn(e.target.checked);
-                        curvedCornersApiRef.current.setEnabled(e.target.checked);
-                      }}
-                    />
-                    Curved corners &middot; {curvedCornersRadius.toFixed(2)} m
-                  </label>
-                </span>
-                <input
-                  className="rb-range"
-                  type="range"
-                  min={0.1}
-                  max={2.5}
-                  step={0.05}
-                  value={curvedCornersRadius}
-                  onPointerDown={() => pushUndoRef.current()}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setCurvedCornersRadius(v);
-                    curvedCornersApiRef.current.setRadius(v);
-                  }}
-                />
-              </div>
-            </>
-          )}
-          {tool === "move" && selectedPanel != null && (
-            <div className="ribbon-group" style={{ minWidth: 200 }}>
-              <span className="ribbon-label">Wall height &middot; {selectedHeight.toFixed(2)} m</span>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input
-                  className="rb-range"
-                  type="range"
-                  min={MIN_WALL_HEIGHT}
-                  max={MAX_WALL_HEIGHT}
-                  step={0.05}
-                  value={selectedHeight}
-                  onPointerDown={() => pushUndoRef.current()}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setSelectedHeight(v);
-                    panelHeightApiRef.current.setHeight(selectedPanel, v);
-                  }}
-                />
-                <button className="rb-btn" onClick={() => setSelectedPanel(null)}>Done</button>
-              </div>
-            </div>
-          )}
-          {tool === "move" && selectedRoomId == null && selectedPanel == null && (
-            <div className="ribbon-group">
-              <span className="ribbon-label">Thickness &middot; {wallThickness.toFixed(2)} m</span>
-              <input
-                className="rb-range"
-                type="range"
-                min={0.03}
-                max={3}
-                step={0.01}
-                value={wallThickness}
-                onPointerDown={() => pushUndoRef.current()}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  setWallThickness(v);
-                  wallThicknessApiRef.current.setThickness(v);
-                }}
-              />
-            </div>
-          )}
-          {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
-            <div className="ribbon-group">
-              <span className="ribbon-label">
-                {selectedOpeningId != null ? "Selected window height" : "Opening height"} &middot; {(openingHeight / FT).toFixed(2)} ft
-              </span>
-              <input
-                className="rb-range"
-                type="range"
-                min={0}
-                max={Math.max(0.2, (floorHeight - 0.1) / FT)}
-                step={0.05}
-                value={openingHeight / FT}
-                onPointerDown={() => pushUndoRef.current()}
-                onChange={(e) => {
-                  const ft = parseFloat(e.target.value);
-                  const h = Math.max(0, ft * FT);
-                  setOpeningHeight(h);
-                  if (selectedOpeningId != null) openingEditApiRef.current.setHeight(h);
-                }}
-              />
-            </div>
-          )}
-          {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
-            <div className="ribbon-group">
-              <span className="ribbon-label">Dividers &middot; {openingDividers}</span>
-              <input
-                className="rb-range"
-                type="range"
-                min={0}
-                max={20}
-                step={1}
-                value={openingDividers}
-                onPointerDown={() => pushUndoRef.current()}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  setOpeningDividers(n);
-                  if (selectedOpeningId != null) openingEditApiRef.current.setDividers(n);
-                }}
-              />
-            </div>
-          )}
-          {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
-            <div className="ribbon-group">
-              <span className="ribbon-label">Divider direction</span>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button
-                  className={`rb-btn ${openingAxisVertical ? "active" : ""}`}
-                  onClick={() => {
-                    pushUndoRef.current();
-                    const v = !openingAxisVertical;
-                    setOpeningAxisVertical(v);
-                    if (selectedOpeningId != null) openingEditApiRef.current.setAxis(v, openingAxisHorizontal);
-                  }}
-                >
-                  Vertical
-                </button>
-                <button
-                  className={`rb-btn ${openingAxisHorizontal ? "active" : ""}`}
-                  onClick={() => {
-                    pushUndoRef.current();
-                    const h = !openingAxisHorizontal;
-                    setOpeningAxisHorizontal(h);
-                    if (selectedOpeningId != null) openingEditApiRef.current.setAxis(openingAxisVertical, h);
-                  }}
-                >
-                  Horizontal
-                </button>
-              </div>
-            </div>
-          )}
-          {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
-            <div className="ribbon-group">
-              <span className="ribbon-label">
-                {selectedOpeningId != null ? "Selected door height" : "Door height"} &middot; {(doorHeight / FT).toFixed(2)} ft
-              </span>
-              <input
-                className="rb-range"
-                type="range"
-                min={3}
-                max={Math.max(3.2, (floorHeight - 0.05) / FT)}
-                step={0.05}
-                value={doorHeight / FT}
-                onPointerDown={() => pushUndoRef.current()}
-                onChange={(e) => {
-                  const h = Math.max(0, parseFloat(e.target.value) * FT);
-                  setDoorHeight(h);
-                  if (selectedOpeningId != null) openingEditApiRef.current.setHeight(h);
-                }}
-              />
-            </div>
-          )}
-          {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
-            <div className="ribbon-group">
-              <span className="ribbon-label">Style</span>
-              <button
-                className={`rb-btn ${doorSplit ? "active" : ""}`}
-                onClick={() => {
-                  pushUndoRef.current();
-                  const v = !doorSplit;
-                  setDoorSplit(v);
-                  if (selectedOpeningId != null) openingEditApiRef.current.setDividers(v ? 1 : 0);
-                }}
-              >
-                Split door
-              </button>
-            </div>
-          )}
-          {tool === "props" && (
-            <div className="ribbon-group" style={{ minWidth: 220 }}>
-              <span className="ribbon-label">Prop shape</span>
-              <div style={{ display: "flex", gap: 6 }}>
-                {[
-                  { key: "sphere", Icon: Globe },
-                  { key: "cube", Icon: Box },
-                  { key: "cone", Icon: Cone },
-                  { key: "cylinder", Icon: Cylinder },
-                ].map(({ key: s, Icon }) => (
-                  <button
-                    key={s}
-                    className={`rb-btn ${propsShape === s ? "active" : ""}`}
-                    onClick={() => setPropsShape(s)}
-                    title={s.charAt(0).toUpperCase() + s.slice(1)}
-                    style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, padding: 0 }}
-                  >
-                    <Icon size={16} strokeWidth={2} />
-                  </button>
-                ))}
-                <button
-                  className={`rb-btn ${propsShape === "balcony" ? "active" : ""}`}
-                  onClick={() => setPropsShape("balcony")}
-                >
-                  Balcony
-                </button>
-              </div>
-            </div>
-          )}
-          {selectedStairId != null && (
-            <div className="ribbon-group" style={{ minWidth: 220 }}>
-              <span className="ribbon-label">Steps &middot; {stairSteps}</span>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input
-                  className="rb-range"
-                  type="range"
-                  min={2}
-                  max={60}
-                  step={1}
-                  value={stairSteps}
-                  onPointerDown={() => pushUndoRef.current()}
-                  onChange={(e) => {
-                    const n = parseInt(e.target.value, 10);
-                    setStairSteps(n);
-                    stairStepsApiRef.current.setSteps(n);
-                  }}
-                />
-                <button className="rb-btn" onClick={() => deleteStairRef.current()}>Delete</button>
-                <button className="rb-btn" onClick={() => setSelectedStairId(null)}>Done</button>
-              </div>
-            </div>
-          )}
-          {selectedBalconyId != null && (
-            <div className="ribbon-group" style={{ minWidth: 260 }}>
-              <span className="ribbon-label">Staircase height &middot; {(balconyStairHeight / FT).toFixed(2)} ft</span>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input
-                  className="rb-range"
-                  type="range"
-                  min={1}
-                  max={Math.max(1.5, (floorHeight - 1.5 * FT) / FT)}
-                  step={0.1}
-                  value={balconyStairHeight / FT}
-                  onPointerDown={() => pushUndoRef.current()}
-                  onChange={(e) => {
-                    const ft = parseFloat(e.target.value);
-                    setBalconyStairHeight(ft * FT);
-                    balconyHeightApiRef.current.setHeight(ft * FT);
-                  }}
-                />
-                <button className="rb-btn" onClick={() => deleteBalconyRef.current()}>Delete</button>
-                <button className="rb-btn" onClick={() => setSelectedBalconyId(null)}>Done</button>
-              </div>
-            </div>
-          )}
-          {selectedBalconyId != null && (
-            <div className="ribbon-group" style={{ minWidth: 220 }}>
-              <span className="ribbon-label">Platform width &middot; {(balconyPlatformWidth / FT).toFixed(2)} ft</span>
-              <input
-                className="rb-range"
-                type="range"
-                min={3}
-                max={60}
-                step={0.5}
-                value={balconyPlatformWidth / FT}
-                onPointerDown={() => pushUndoRef.current()}
-                onChange={(e) => {
-                  const ft = parseFloat(e.target.value);
-                  setBalconyPlatformWidth(ft * FT);
-                  balconyWidthApiRef.current.setWidth(ft * FT);
-                }}
-              />
-            </div>
-          )}
-          {selectedBalconyId != null && (
-            <div className="ribbon-group" style={{ minWidth: 200 }}>
-              <span className="ribbon-label">Pillars &middot; {balconyPillarCount}</span>
-              <input
-                className="rb-range"
-                type="range"
-                min={2}
-                max={60}
-                step={1}
-                value={balconyPillarCount}
-                onPointerDown={() => pushUndoRef.current()}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  setBalconyPillarCount(n);
-                  balconyPillarCountApiRef.current.setCount(n);
-                }}
-              />
-            </div>
-          )}
-          {selectedBalconyId != null && (
-            <div className="ribbon-group" style={{ minWidth: 200 }}>
-              <span className="ribbon-label">Pillar height &middot; {(balconyPillarHeight / FT).toFixed(2)} ft</span>
-              <input
-                className="rb-range"
-                type="range"
-                min={1}
-                max={50}
-                step={0.1}
-                value={balconyPillarHeight / FT}
-                onPointerDown={() => pushUndoRef.current()}
-                onChange={(e) => {
-                  const ft = parseFloat(e.target.value);
-                  setBalconyPillarHeight(ft * FT);
-                  balconyPillarHeightApiRef.current.setHeight(ft * FT);
-                }}
-              />
-            </div>
-          )}
-          {selectedBalconyId != null && (
-            <div className="ribbon-group" style={{ minWidth: 80 }}>
-              <button
-                className={`rb-btn ${balconyGlassInfill ? "active" : ""}`}
-                onClick={() => {
-                  pushUndoRef.current();
-                  const on = !balconyGlassInfill;
-                  setBalconyGlassInfill(on);
-                  balconyGlassApiRef.current.setEnabled(on);
-                }}
-              >
-                Glass
-              </button>
-            </div>
-          )}
-          {selectedOpeningId != null && (
-            <div className="ribbon-group" style={{ minWidth: 160 }}>
-              <span className="ribbon-label">Opening selected</span>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <button className="rb-btn" onClick={() => deleteOpeningRef.current()}>Delete</button>
-                <button className="rb-btn" onClick={() => setSelectedOpeningId(null)}>Done</button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="ribbon-divider" />
-
-        <div className="ribbon-section">
           <div className="ribbon-group">
             <span className="ribbon-label">Grid &middot; {gridSizeFt.toFixed(2)} ft</span>
             <input
@@ -7772,6 +7785,13 @@ export default function RoomBuilder() {
           <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
             <button className={`rb-btn ${snapEnabled ? "active" : ""}`} onClick={() => setSnapEnabled((v) => !v)}>Snap</button>
             <button className={`rb-btn ${showMeasurements ? "active" : ""}`} onClick={() => setShowMeasurements((v) => !v)}>Measure</button>
+          </div>
+        </div>
+
+        <div className="ribbon-divider" />
+
+        <div className="ribbon-section">
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
             <button className={`rb-btn ${hiddenLineMode ? "active" : ""}`} onClick={() => setHiddenLineMode((v) => !v)}>Hidden line</button>
             <button className={`rb-btn ${wireframeMode ? "active" : ""}`} onClick={() => setWireframeMode((v) => !v)}>Wireframe</button>
             <button className={`rb-btn ${transparentInactive ? "active" : ""}`} onClick={() => setTransparentInactive((v) => !v)}>Fade inactive</button>
