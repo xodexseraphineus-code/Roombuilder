@@ -53,7 +53,7 @@ const PROP_DEFAULT_COLORS = { sphere: 0xd6453c, cone: 0x3f9d5c, cube: 0x3a6bc9, 
 // display names for the six building-material finishes -- kept in this
 // same order as the Three.js closure's own BUILDING_MATERIAL_PRESETS array
 // so the ribbon button (rendered outside that closure) can label/cycle them.
-const BUILDING_MATERIAL_NAMES = ["Matte", "Concrete", "Metal", "Plastic", "Vinyl", "Wood"];
+const BUILDING_MATERIAL_NAMES = ["Plastic", "Concrete", "Metal", "Gloss", "Vinyl", "Wood"];
 
 // Theme color wheel: a full filled disc -- a small greyscale ring at the
 // hub (15 greys plus pure white and pure black) surrounded by a hue wheel
@@ -119,12 +119,14 @@ function themeColorsFor(hueDeg, sat, midLight = THEME_WALL_MIDLIGHT) {
   const jitter = (range) => (Math.random() - 0.5) * range;
   const tone = (dl, dh = 0, ds = 0) => hslToHex((hueDeg + dh + 360) % 360, clampS(sat + ds), clampL(midLight + dl));
   return {
-    // ranked lightest to darkest: floor lightest, then wall (the second
-    // lightest, not the darkest of the bunch), then stairs, then platform.
+    // the wall always gets the most vivid tone of the bunch -- pinned near
+    // the anchor lightness (where a fixed HSL saturation reads most
+    // saturated, rather than washed out pale or crushed dark) and boosted
+    // a little further in saturation on top of that.
     floor: tone(32 + jitter(6), jitter(6), jitter(8)),
-    wall: tone(22 + jitter(4), 0, jitter(4)),
-    stairs: tone(14 + jitter(6), jitter(8), jitter(8)),
-    platform: tone(6 + jitter(6), jitter(10), jitter(8)),
+    wall: tone(0 + jitter(4), 0, 12 + jitter(6)),
+    stairs: tone(16 + jitter(6), jitter(8), jitter(8)),
+    platform: tone(22 + jitter(6), jitter(10), jitter(8)),
     sphere: tone(-12 + jitter(8), 14 + jitter(10), jitter(10)),
     cylinder: tone(-6 + jitter(8), 24 + jitter(12), jitter(10)),
     railing: tone(-20 + jitter(6), -16 + jitter(10), jitter(8)),
@@ -197,21 +199,26 @@ function buildPalette(name, wall, floor, railing, prop) {
 // disc while a preset is active: four flat quarter-wedges (not the usual
 // twelve sectors) so the palette reads as a small, deliberate set rather
 // than a full spectrum; tapping any lit wedge applies the preset.
+// each preset's wall is always its most vivid tone (weighted toward
+// mid-lightness, since a raw HSL saturation number reads as pale rather
+// than vivid up near white or crushed down near black) -- picked by that
+// rule from the four colors, with floor kept the lightest of what's left
+// and railing the darkest, so the room still reads coherent.
 const CURATED_PALETTES = [
   buildPalette("Mono", 0x9a9a9a, 0xe8e8e8, 0x2a2a2a, 0x5c5c5c),
   buildPalette("Ocean", 0x3f7ea6, 0xdcecf0, 0x123a52, 0x6fc7d4),
-  buildPalette("Forest", 0x5a7a4a, 0xe2e8d4, 0x233620, 0x8fae5a),
-  buildPalette("Desert", 0xd99a5c, 0xf3e0c4, 0x7a4326, 0xe0603c),
-  buildPalette("Pastel", 0xaed4e0, 0xfbeee0, 0x8fb8ae, 0xf3b6c2),
-  buildPalette("Rich", 0x1f3d3a, 0xcbb8dc, 0x140f1a, 0x8b1f3d),
+  buildPalette("Forest", 0x8fae5a, 0xe2e8d4, 0x233620, 0x5a7a4a),
+  buildPalette("Desert", 0xe0603c, 0xf3e0c4, 0x7a4326, 0xd99a5c),
+  buildPalette("Pastel", 0xf3b6c2, 0xfbeee0, 0x8fb8ae, 0xaed4e0),
+  buildPalette("Rich", 0x8b1f3d, 0xcbb8dc, 0x140f1a, 0x1f3d3a),
   // explicit per-role mapping requested for Neon: pink walls, orange-yellow
   // floor, neon-blue railing, neon-green props.
   buildPalette("Neon", 0xff2ec4, 0xffb020, 0x2ee6ff, 0x39ff6a),
-  buildPalette("Kitchen", 0xd9cfc0, 0x8a6b4a, 0x2e2a26, 0xb3453a),
-  buildPalette("Office", 0xc7c2b8, 0x8f8a7c, 0x24211d, 0x4a6fa5),
+  buildPalette("Kitchen", 0xb3453a, 0xd9cfc0, 0x2e2a26, 0x8a6b4a),
+  buildPalette("Office", 0x4a6fa5, 0xc7c2b8, 0x24211d, 0x8f8a7c),
   buildPalette("Living room", 0xc9a978, 0xe8d9c0, 0x4a3826, 0x7a8f6e),
-  buildPalette("Bedroom", 0xcdb8cc, 0xf1e7ec, 0x4a3d4e, 0xa88bb8),
-  buildPalette("Exterior", 0x9c9488, 0xb0a894, 0x2a2824, 0x5c7a4a),
+  buildPalette("Bedroom", 0xa88bb8, 0xf1e7ec, 0x4a3d4e, 0xcdb8cc),
+  buildPalette("Exterior", 0x5c7a4a, 0xb0a894, 0x2a2824, 0x9c9488),
 ];
 
 // a short synthesized click (Web Audio, no audio file to fetch) for wall/
@@ -543,9 +550,12 @@ export default function RoomBuilder() {
   const [openingAxisHorizontal, setOpeningAxisHorizontal] = useState(false);
   const openingAxisHorizontalRef = useRef(openingAxisHorizontal);
   useEffect(() => { openingAxisHorizontalRef.current = openingAxisHorizontal; }, [openingAxisHorizontal]);
-  const [doorHeight, setDoorHeight] = useState(7 * FT);
+  const [doorHeight, setDoorHeight] = useState(14 * FT);
   const doorHeightRef = useRef(doorHeight);
   useEffect(() => { doorHeightRef.current = doorHeight; }, [doorHeight]);
+  const [doorSplit, setDoorSplit] = useState(false);
+  const doorSplitRef = useRef(doorSplit);
+  useEffect(() => { doorSplitRef.current = doorSplit; }, [doorSplit]);
   const [propsShape, setPropsShape] = useState("cube");
   const propsShapeRef = useRef(propsShape);
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
@@ -555,6 +565,9 @@ export default function RoomBuilder() {
   const [groundOn, setGroundOn] = useState(false);
   const groundApiRef = useRef({ setEnabled: () => {} });
   const wallThicknessApiRef = useRef({ setThickness: () => {} });
+  const [lightAzimuth, setLightAzimuth] = useState(45);
+  const lightAzimuthApiRef = useRef(() => {});
+  useEffect(() => { lightAzimuthApiRef.current(lightAzimuth); }, [lightAzimuth]);
   const [selectedPanel, setSelectedPanel] = useState(null);
   const selectedPanelRef = useRef(selectedPanel);
   useEffect(() => { selectedPanelRef.current = selectedPanel; rebuildModelRef.current(); }, [selectedPanel]);
@@ -720,12 +733,10 @@ export default function RoomBuilder() {
     scene.fog = new THREE.Fog(COLORS.bg, 60, 400);
     const sceneFog = scene.fog;
     // the empty-space backdrop and its matching fog color -- dark mode
-    // keeps the original near-black void, but that same void read as far
-    // too contrasty next to a light UI, so light mode gets a medium
-    // grey-blue instead (closer to what Keynote uses behind its slide
-    // canvas: a grey a shade darker than the surrounding chrome, not a
-    // stark black-vs-white jump).
-    const VIEWPORT_BG_LIGHT = 0xc7cad1;
+    // keeps the original near-black void; light mode matches the
+    // reference mockup's own flat background exactly (same neutral grey
+    // as --bg-window), rather than a distinct blue-grey of its own.
+    const VIEWPORT_BG_LIGHT = 0xe4e4e4;
     function applyViewportTheme(theme) {
       const c = theme === "light" ? VIEWPORT_BG_LIGHT : COLORS.bg;
       scene.background.set(c);
@@ -781,20 +792,28 @@ export default function RoomBuilder() {
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.55);
     scene.add(ambient);
-    // "magic hour" sun: 45 degrees above the horizon and 45 degrees off
-    // both wall axes (equal x/z, y = horizontal-distance * sqrt(2)) so a
-    // wall's shadow reads as a clean 45-degree diagonal across the floor,
-    // exactly as long as the wall is tall, rather than the near-overhead
-    // angle a small x/y/z position gives.
-    // blended 30% toward white so lit walls read closer to their true
-    // color instead of a strong orange cast -- still warm, just subtler.
-    const keyLight = new THREE.DirectionalLight(new THREE.Color(0xffa457).lerp(new THREE.Color(0xffffff), 0.3), 1.2);
-    keyLight.position.set(20, 28.3, 20);
+    // a low sun (30 degrees above the horizon, was 45) for longer, more
+    // dramatic shadows -- azimuth (compass direction around the room) is
+    // adjustable at runtime via the light-direction slider, defaulting to
+    // the same 45-degrees-off-both-wall-axes direction as before.
+    // Kept ~98% neutral (just a whisper of warmth) rather than a strong
+    // orange cast, so every surface's own color reads true instead of
+    // being tinted by the light.
+    const KEY_LIGHT_HORIZ_DIST = 28.284;
+    const KEY_LIGHT_ELEVATION_DEG = 30;
+    const KEY_LIGHT_DEFAULT_AZIMUTH_DEG = 45;
+    const keyLight = new THREE.DirectionalLight(0xfff6ee, 1.2);
+    function setKeyLightAzimuth(azimuthDeg) {
+      const az = (azimuthDeg * Math.PI) / 180;
+      const y = KEY_LIGHT_HORIZ_DIST * Math.tan((KEY_LIGHT_ELEVATION_DEG * Math.PI) / 180);
+      keyLight.position.set(KEY_LIGHT_HORIZ_DIST * Math.cos(az), y, KEY_LIGHT_HORIZ_DIST * Math.sin(az));
+    }
+    setKeyLightAzimuth(KEY_LIGHT_DEFAULT_AZIMUTH_DEG);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(1024, 1024);
     // wide enough to cover a large room plus the long, low-angle shadows a
-    // tall building throws at a 45-degree sun -- bigger than the old +-10
-    // (which was clipping shadows off well inside a 25m room).
+    // tall building throws at a low sun -- bigger than the old +-10 (which
+    // was clipping shadows off well inside a 25m room).
     keyLight.shadow.camera.left = -40;
     keyLight.shadow.camera.right = 40;
     keyLight.shadow.camera.top = 40;
@@ -803,13 +822,12 @@ export default function RoomBuilder() {
     keyLight.shadow.bias = -0.0004; // reduces shadow acne without visible peter-panning
     keyLight.shadow.normalBias = 0.02;
     scene.add(keyLight);
-    // cool blue skylight fill, complementing the warm sun (the classic
-    // magic-hour palette: warm key, cool ambient/fill)
-    // same 30%-toward-white blend as the key light, so shadow areas read
-    // less strongly blue.
-    const fillLight = new THREE.DirectionalLight(new THREE.Color(0x5f8fff).lerp(new THREE.Color(0xffffff), 0.3), 0.4);
+    // a near-neutral skylight fill (barely cool) -- just enough to keep
+    // shadowed faces from going pure black, without tinting them.
+    const fillLight = new THREE.DirectionalLight(0xf3f6ff, 0.4);
     fillLight.position.set(-6, 4, -5);
     scene.add(fillLight);
+    lightAzimuthApiRef.current = setKeyLightAzimuth;
     // fixed, non-shadow-casting fill lights aligned with each orthographic
     // viewing direction, so the top/front/left/right drafting views are
     // always evenly lit head-on regardless of the key light's fixed angle
@@ -1620,12 +1638,20 @@ export default function RoomBuilder() {
     // they sit on top of, which they'd otherwise blend into) and unlit /
     // depth-tested off so they always read clearly and stay easy to grab.
     const handleMat = new THREE.MeshBasicMaterial({ color: 0xff6b1a, transparent: true, opacity: 1, depthTest: false });
+    // a selected prop's own thin white outline, reused for a selected
+    // window/door too -- both now read as "a crisp white line plus orange
+    // corner/edge handles" rather than windows/doors getting a solid
+    // magenta fill instead.
+    const whiteOutlineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, depthTest: false });
     // window glass: a thin, mostly-transparent, faintly blue-tinted pane
     // that's noticeably more specular (lower roughness) than the matte
     // wall surface it sits inside. Never added to pickList -- it's purely
     // visual and shouldn't intercept taps meant for the floor/room behind it.
+    // 20% more reflective than before (lower roughness, a bit more
+    // metalness) -- any glass surface (window panes, balcony glass infill)
+    // shares this one material, so the bump applies everywhere at once.
     const glassMat = new THREE.MeshStandardMaterial({
-      color: 0x9ec8ee, transparent: true, opacity: 0.3, roughness: 0.12, metalness: 0.05, side: THREE.DoubleSide,
+      color: 0x9ec8ee, transparent: true, opacity: 0.3, roughness: 0.096, metalness: 0.06, envMapIntensity: 1.2, side: THREE.DoubleSide,
     });
     // an invisible volume used purely to make thin/hollow things (pillars,
     // window and door cutouts) much easier to tap -- raycasting still hits
@@ -1635,12 +1661,16 @@ export default function RoomBuilder() {
     // staircases get their own light-pink color so they read distinctly
     // from the walls, rather than blending in as just another wall panel.
     const stairMat = new THREE.MeshStandardMaterial({ color: 0xf2c6d6, roughness: 0.82, metalness: 0.02 });
-    // prop shapes, each with its own fixed color
+    // prop shapes, each with its own fixed color -- a flat, saturated
+    // plastic finish (low roughness for a clear specular highlight and
+    // crisp light/shadow falloff, a light touch of environment reflection
+    // rather than heavy) so colors read punchy rather than washed out.
+    const PROP_PLASTIC = { roughness: 0.32, metalness: 0.02, envMapIntensity: 0.4 };
     const propMats = {
-      sphere: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.sphere, roughness: 0.55, metalness: 0.05 }),
-      cone: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cone, roughness: 0.55, metalness: 0.05 }),
-      cube: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cube, roughness: 0.55, metalness: 0.05 }),
-      cylinder: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cylinder, roughness: 0.55, metalness: 0.05 }),
+      sphere: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.sphere, ...PROP_PLASTIC }),
+      cone: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cone, ...PROP_PLASTIC }),
+      cube: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cube, ...PROP_PLASTIC }),
+      cylinder: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cylinder, ...PROP_PLASTIC }),
     };
     const PROP_HEIGHT = 8 * FT;
 
@@ -1709,7 +1739,8 @@ export default function RoomBuilder() {
 
       if (isPickableTarget && selectedOpeningIdRef.current === c.id) {
         const hlGeo = new THREE.PlaneGeometry(len, h);
-        const hlMesh = new THREE.Mesh(hlGeo, selMat);
+        const hlMesh = new THREE.LineSegments(new THREE.EdgesGeometry(hlGeo), whiteOutlineMat);
+        hlMesh.renderOrder = 9;
         if (lengthAxis === "x") {
           hlMesh.position.set((c.u0 + c.u1) / 2, (y0 + y1) / 2, coord);
         } else {
@@ -1767,6 +1798,12 @@ export default function RoomBuilder() {
         if (doorBottom > 0.02) addSeg(c.u0, c.u1, 0, doorBottom);
         if (doorTop < H - 0.02) addSeg(c.u0, c.u1, doorTop, H);
         addOpeningHotspotAndHighlight(c, lengthAxis, coord, doorBottom, doorTop);
+        // "split door in two" -- a single center mullion, like a French
+        // door, rather than the window system's full column/row grid.
+        if (Math.round(c.dividers || 0) >= 1) {
+          const mid = (c.u0 + c.u1) / 2;
+          addMullion(mid - 0.025, mid + 0.025, doorBottom, doorTop);
+        }
         return;
       }
       const bottomOverride = c.bottomOverride;
@@ -3194,10 +3231,13 @@ export default function RoomBuilder() {
     // the wall, at the same roughness/metalness/texture. Order matches the
     // module-level BUILDING_MATERIAL_NAMES array the ribbon button reads.
     const BUILDING_MATERIAL_PRESETS = [
-      { key: "matte", roughness: 0.9, metalness: 0.0, texKey: "grain" }, // default finish -- the room's own soft grain map
+      // default finish -- a flat, saturated plastic (no grain texture, low
+      // roughness for a crisp specular highlight) rather than a chalky
+      // matte, so the room's colors read punchy out of the box.
+      { key: "plastic", roughness: 0.34, metalness: 0.03 },
       { key: "concrete", forceColor: true, color: 0x93999c, roughness: 0.88, metalness: 0.08, texKey: "concrete", floorLighten: 0.2 },
       { key: "metal", roughness: 0.12, metalness: 0.92 },
-      { key: "plastic", roughness: 0.22, metalness: 0.06 },
+      { key: "gloss", roughness: 0.22, metalness: 0.06 },
       { key: "vinyl", roughness: 0.55, metalness: 0.0, texKey: "tile" },
       { key: "wood", roughness: 0.48, metalness: 0.02, texKey: "wood" },
     ];
@@ -4153,6 +4193,7 @@ export default function RoomBuilder() {
           setOpeningAxisHorizontal(o.dividerAxis === "horizontal" || o.dividerAxis === "both");
         } else if (o && o.isDoor) {
           setDoorHeight(o.height ?? DEFAULT_OPENING_HEIGHT);
+          setDoorSplit(!!o.dividers);
         }
         return;
       }
@@ -4305,18 +4346,18 @@ export default function RoomBuilder() {
         // and drag immediately starts marking the opening's width
         dragState = { type: "pending-cut", panelKey, info, hitPoint: hp, startScreen: { x: e.clientX, y: e.clientY } };
       } else if (toolRef.current === "door") {
-        // doors are a fixed width (3ft), floor to lintel at the current
+        // doors are a fixed width (6ft), floor to lintel at the current
         // door-height setting -- a single tap places one centered on the
         // tap point, no drag needed.
         pushUndo();
-        const doorWidth = 3 * FT;
+        const doorWidth = 6 * FT;
         const u = panelU(info, hp);
         let u0 = u - doorWidth / 2, u1 = u + doorWidth / 2;
         if (u0 < info.u0) { u0 = info.u0; u1 = u0 + doorWidth; }
         if (u1 > info.u1) { u1 = info.u1; u0 = u1 - doorWidth; }
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
-          state.openings.push({ id: idSeq++, panel: panelKey, u0, u1, height: doorHeightRef.current, isDoor: true });
+          state.openings.push({ id: idSeq++, panel: panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
           rebuild();
         }
       } else if (toolRef.current === "props" && propsShapeRef.current === "balcony") {
@@ -5298,8 +5339,10 @@ export default function RoomBuilder() {
       const id = selectedOpeningIdRef.current;
       if (id == null) return;
       const o = (state.openings || []).find((oo) => oo.id === id);
-      if (!o || o.isDoor) return;
-      o.dividers = Math.max(0, n);
+      if (!o) return;
+      // a door only ever supports a single center split, unlike a window's
+      // full 0-20 divider grid.
+      o.dividers = Math.max(0, o.isDoor ? Math.min(1, n) : n);
       rebuild();
     }
     function setActiveOpeningAxis(vertical, horizontal) {
@@ -5789,7 +5832,7 @@ export default function RoomBuilder() {
     function setActiveFloorThickness(t) {
       const entry = floors.find((f) => f.id === activeFloorId);
       if (!entry) return;
-      entry.data.thickness = Math.max(0.03, Math.min(0.6, t));
+      entry.data.thickness = Math.max(0.03, Math.min(3, t));
       rebuild();
     }
     wallThicknessApiRef.current = { setThickness: setActiveFloorThickness };
@@ -6172,29 +6215,33 @@ export default function RoomBuilder() {
           --text-secondary: rgba(235, 235, 245, 0.6);
           --text-tertiary: rgba(235, 235, 245, 0.3);
           --scrollbar-track: rgba(255, 255, 255, 0.05);
+          --bg-thumb: #38383a;
           /* dark theme: a lighter grey splitter reads against the dark panels */
           --splitter: rgba(255, 255, 255, 0.22);
         }
         [data-theme="light"] {
-          /* a warm, slightly desaturated off-white -- the Teenage
-             Engineering color-wheel tool's own background tone -- rather
-             than a cooler, more neutral system grey. */
-          --bg-window: #eae9e4;
-          --bg-panel: #f4f3ee;
-          --bg-panel-translucent: #f4f3ee;
-          --bg-strip: #e8e6df;
+          /* exact neutral greys sampled from the reference mockup -- R=G=B,
+             no warm cream tint. The panel/strip/window/thumbnail shades
+             sit within a few points of each other on purpose (that's how
+             the reference itself reads); --bg-selected is the one clear,
+             deliberate step down. */
+          --bg-window: #e4e4e4;
+          --bg-panel: #e8e8e8;
+          --bg-panel-translucent: #e8e8e8;
+          --bg-strip: #e0e0e0;
+          --bg-thumb: #eeeeee;
           --bg-control: #ffffff;
-          --bg-control-hover: #e7e5de;
-          --bg-control-pressed: #d6d3ca;
+          --bg-control-hover: #dcdcdc;
+          --bg-control-pressed: #cfcfcf;
           --bg-floating: rgba(255, 255, 255, 0.85);
-          --border-separator: rgba(40, 38, 30, 0.16);
-          --border-control: rgba(20, 18, 12, 0.14);
-          --text-primary: rgba(20, 18, 12, 0.92);
-          --text-secondary: rgba(50, 46, 38, 0.6);
-          --text-tertiary: rgba(50, 46, 38, 0.32);
+          --border-separator: rgba(0, 0, 0, 0.14);
+          --border-control: rgba(0, 0, 0, 0.13);
+          --text-primary: rgba(0, 0, 0, 0.88);
+          --text-secondary: rgba(0, 0, 0, 0.56);
+          --text-tertiary: rgba(0, 0, 0, 0.3);
           --scrollbar-track: rgba(0, 0, 0, 0.04);
           /* light theme: a thin dark grey splitter, per the reference UI */
-          --splitter: rgba(40, 38, 30, 0.35);
+          --splitter: rgba(0, 0, 0, 0.32);
         }
         [data-theme] {
           /* the app's own brand accent -- kept constant across both themes
@@ -6210,16 +6257,17 @@ export default function RoomBuilder() {
              Teenage-Engineering-tool feel. */
           --font-system: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
           --font-mono: "Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
-          /* neutral grey selection fill, used for the selected layer row */
-          --bg-selected: rgba(20, 18, 12, 0.16);
-          --bg-selected-hover: rgba(20, 18, 12, 0.22);
+          /* a flat, neutral highlighted state (not an alpha tint) -- the
+             mockup's own selected-row grey, sampled directly. */
+          --bg-selected: #d6d6d6;
+          --bg-selected-hover: #cccccc;
           /* a dark selection ring around a plain text/icon option -- the
              mockup's own "no button chrome, just a ring when picked" look */
-          --ring-selected: rgba(20, 18, 12, 0.55);
+          --ring-selected: rgba(0, 0, 0, 0.55);
         }
         [data-theme="dark"] {
-          --bg-selected: rgba(255, 255, 255, 0.16);
-          --bg-selected-hover: rgba(255, 255, 255, 0.24);
+          --bg-selected: #48484a;
+          --bg-selected-hover: #525254;
           --ring-selected: rgba(255, 255, 255, 0.5);
         }
         .rb-btn {
@@ -6247,6 +6295,16 @@ export default function RoomBuilder() {
         }
         .rb-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         .rb-range { width: 100%; accent-color: var(--accent); height: 3px; }
+        .rb-radio {
+          -webkit-appearance: none; appearance: none;
+          width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; margin: 0;
+          border: 1.5px solid var(--border-control); background: var(--bg-control);
+          cursor: pointer; position: relative;
+        }
+        .rb-radio:checked { border-color: var(--text-primary); }
+        .rb-radio:checked::after {
+          content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--text-primary);
+        }
         .rb-hue-slider {
           width: 100%; height: 10px; border-radius: 5px; cursor: pointer;
           -webkit-appearance: none; appearance: none;
@@ -6371,6 +6429,30 @@ export default function RoomBuilder() {
       />
       <div ref={measureLayerRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }} />
 
+      {/* light direction -- floating over the viewport for now, rather than
+          living in the ribbon, since it's a scene-wide setting rather than
+          a per-tool one. */}
+      <div
+        style={{
+          position: "absolute", top: TOPBAR_HEIGHT + 12, left: "50%", transform: "translateX(-50%)",
+          display: "flex", alignItems: "center", gap: 8, width: 220,
+          background: "var(--bg-floating)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+          padding: "6px 12px", borderRadius: 8, zIndex: 40,
+        }}
+      >
+        <span style={{ fontSize: 10, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>Light</span>
+        <input
+          className="rb-range"
+          type="range"
+          min={0}
+          max={360}
+          step={1}
+          value={lightAzimuth}
+          onChange={(e) => setLightAzimuth(parseFloat(e.target.value))}
+          style={{ flex: 1 }}
+        />
+      </div>
+
       {walkMode && (
         <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", color: "var(--text-primary)", fontSize: 9.5, background: "var(--bg-floating)", backdropFilter: "blur(12px)", padding: "5px 10px", borderRadius: 8, pointerEvents: "none" }}>
           Drag empty space to orbit the camera &middot; drag a wall or floor to edit it &middot; camera icon to exit
@@ -6410,12 +6492,13 @@ export default function RoomBuilder() {
         }}
       />
 
-      {/* LEFT: Layers panel, floating -- PowerPoint-style slide list, resizable via the handle on its right edge */}
+      {/* LEFT: Layers panel -- docked flush to the left edge and directly
+          under the top band (not floating), PowerPoint-style slide list,
+          resizable via the handle on its right edge */}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT + 8, left: 16, bottom: RIBBON_HEIGHT + 16, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)",
-          border: "1px solid var(--splitter)", borderRadius: 10,
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}
       >
@@ -6437,7 +6520,7 @@ export default function RoomBuilder() {
             cursor: "ew-resize", touchAction: "none", zIndex: 1,
           }}
         />
-        <div style={{ padding: "9px 9px 7px", borderBottom: "1px solid var(--splitter)" }}>
+        <div style={{ padding: "9px 9px 7px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span className="panel-title">Layers</span>
             <div style={{ display: "flex", gap: 3 }}>
@@ -6512,9 +6595,12 @@ export default function RoomBuilder() {
                 }}
                 style={{
                   display: "flex", flexDirection: "row", alignItems: "center", gap: 7, cursor: "grab",
-                  padding: 5, borderRadius: 2, touchAction: "none",
+                  // bleeds out past .layers-scroll's own 8px/34px side
+                  // padding so the selected-row highlight reaches the
+                  // panel's true left edge and as far right as the
+                  // scrollbar strip allows, rather than stopping short.
+                  padding: "5px 34px 5px 8px", margin: "0 -34px 0 -8px", touchAction: "none",
                   opacity: dragFloorId === id ? 0.4 : 1,
-                  border: "1px solid transparent",
                   background: id === activeFloorIdState ? "var(--bg-selected)" : "transparent",
                 }}
               >
@@ -6522,7 +6608,7 @@ export default function RoomBuilder() {
                   ref={(el) => { if (el) thumbCanvasMapRef.current.set(id, el); }}
                   width={480}
                   height={480}
-                  style={{ borderRadius: 1, display: "block", width: 56, height: 56, flexShrink: 0 }}
+                  style={{ borderRadius: 1, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
                 />
                 <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 0 }}>
                   {renamingFloorId === id ? (
@@ -6567,10 +6653,10 @@ export default function RoomBuilder() {
                       Iso
                       <input
                         type="checkbox"
+                        className="rb-radio"
                         checked={isolatedFloorIdsState.includes(id)}
                         onChange={() => toggleIsolateRef.current(id)}
                         title="Isolate this layer (multiple can be isolated together)"
-                        style={{ width: 11, height: 11, cursor: "pointer", accentColor: "var(--accent)" }}
                       />
                     </label>
                     <button
@@ -6616,29 +6702,12 @@ export default function RoomBuilder() {
           />
         </div>
 
-        <div style={{ padding: "9px 11px", borderTop: "1px solid var(--splitter)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9 }}>
-            <span>Layer height</span>
-            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)" }}>{floorHeight.toFixed(2)} m</span>
-          </div>
-          <input
-            className="rb-range"
-            type="range"
-            min={MIN_WALL_HEIGHT}
-            max={MAX_WALL_HEIGHT}
-            step={0.05}
-            value={floorHeight}
-            onPointerDown={() => pushUndoRef.current()}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              setFloorHeight(v);
-              floorHeightApiRef.current.setHeight(v);
-            }}
-          />
-          <div style={{ display: "flex", gap: 12, marginTop: 7 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "var(--text-secondary)", cursor: "pointer" }}>
+        <div style={{ padding: "12px 11px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", gap: 16 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input
                 type="checkbox"
+                className="rb-radio"
                 checked={ceilingOn}
                 onChange={(e) => {
                   pushUndoRef.current();
@@ -6648,9 +6717,10 @@ export default function RoomBuilder() {
               />
               Ceiling
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "var(--text-secondary)", cursor: "pointer" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input
                 type="checkbox"
+                className="rb-radio"
                 checked={groundOn}
                 onChange={(e) => {
                   setGroundOn(e.target.checked);
@@ -6660,6 +6730,27 @@ export default function RoomBuilder() {
               Ground
             </label>
           </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9.5, marginBottom: 4 }}>
+              <span>Layer height</span>
+              <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)" }}>{floorHeight.toFixed(2)} m</span>
+            </div>
+            <input
+              className="rb-range"
+              type="range"
+              min={MIN_WALL_HEIGHT}
+              max={MAX_WALL_HEIGHT}
+              step={0.05}
+              value={floorHeight}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                setFloorHeight(v);
+                floorHeightApiRef.current.setHeight(v);
+              }}
+            />
+          </div>
+          <div ref={hudRef} style={{ fontSize: 10.5, color: "var(--text-secondary)", fontVariantNumeric: "tabular-nums", lineHeight: 1.5 }} />
         </div>
       </div>
 
@@ -6676,7 +6767,6 @@ export default function RoomBuilder() {
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "0 12px", gap: 12, pointerEvents: "none",
           background: "var(--bg-strip)",
-          borderBottom: "1px solid var(--splitter)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
@@ -6717,7 +6807,8 @@ export default function RoomBuilder() {
               setOpeningDividers(3);
               setOpeningAxisVertical(true);
               setOpeningAxisHorizontal(false);
-              setDoorHeight(7 * FT);
+              setDoorHeight(14 * FT);
+              setDoorSplit(false);
               setPropsShape("cube");
               setCurvedCornersOn(false);
               setCurvedCornersRadius(0.6);
@@ -6799,11 +6890,12 @@ export default function RoomBuilder() {
         </div>
       </div>
 
-      {/* these two float directly over the always-dark 3D canvas, not over
-          any themed chrome panel, so they stay a fixed light color in both
+      {/* floats directly over the always-dark 3D canvas, not over any
+          themed chrome panel, so it stays a fixed light color in both
           themes rather than following --text-secondary/tertiary (which
-          would go dark-on-dark and vanish in light mode). */}
-      <div ref={hudRef} style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, left: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.7)" : "rgba(255,255,255,0.75)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 11.5, letterSpacing: "0.01em", fontVariantNumeric: "tabular-nums" }} />
+          would go dark-on-dark and vanish in light mode). The room
+          dimensions readout itself now lives in the Layers panel instead
+          of floating here. */}
       <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 8.5, textAlign: "right" }}>
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
@@ -6887,6 +6979,7 @@ export default function RoomBuilder() {
                   <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
                     <input
                       type="checkbox"
+                      className="rb-radio"
                       checked={curvedCornersOn}
                       onChange={(e) => {
                         pushUndoRef.current();
@@ -6943,7 +7036,7 @@ export default function RoomBuilder() {
                 className="rb-range"
                 type="range"
                 min={0.03}
-                max={0.6}
+                max={3}
                 step={0.01}
                 value={wallThickness}
                 onPointerDown={() => pushUndoRef.current()}
@@ -6984,7 +7077,7 @@ export default function RoomBuilder() {
                 className="rb-range"
                 type="range"
                 min={0}
-                max={6}
+                max={20}
                 step={1}
                 value={openingDividers}
                 onPointerDown={() => pushUndoRef.current()}
@@ -7044,6 +7137,22 @@ export default function RoomBuilder() {
                   if (selectedOpeningId != null) openingEditApiRef.current.setHeight(h);
                 }}
               />
+            </div>
+          )}
+          {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
+            <div className="ribbon-group">
+              <span className="ribbon-label">Style</span>
+              <button
+                className={`rb-btn ${doorSplit ? "active" : ""}`}
+                onClick={() => {
+                  pushUndoRef.current();
+                  const v = !doorSplit;
+                  setDoorSplit(v);
+                  if (selectedOpeningId != null) openingEditApiRef.current.setDividers(v ? 1 : 0);
+                }}
+              >
+                Split door
+              </button>
             </div>
           )}
           {tool === "props" && (
@@ -7229,7 +7338,7 @@ export default function RoomBuilder() {
           </div>
           <div className="ribbon-group" style={{ minWidth: 150, gap: 4 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <input type="checkbox" checked={tintActiveOn} onChange={(e) => setTintActiveOn(e.target.checked)} style={{ cursor: "pointer" }} />
+              <input type="checkbox" className="rb-radio" checked={tintActiveOn} onChange={(e) => setTintActiveOn(e.target.checked)} />
               <span className="ribbon-label" style={{ margin: 0, width: 40, flexShrink: 0 }}>Active</span>
               <div style={{ display: "flex", gap: 3 }}>
                 {TE_SWATCHES.map((c) => (
@@ -7247,7 +7356,7 @@ export default function RoomBuilder() {
               </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <input type="checkbox" checked={tintInactiveOn} onChange={(e) => setTintInactiveOn(e.target.checked)} style={{ cursor: "pointer" }} />
+              <input type="checkbox" className="rb-radio" checked={tintInactiveOn} onChange={(e) => setTintInactiveOn(e.target.checked)} />
               <span className="ribbon-label" style={{ margin: 0, width: 40, flexShrink: 0 }}>Inactive</span>
               <div style={{ display: "flex", gap: 3 }}>
                 {TE_SWATCHES.map((c) => (
