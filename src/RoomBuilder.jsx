@@ -26,6 +26,8 @@ const FT = 0.3048;                // grid/measurement units are shown in feet
 const DEFAULT_ROOM_HALF_X = 12.5; // default room is 25m x 15m
 const DEFAULT_ROOM_HALF_Z = 7.5;
 const MIN_STAIR_SIZE = FT;         // smallest footprint that commits as a staircase
+const MIN_ROOM_DRAW_SIZE = 3 * FT; // smallest footprint that commits as a new drawn room
+const ROOM_SNAP_DIST = 3;          // meters -- generous snap radius for the Room tool's corner/edge snapping
 const VIEW_SHIFT = 1.28;          // widen the virtual frame this much to push the model right, clear of the side panel
 const BALCONY_CEILING_DROP = 2 * FT;   // the balcony ceiling/roof sits this far below the room's own default height
 const BALCONY_CEILING_THICKNESS = 0.45; // roof slab thickness
@@ -542,6 +544,8 @@ export default function RoomBuilder() {
   // near-black void reads as far too contrasty next to a light UI.
   // Defaults to dark to match how this always looked before.
   const [uiTheme, setUiTheme] = useState("dark");
+  const uiThemeRef = useRef(uiTheme);
+  useEffect(() => { uiThemeRef.current = uiTheme; }, [uiTheme]);
   const viewportThemeApiRef = useRef(() => {});
   useEffect(() => { viewportThemeApiRef.current(uiTheme); }, [uiTheme]);
   const [tool, setTool] = useState("move");
@@ -1938,7 +1942,13 @@ export default function RoomBuilder() {
       else hmesh.position.set(coord, (y0 + y1) / 2, (c.u0 + c.u1) / 2);
       hmesh.userData = { kind: "opening", id: c.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
       sceneGroup.add(hmesh);
-      if (isPickableTarget) pickList.push(hmesh);
+      // a room-to-room connection door is computed fresh every rebuild, not
+      // stored/editable state -- excluded from pickList so it can't be
+      // individually selected, resized, or deleted (it would just come
+      // right back on the next rebuild anyway, as long as the rooms are
+      // still touching).
+      const isConnectionDoor = typeof c.id === "string" && c.id.startsWith("__conn_");
+      if (isPickableTarget && !isConnectionDoor) pickList.push(hmesh);
 
       if (isPickableTarget && selectedOpeningIdRef.current === c.id) {
         const hlGeo = new THREE.PlaneGeometry(len, h);
@@ -2164,7 +2174,15 @@ export default function RoomBuilder() {
     let previewSelection = null;
     let previewOpening = null;
     let previewStair = null; // {x0,x1,z0,z1} while dragging out a new staircase footprint
+    let previewRoom = null; // {x0,x1,z0,z1} while dragging out a new room's footprint
     let measureAnchors = []; // {point: Vector3, text} for the length overlay
+    // synthetic door openings for whichever room is currently being built --
+    // set by rebuildRoomEntry from computeRoomConnections() just before it,
+    // read by openingsFor() alongside a room's own real openings. Never
+    // written into room.data.openings itself, so they're recomputed fresh
+    // (and silently vanish/reappear) every rebuild rather than being
+    // persisted, user-deletable state.
+    let currentConnectionDoors = [];
 
     function defaultStairSteps(height) {
       return Math.max(2, Math.round((height / FT) * 2));
@@ -2173,6 +2191,7 @@ export default function RoomBuilder() {
     function openingsFor(panelKey) {
       const list = state.openings.filter((o) => o.panel === panelKey).map((o) => ({ ...o }));
       if (previewOpening && previewOpening.panel === panelKey) list.push({ ...previewOpening, id: "__preview__" });
+      currentConnectionDoors.filter((o) => o.panel === panelKey).forEach((o) => list.push({ ...o }));
       return list;
     }
     function bumpoutsFor(panelKey) { return state.bumpouts.filter((b) => b.panel === panelKey); }
@@ -2980,6 +2999,19 @@ export default function RoomBuilder() {
           }
         }
       }
+      // live rectangle preview while dragging out a brand new room with the
+      // Room tool -- only drawn once (while building the floor's own
+      // top-level content), not once per existing room too.
+      if (previewRoom && buildingRoomId == null) {
+        const x0 = Math.min(previewRoom.x0, previewRoom.x1), x1 = Math.max(previewRoom.x0, previewRoom.x1);
+        const z0 = Math.min(previewRoom.z0, previewRoom.z1), z1 = Math.max(previewRoom.z0, previewRoom.z1);
+        const w = x1 - x0, d = z1 - z0;
+        if (w > 0.02 && d > 0.02) {
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), selMatPreview);
+          mesh.position.set((x0 + x1) / 2, 0.03, (z0 + z1) / 2);
+          sceneGroup.add(mesh);
+        }
+      }
     }
 
     // sphere/cube/cone/cylinder props, placed by tapping the floor with the
@@ -3341,6 +3373,95 @@ export default function RoomBuilder() {
       });
     }
 
+    // finds every pair of rooms on this floor that are flush against each
+    // other along a shared wall (their touching edges line up and overlap
+    // by enough to fit a door), and returns a doorway for each side of
+    // every such pair -- recomputed from scratch on every rebuild, so
+    // dragging a room away makes its connections vanish and dragging it
+    // back against a neighbor puts them right back, with no separate
+    // connect/disconnect bookkeeping needed.
+    function computeRoomConnections(entry) {
+      const byRoomId = new Map();
+      const rooms = entry.rooms || [];
+      const TOUCH_EPS = 0.08; // wall-thickness-scale tolerance for "flush"
+      const MIN_SHARE = 2 * FT; // shortest shared run worth putting a door in
+      const DOOR_W = 6 * FT;
+      for (let i = 0; i < rooms.length; i++) {
+        for (let j = i + 1; j < rooms.length; j++) {
+          const a = rooms[i], b = rooms[j];
+          const afp = a.data.footprint, bfp = b.data.footprint;
+          const aOX = a.offsetX || 0, aOZ = a.offsetZ || 0;
+          const bOX = b.offsetX || 0, bOZ = b.offsetZ || 0;
+          const aX0 = afp.xMin + aOX, aX1 = afp.xMax + aOX, aZ0 = afp.zMin + aOZ, aZ1 = afp.zMax + aOZ;
+          const bX0 = bfp.xMin + bOX, bX1 = bfp.xMax + bOX, bZ0 = bfp.zMin + bOZ, bZ1 = bfp.zMax + bOZ;
+          let aPanel = null, bPanel = null, axis = null;
+          if (Math.abs(aX1 - bX0) < TOUCH_EPS) { aPanel = "east"; bPanel = "west"; axis = "z"; }
+          else if (Math.abs(bX1 - aX0) < TOUCH_EPS) { aPanel = "west"; bPanel = "east"; axis = "z"; }
+          else if (Math.abs(aZ1 - bZ0) < TOUCH_EPS) { aPanel = "south"; bPanel = "north"; axis = "x"; }
+          else if (Math.abs(bZ1 - aZ0) < TOUCH_EPS) { aPanel = "north"; bPanel = "south"; axis = "x"; }
+          if (!aPanel) continue;
+          const lo = axis === "z" ? Math.max(aZ0, bZ0) : Math.max(aX0, bX0);
+          const hi = axis === "z" ? Math.min(aZ1, bZ1) : Math.min(aX1, bX1);
+          if (hi - lo < MIN_SHARE) continue;
+          const w = Math.min(DOOR_W, hi - lo - 0.2);
+          if (w < 2 * FT) continue;
+          const mid = (lo + hi) / 2;
+          const u0 = mid - w / 2, u1 = mid + w / 2;
+          const aOff = axis === "z" ? aOZ : aOX;
+          const bOff = axis === "z" ? bOZ : bOX;
+          const doorH = Math.min(a.data.height, b.data.height, doorHeightRef.current);
+          const push = (roomId, panel, off) => {
+            if (!byRoomId.has(roomId)) byRoomId.set(roomId, []);
+            byRoomId.get(roomId).push({
+              id: `__conn_${a.id}_${b.id}_${panel}`, panel,
+              u0: u0 - off, u1: u1 - off, height: doorH, isDoor: true, bottomOverride: 0, dividers: 0,
+            });
+          };
+          push(a.id, aPanel, aOff);
+          push(b.id, bPanel, bOff);
+        }
+      }
+      return byRoomId;
+    }
+
+    // Room tool corner/edge snapping -- given a raw world point the user
+    // just dragged to, checks every existing room on this floor (plus the
+    // floor's own base footprint) for a corner or edge within a generous
+    // radius, and returns the snapped point instead. Corners win over edges
+    // when both are in range, since landing exactly on a shared corner is
+    // usually the more useful of the two. An edge snap only touches the one
+    // axis perpendicular to that edge (sliding freely along its length),
+    // which is what makes the new room's near side end up flush and
+    // sharing that wall once it's dragged out from there.
+    function snapRoomPoint(floorEntry, x, z) {
+      const candidates = [{ footprint: floorEntry.data.footprint, offsetX: 0, offsetZ: 0 }];
+      (floorEntry.rooms || []).forEach((r) => candidates.push({ footprint: r.data.footprint, offsetX: r.offsetX || 0, offsetZ: r.offsetZ || 0 }));
+      let bestCorner = null, bestEdge = null;
+      candidates.forEach((c) => {
+        const xMin = c.footprint.xMin + c.offsetX, xMax = c.footprint.xMax + c.offsetX;
+        const zMin = c.footprint.zMin + c.offsetZ, zMax = c.footprint.zMax + c.offsetZ;
+        [[xMin, zMin], [xMax, zMin], [xMin, zMax], [xMax, zMax]].forEach(([cx, cz]) => {
+          const dist = Math.hypot(x - cx, z - cz);
+          if (dist < ROOM_SNAP_DIST && (!bestCorner || dist < bestCorner.dist)) bestCorner = { x: cx, z: cz, dist };
+        });
+        [xMin, xMax].forEach((ex) => {
+          if (z >= zMin - ROOM_SNAP_DIST && z <= zMax + ROOM_SNAP_DIST) {
+            const dist = Math.abs(x - ex);
+            if (dist < ROOM_SNAP_DIST && (!bestEdge || dist < bestEdge.dist)) bestEdge = { x: ex, z, dist };
+          }
+        });
+        [zMin, zMax].forEach((ez) => {
+          if (x >= xMin - ROOM_SNAP_DIST && x <= xMax + ROOM_SNAP_DIST) {
+            const dist = Math.abs(z - ez);
+            if (dist < ROOM_SNAP_DIST && (!bestEdge || dist < bestEdge.dist)) bestEdge = { x, z: ez, dist };
+          }
+        });
+      });
+      if (bestCorner) return { x: bestCorner.x, z: bestCorner.z };
+      if (bestEdge) return { x: bestEdge.x, z: bestEdge.z };
+      return { x, z };
+    }
+
     // renders one floor's data into its own group. Every floor's own top-
     // level content (walls/openings/stairs -- not any room pulled out of
     // it) is added to pickList and stays editable with Wall/Window/Door/
@@ -3395,15 +3516,18 @@ export default function RoomBuilder() {
       currentFloorMat = savedFloorMat;
       buildingRoomId = savedRoomId;
       buildingFloorEntry = savedFloorEntry;
-      (entry.rooms || []).forEach((room) => rebuildRoomEntry(entry, room, isActive));
+      const connections = computeRoomConnections(entry);
+      (entry.rooms || []).forEach((room) => rebuildRoomEntry(entry, room, isActive, connections.get(room.id) || []));
     }
 
     // a room reuses the exact same rendering path as a floor (rebuildCurrentFloorGeometry)
     // -- it's just parented in its own group, offset horizontally within its floor.
-    function rebuildRoomEntry(floorEntry, room, floorIsActive) {
+    function rebuildRoomEntry(floorEntry, room, floorIsActive, connectionDoors) {
       const savedState = state;
       const savedGroup = sceneGroup;
       const savedActive = buildingActiveFloor;
+      const savedConnectionDoors = currentConnectionDoors;
+      currentConnectionDoors = connectionDoors || [];
       const savedTarget = isPickableTarget;
       const savedWallMat = currentWallMat;
       const savedFloorMat = currentFloorMat;
@@ -3443,6 +3567,7 @@ export default function RoomBuilder() {
       currentFloorMat = savedFloorMat;
       buildingRoomId = savedRoomId;
       buildingFloorEntry = savedFloorEntry;
+      currentConnectionDoors = savedConnectionDoors;
     }
 
     // called constantly -- every drag frame, every mutation, every tool or
@@ -4371,6 +4496,31 @@ export default function RoomBuilder() {
         return;
       }
 
+      // Room tool: works on the active floor's own ground plane regardless
+      // of what (if anything) is actually under the cursor there -- an
+      // existing floor surface, or completely open space beside it -- since
+      // a brand new room can start from either. Checked before pick()'s own
+      // "nothing hit -> orbit" fallback so an empty-ground tap draws a room
+      // instead of spinning the camera.
+      if (toolRef.current === "room") {
+        const floorEntry = floors.find((f) => f.id === activeFloorId);
+        const g = floorEntry ? floorGroups.get(activeFloorId) : null;
+        if (floorEntry && g) {
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -g.position.y);
+          const ray = rayFromEvent(e);
+          const pt = new THREE.Vector3();
+          if (ray.intersectPlane(plane, pt)) {
+            pushUndo();
+            const snapped = snapRoomPoint(floorEntry, pt.x, pt.z);
+            dragState = { type: "room-draw", plane, x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
+            previewRoom = { x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
+            rebuild();
+            capture(e);
+            return;
+          }
+        }
+      }
+
       const hit = pick(e);
       if (!hit) {
         orbiting = { x: e.clientX, y: e.clientY, moved: 0 };
@@ -5189,6 +5339,18 @@ export default function RoomBuilder() {
           widthMax: pAxis === "x" ? Math.max(dragState.z0, dragState.z1) : Math.max(dragState.x0, dragState.x1),
         };
         rebuild();
+      } else if (dragState.type === "room-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        // the far corner gets its own chance to snap too (not just the
+        // start corner from pointerdown) -- dragging the opposite corner
+        // toward another room's edge or corner should catch just as easily.
+        const floorEntry = floors.find((f) => f.id === activeFloorId);
+        const snapped = floorEntry ? snapRoomPoint(floorEntry, pt.x, pt.z) : { x: pt.x, z: pt.z };
+        dragState.x1 = snapped.x;
+        dragState.z1 = snapped.z;
+        previewRoom = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
+        rebuild();
       }
     }
 
@@ -5344,6 +5506,22 @@ export default function RoomBuilder() {
           }
         }
         previewStair = null;
+      } else if (dragState.type === "room-draw") {
+        const xMin = Math.min(dragState.x0, dragState.x1), xMax = Math.max(dragState.x0, dragState.x1);
+        const zMin = Math.min(dragState.z0, dragState.z1), zMax = Math.max(dragState.z0, dragState.z1);
+        const floorEntry = floors.find((f) => f.id === activeFloorId);
+        if (floorEntry && xMax - xMin >= MIN_ROOM_DRAW_SIZE && zMax - zMin >= MIN_ROOM_DRAW_SIZE) {
+          const id = idSeq++;
+          const data = makeFloorData();
+          data.footprint = { xMin, xMax, zMin, zMax };
+          data.height = floorEntry.data.height;
+          data.thickness = floorEntry.data.thickness;
+          const room = { id, data, offsetX: 0, offsetZ: 0 };
+          if (!floorEntry.rooms) floorEntry.rooms = [];
+          floorEntry.rooms.push(room);
+          switchActiveRoom(id);
+        }
+        previewRoom = null;
       }
 
       dragState = null;
@@ -6280,11 +6458,19 @@ export default function RoomBuilder() {
     };
 
     function setActiveFloorThickness(t) {
-      // applies to every layer's walls, not just the active one -- wall
-      // thickness reads as a whole-building spec, not a per-room override.
+      // applies to every layer's walls, and every room pulled out of any of
+      // them, not just the active one/room -- wall thickness reads as a
+      // whole-building spec, not a per-room override. rebuildAllFloors (not
+      // the usual rebuild(), which only touches whichever one floor is
+      // currently targeted) is what actually gets every other floor's
+      // now-stale geometry to reflect it right away instead of waiting
+      // until something else happens to rebuild them.
       const clamped = Math.max(0.03, Math.min(3, t));
-      floors.forEach((entry) => { entry.data.thickness = clamped; });
-      rebuild();
+      floors.forEach((entry) => {
+        entry.data.thickness = clamped;
+        (entry.rooms || []).forEach((room) => { room.data.thickness = clamped; });
+      });
+      rebuildAllFloors();
     }
     wallThicknessApiRef.current = { setThickness: setActiveFloorThickness };
 
@@ -6393,16 +6579,18 @@ export default function RoomBuilder() {
         let el = floorLabelPool.get(entry.id);
         if (!el) {
           // plain floating text -- no button/pill chrome, just a label,
-          // exactly matching the measurement labels' own font/size/shadow
-          // treatment (see updateMeasureLabels below).
+          // using the exact same font/size as the ribbon's own floating
+          // parameter labels (e.g. "Opening height" under the Window tool)
+          // -- the ".ribbon-label" class, replicated inline since this is a
+          // detached DOM node outside React's own tree.
           el = document.createElement("div");
           el.style.position = "absolute";
           el.style.transform = "translate(0, -50%)";
           el.style.pointerEvents = "auto";
           el.style.cursor = "pointer";
-          el.style.fontSize = "10.5px";
-          el.style.fontWeight = "700";
-          el.style.fontFamily = "'Roboto', system-ui, sans-serif";
+          el.style.fontSize = "9.5px";
+          el.style.fontWeight = "500";
+          el.style.fontFamily = '"Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace';
           el.style.whiteSpace = "nowrap";
           el.style.background = "none";
           el.style.border = "none";
@@ -6414,10 +6602,15 @@ export default function RoomBuilder() {
         }
         el.onclick = () => selectFloorById(entry.id);
         const isActive = entry.id === activeFloorId;
-        // matches whatever the Active/Inactive tint swatches are currently
-        // set to, not a hardcoded pair -- the active layer's label reads in
-        // the Active tint color, every other layer's in the Inactive one.
-        el.style.color = "#" + new THREE.Color(isActive ? currentTintActiveColor : currentTintInactiveColor).getHexString();
+        // dark mode: fixed white/grey (readable against the dark viewport
+        // regardless of whatever the tint swatches happen to be set to);
+        // light mode: unchanged, still following the Active/Inactive tint
+        // colors like before.
+        if (uiThemeRef.current === "dark") {
+          el.style.color = isActive ? "#ffffff" : "#9a9a9a";
+        } else {
+          el.style.color = "#" + new THREE.Color(isActive ? currentTintActiveColor : currentTintInactiveColor).getHexString();
+        }
         el.textContent = floorNamesRef.current[entry.id] || `Layer ${floors.findIndex((f) => f.id === entry.id) + 1}`;
         // Anchored in SCREEN space, not world space -- a fixed world-space
         // +X offset would swing to the front/left/behind the building as
@@ -8014,6 +8207,7 @@ export default function RoomBuilder() {
           <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
           <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
           <button className={`rb-btn ${tool === "door" ? "active" : ""}`} onClick={() => setTool("door")}>Door</button>
+          <button className={`rb-btn ${tool === "room" ? "active" : ""}`} onClick={() => setTool("room")} title="Tap and drag to draw a new room -- on the floor, or on open ground beside it">Room</button>
           <button className={`rb-btn ${tool === "stairs" ? "active" : ""}`} onClick={() => setTool("stairs")}>Stairs</button>
           <button className={`rb-btn ${tool === "props" ? "active" : ""}`} onClick={() => setTool("props")}>Props</button>
         </div>
