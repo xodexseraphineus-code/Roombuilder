@@ -5636,16 +5636,10 @@ export default function RoomBuilder() {
       const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === activeRoomId);
       if (!room) return;
       const clamped = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      // deliberately just this one room -- "Room height" is the per-room
+      // override; "Layer height" (setActiveFloorHeight) is the uniform,
+      // whole-layer control that applies to every room on the floor at once.
       room.data.height = clamped;
-      // the reverse of the sync in setActiveFloorHeight -- this room is by
-      // definition the one currently focused on its floor, so keep the
-      // floor's own data.height (and the Layers panel's "Layer height"
-      // display, which reads from it) in step too.
-      if (floorEntry) {
-        floorEntry.data.height = clamped;
-        floorEntry.data.panelHeights = {};
-        syncFloorsToReact();
-      }
       rebuild();
     }
     roomHeightApiRef.current = { setHeight: setActiveRoomHeight };
@@ -6267,17 +6261,13 @@ export default function RoomBuilder() {
       // the user is adjusting the room's overall height, the clear intent is
       // for every wall to track it, so per-wall overrides reset here.
       entry.data.panelHeights = {};
-      // if a room on this floor is currently focused, ITS data is what
-      // actually renders, not the floor's own -- without this, dragging
-      // this slider silently edited a number nothing on screen was reading
-      // from. Keyed on activeRoomId (not "whichever room's footprint
-      // happens to match the floor's"), since after duplicating a
-      // whole-floor room there are two rooms with that same footprint and
-      // only the one you're actually looking at should track this slider.
-      if (activeRoomId != null) {
-        const room = (entry.rooms || []).find((r) => r.id === activeRoomId);
-        if (room) { room.data.height = clamped; room.data.panelHeights = {}; }
-      }
+      // "Layer height" is a uniform, whole-layer control -- every room
+      // pulled out of this floor (the original, any duplicate, every
+      // partitioned sub-room) tracks it together, exactly like wall
+      // thickness already applies to a whole floor at once. A room's own
+      // "Room height" slider is the one place to give a single room a
+      // different height from the rest of its layer.
+      (entry.rooms || []).forEach((room) => { room.data.height = clamped; room.data.panelHeights = {}; });
       restackFloors();
       const g = floorGroups.get(activeFloorId);
       if (g) target.y = g.position.y + entry.data.height * 0.32;
@@ -6402,33 +6392,35 @@ export default function RoomBuilder() {
         seen.add(entry.id);
         let el = floorLabelPool.get(entry.id);
         if (!el) {
+          // plain floating text -- no button/pill chrome, just a label,
+          // matching the measurement labels' own treatment (color + shadow
+          // for legibility against whatever's behind it, nothing else).
           el = document.createElement("div");
           el.style.position = "absolute";
           el.style.transform = "translate(0, -50%)";
           el.style.pointerEvents = "auto";
           el.style.cursor = "pointer";
-          el.style.fontSize = "10.5px";
-          el.style.fontWeight = "600";
+          el.style.fontSize = "11px";
+          el.style.fontWeight = "700";
           el.style.fontFamily = "'Roboto', system-ui, sans-serif";
           el.style.whiteSpace = "nowrap";
-          el.style.padding = "3px 8px";
-          el.style.borderRadius = "999px";
-          el.style.background = "var(--bg-strip)";
-          el.style.border = "1px solid var(--splitter)";
-          el.style.color = "var(--text-primary)";
+          el.style.background = "none";
+          el.style.border = "none";
+          el.style.padding = "0";
+          el.style.textShadow = "0 1px 3px rgba(0,0,0,0.75)";
           el.style.userSelect = "none";
           layer.appendChild(el);
           floorLabelPool.set(entry.id, el);
         }
         el.onclick = () => selectFloorById(entry.id);
         const isActive = entry.id === activeFloorId;
-        el.style.borderColor = isActive ? "#FF6B1A" : "var(--splitter)";
-        el.style.opacity = isActive ? "1" : "0.75";
+        el.style.color = isActive ? "#FF6B1A" : "rgba(255,255,255,0.7)";
         el.textContent = floorNamesRef.current[entry.id] || `Layer ${floors.findIndex((f) => f.id === entry.id) + 1}`;
-        // floats just past the floor's own right (+X) edge, vertically
-        // centered on the layer -- "right beside and in the centre" of it.
+        // floats well clear of the floor's own right (+X) edge, vertically
+        // centered on the layer -- "well over to the right, in the centre"
+        // of it.
         const fp = entry.data.footprint;
-        const pt = new THREE.Vector3(fp.xMax + 1.2, entry.data.height / 2, 0);
+        const pt = new THREE.Vector3(fp.xMax + 7, entry.data.height / 2, 0);
         pt.y += g.position.y;
         const inFront = pt.clone().sub(activeCamera.position).dot(camForward) > 0;
         if (!inFront) { el.style.display = "none"; return; }
@@ -7272,8 +7264,8 @@ export default function RoomBuilder() {
                   height={480}
                   style={{ borderRadius: 6, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
                 />
-                <div style={{ display: "flex", flexDirection: "column", height: 64, flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", flex: 1, alignItems: "center", minHeight: 0 }}>
+                <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, height: 64, flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex" }}>
                     {renamingFloorId === id ? (
                       <input
                         autoFocus
