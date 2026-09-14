@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2 } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -1797,7 +1797,7 @@ export default function RoomBuilder() {
     // a wall-tinted panel did; a room theme still tints .color on top (a
     // hue-tinted metal rail, e.g. neon blue), but the low roughness/high
     // metalness stays fixed so it always looks like metal hardware.
-    const PILLAR_DEFAULT_COLOR = 0x333333; // 80% of the way to black
+    const PILLAR_DEFAULT_COLOR = 0x474747; // 10% lighter than the previous 0x333333
     const pillarMat = new THREE.MeshStandardMaterial({ color: PILLAR_DEFAULT_COLOR, roughness: 0.32, metalness: 0.8, envMapIntensity: 1.4, envMap: reflectionEnvMap });
     const pillarMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(PILLAR_DEFAULT_COLOR).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.32, metalness: 0.8, envMapIntensity: 1.4, envMap: reflectionEnvMap });
     // window/door mullions get their own dark frame material -- 80% of the
@@ -1805,9 +1805,10 @@ export default function RoomBuilder() {
     // (less metallic, more like a painted/anodized frame than raw metal).
     const mullionMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.55, metalness: 0.15, envMapIntensity: 0.4 });
     // the balcony platform gets its own material too -- a room theme colors
-    // it independently from the room's own floor, rather than the platform
-    // just always matching whatever the floor happens to be.
-    const balconyPlatformMat = new THREE.MeshStandardMaterial({ color: COLORS.floor, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
+    // it independently from the room's own floor; by default (no theme
+    // picked) it matches the wall color instead, same as the balcony's own
+    // roof below.
+    const balconyPlatformMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
     // a balcony's own covered ceiling gets its own material too, rather
     // than always just following the walls -- a room theme can give it a
     // deliberately contrasting (often complementary-hue) "roof" color.
@@ -1845,7 +1846,10 @@ export default function RoomBuilder() {
       // invisible head-on; a stronger, deliberately-unrealistic metalness
       // plus a much higher envMapIntensity make the reflection actually
       // read as reflection detail rather than just a flat tinted pane.
-      color: 0x9ec8ee, transparent: true, opacity: 0.35, roughness: 0.08, metalness: 0.35, envMapIntensity: 3.2, side: THREE.DoubleSide,
+      // metalness/envMapIntensity both brought down 10% from their earlier
+      // bumped values, per a request to make glass a touch less reflective
+      // without undoing the "reflection should actually be visible" fix.
+      color: 0x9ec8ee, transparent: true, opacity: 0.35, roughness: 0.08, metalness: 0.315, envMapIntensity: 2.88, side: THREE.DoubleSide,
       // its own detailed cityscape reflection map rather than the soft
       // ambient ibl -- glass should visibly reflect *something*, not just
       // tint toward a flat gradient color.
@@ -1856,9 +1860,9 @@ export default function RoomBuilder() {
     // it (unlike setting mesh.visible=false, which Three.js's Raycaster
     // skips entirely), but it renders as nothing.
     const hotspotMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
-    // staircases get their own light-pink color so they read distinctly
-    // from the walls, rather than blending in as just another wall panel.
-    const stairMat = new THREE.MeshStandardMaterial({ color: 0xf2c6d6, roughness: 0.82, metalness: 0.02 });
+    // staircases default to matching the wall color, same as the balcony
+    // platform/roof; a room theme can still give them their own distinct tone.
+    const stairMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.82, metalness: 0.02 });
     // prop shapes, each with its own fixed color -- a flat, saturated
     // plastic finish (low roughness for a clear specular highlight and
     // crisp light/shadow falloff, a light touch of environment reflection
@@ -3316,6 +3320,22 @@ export default function RoomBuilder() {
       });
     }
 
+    // a plain tap on an undivided floor (see the "pending-room-move" gesture
+    // below) turns the whole floor into its own room -- a full clone of the
+    // floor's data, footprint included, pushed into entry.rooms so it's
+    // selectable/editable like any other room. That leaves two separate
+    // data objects (entry.data and the room's own) with the same footprint;
+    // this finds that room so floor-level controls (Layer height) can keep
+    // it in sync with whichever one is actually being rendered.
+    function findWholeFloorRoom(entry) {
+      const fp2 = entry.data.footprint;
+      return (entry.rooms || []).find((rm) => {
+        const rf = rm.data.footprint;
+        return Math.abs(rf.xMin - fp2.xMin) < 0.05 && Math.abs(rf.xMax - fp2.xMax) < 0.05 &&
+               Math.abs(rf.zMin - fp2.zMin) < 0.05 && Math.abs(rf.zMax - fp2.zMax) < 0.05;
+      });
+    }
+
     // renders one floor's data into its own group. Every floor's own top-
     // level content (walls/openings/stairs -- not any room pulled out of
     // it) is added to pickList and stays editable with Wall/Window/Door/
@@ -3356,11 +3376,7 @@ export default function RoomBuilder() {
       // fully replaced the floor's own walls -- skip rendering the floor's
       // own content there so the two don't visually compete (and to leave
       // the room as the only clickable thing in that space).
-      const wholeFloorClaimed = (entry.rooms || []).some((rm) => {
-        const rf = rm.data.footprint, fp2 = entry.data.footprint;
-        return Math.abs(rf.xMin - fp2.xMin) < 0.05 && Math.abs(rf.xMax - fp2.xMax) < 0.05 &&
-               Math.abs(rf.zMin - fp2.zMin) < 0.05 && Math.abs(rf.zMax - fp2.zMax) < 0.05;
-      });
+      const wholeFloorClaimed = !!findWholeFloorRoom(entry);
       if (sceneGroup) {
         if (wholeFloorClaimed) clearGroup(sceneGroup);
         else rebuildCurrentFloorGeometry();
@@ -3670,7 +3686,6 @@ export default function RoomBuilder() {
     // cleared, reverts each one to its own default color) -- mutating the
     // shared materials directly, so already-placed props update
     // immediately without needing a rebuild.
-    const STAIR_DEFAULT_COLOR = 0xf2c6d6;
     function applyPropColors(colors) {
       Object.keys(propMats).forEach((kind) => {
         propMats[kind].color.set(colors ? colors[kind] : PROP_DEFAULT_COLORS[kind]);
@@ -3686,8 +3701,8 @@ export default function RoomBuilder() {
         currentThemeWallColor = null;
         currentThemeFloorColor = null;
         recomputeWallFloorMaterials();
-        stairMat.color.set(STAIR_DEFAULT_COLOR);
-        balconyPlatformMat.color.set(COLORS.floor);
+        stairMat.color.set(COLORS.wall);
+        balconyPlatformMat.color.set(COLORS.wall);
         pillarMat.color.set(PILLAR_DEFAULT_COLOR);
         balconyRoofMat.color.set(COLORS.wall);
         applyPropColors(null);
@@ -5590,7 +5605,17 @@ export default function RoomBuilder() {
       const floorEntry = floors.find((f) => f.id === activeFloorId);
       const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === activeRoomId);
       if (!room) return;
-      room.data.height = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      const clamped = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      room.data.height = clamped;
+      // the reverse of the sync in setActiveFloorHeight -- if this room IS
+      // the whole floor (pulled out by a plain tap on an undivided floor),
+      // keep the floor's own data.height and the Layers panel's "Layer
+      // height" display in step with it too.
+      if (floorEntry && findWholeFloorRoom(floorEntry) === room) {
+        floorEntry.data.height = clamped;
+        floorEntry.data.panelHeights = {};
+        syncFloorsToReact();
+      }
       rebuild();
     }
     roomHeightApiRef.current = { setHeight: setActiveRoomHeight };
@@ -6100,7 +6125,12 @@ export default function RoomBuilder() {
       const room = {
         id,
         data: JSON.parse(JSON.stringify(roomClipboard.data)),
-        offsetX: (roomClipboard.offsetX || 0) + (width + 0.5) * roomPasteCount,
+        // a generous 2m gap (not the previous 0.5m) -- close enough to read
+        // as "next to" the original, but far enough that the two rooms'
+        // near walls are clearly two separate, individually clickable
+        // panels instead of an almost-touching sliver that's easy to
+        // mis-click as the wrong room.
+        offsetX: (roomClipboard.offsetX || 0) + (width + 2) * roomPasteCount,
         offsetZ: roomClipboard.offsetZ || 0,
       };
       if (!floorEntry.rooms) floorEntry.rooms = [];
@@ -6121,7 +6151,10 @@ export default function RoomBuilder() {
       const newRoom = {
         id: newId,
         data: JSON.parse(JSON.stringify(room.data)),
-        offsetX: (room.offsetX || 0) + width + 0.5,
+        // same generous 2m gap as pasteRoom, for the same reason -- a near-
+        // touching duplicate made its own near wall nearly indistinguishable
+        // from the original's, an easy way to end up editing the wrong room.
+        offsetX: (room.offsetX || 0) + width + 2,
         offsetZ: room.offsetZ || 0,
       };
       floorEntry.rooms.push(newRoom);
@@ -6196,13 +6229,21 @@ export default function RoomBuilder() {
     function setActiveFloorHeight(h) {
       const entry = floors.find((f) => f.id === activeFloorId);
       if (!entry) return;
-      entry.data.height = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      const clamped = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
+      entry.data.height = clamped;
       // any wall previously given its own individual height override would
       // otherwise stay stuck at that old value forever, since getPanelHeight()
       // prefers a per-panel override over the room's overall height -- when
       // the user is adjusting the room's overall height, the clear intent is
       // for every wall to track it, so per-wall overrides reset here.
       entry.data.panelHeights = {};
+      // when the whole floor has been pulled out into its own room (a plain
+      // tap on an undivided floor does this -- see commitRoomFromFound),
+      // that room's own data.height is what actually renders, not the
+      // floor's -- without this, dragging this slider silently edited a
+      // number nothing on screen was reading from.
+      const wholeRoom = findWholeFloorRoom(entry);
+      if (wholeRoom) { wholeRoom.data.height = clamped; wholeRoom.data.panelHeights = {}; }
       restackFloors();
       const g = floorGroups.get(activeFloorId);
       if (g) target.y = g.position.y + entry.data.height * 0.32;
@@ -7027,14 +7068,15 @@ export default function RoomBuilder() {
                 ref={delBtnRef}
                 className="rb-btn"
                 style={{
-                  padding: "2px 7px", fontSize: 9, flex: "0 0 auto",
+                  padding: "2px 6px", fontSize: 9, flex: "0 0 auto",
+                  display: "flex", alignItems: "center",
                   background: dragOverAction === "del" ? "rgba(255,255,255,0.18)" : "transparent",
                   border: dragOverAction === "del" ? "1px solid #fff" : "1px solid var(--splitter)",
                 }}
                 onClick={() => deleteFloorRef.current()}
                 title="Delete the selected layer -- or drag a layer row down onto this button"
               >
-                Del
+                <Trash2 size={12} />
               </button>
             </div>
           </div>
@@ -7129,54 +7171,66 @@ export default function RoomBuilder() {
                   height={480}
                   style={{ borderRadius: 6, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
                 />
-                <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, height: 56, flex: 1, minWidth: 0 }}>
-                  {renamingFloorId === id ? (
-                    <input
-                      autoFocus
-                      value={renameInputValue}
-                      onChange={(e) => setRenameInputValue(e.target.value)}
-                      onBlur={() => {
-                        setFloorNames((prev) => ({ ...prev, [id]: renameInputValue.trim() }));
-                        setRenamingFloorId(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") e.currentTarget.blur();
-                        if (e.key === "Escape") setRenamingFloorId(null);
-                      }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{
-                        fontSize: 9.5, background: "var(--bg-control)", color: "var(--text-primary)",
-                        border: "1px solid var(--accent)", borderRadius: 4, width: "100%", padding: "1px 3px",
-                      }}
-                    />
-                  ) : (
-                    <span
-                      style={{
-                        color: "var(--text-primary)", fontSize: 9.5, cursor: "text",
-                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                        // a bare flex-column child stretches to the column's
-                        // full width by default -- without this, the rename
-                        // hotspot was the whole row's width, not just the
-                        // name text itself, so clicking anywhere near it
-                        // (not just on the name) would trigger rename mode.
-                        alignSelf: "flex-start", maxWidth: "100%", display: "inline-block",
-                      }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRenameInputValue(floorNames[id] || `Layer ${floorIds.length - i}`);
-                        setRenamingFloorId(id);
-                      }}
-                      title="Click to rename"
-                    >
-                      {floorNames[id] || `Layer ${floorIds.length - i}`}
-                    </span>
-                  )}
+                <div style={{ display: "flex", flexDirection: "column", height: 56, flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", flex: 1, alignItems: "center", minHeight: 0 }}>
+                    {renamingFloorId === id ? (
+                      <input
+                        autoFocus
+                        value={renameInputValue}
+                        onChange={(e) => setRenameInputValue(e.target.value)}
+                        onBlur={() => {
+                          setFloorNames((prev) => ({ ...prev, [id]: renameInputValue.trim() }));
+                          setRenamingFloorId(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.currentTarget.blur();
+                          if (e.key === "Escape") setRenamingFloorId(null);
+                        }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                          fontSize: 9.5, background: "var(--bg-control)", color: "var(--text-primary)",
+                          border: "1px solid var(--accent)", borderRadius: 4, width: "100%", padding: "1px 3px",
+                        }}
+                      />
+                    ) : (
+                      <span
+                        style={{
+                          color: "var(--text-primary)", fontSize: 9.5, cursor: "text",
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          // a bare flex-column child stretches to the column's
+                          // full width by default -- without this, the rename
+                          // hotspot was the whole row's width, not just the
+                          // name text itself, so clicking anywhere near it
+                          // (not just on the name) would trigger rename mode.
+                          alignSelf: "flex-start", maxWidth: "100%", display: "inline-block",
+                        }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRenameInputValue(floorNames[id] || `Layer ${floorIds.length - i}`);
+                          setRenamingFloorId(id);
+                        }}
+                        title="Click to rename"
+                      >
+                        {floorNames[id] || `Layer ${floorIds.length - i}`}
+                      </span>
+                    )}
+                  </div>
                   <div
                     style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}
                     onPointerDown={(e) => e.stopPropagation()}
                   >
+                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
+                      Ceil
+                      <input
+                        type="checkbox"
+                        className="rb-radio"
+                        checked={ceilingFloorIds.includes(id)}
+                        onChange={() => toggleFloorCeilingRef.current(id)}
+                        title="Toggle this layer's ceiling"
+                      />
+                    </label>
                     <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
                       Iso
                       <input
@@ -7188,23 +7242,15 @@ export default function RoomBuilder() {
                       />
                     </label>
                     <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
-                      Ceil
+                      Hide
                       <input
                         type="checkbox"
                         className="rb-radio"
-                        checked={ceilingFloorIds.includes(id)}
-                        onChange={() => toggleFloorCeilingRef.current(id)}
-                        title="Toggle this layer's ceiling"
+                        checked={hiddenIds.includes(id)}
+                        onChange={() => toggleHideRef.current(id)}
+                        title="Hide this layer"
                       />
                     </label>
-                    <button
-                      className={`rb-btn ${hiddenIds.includes(id) ? "active" : ""}`}
-                      style={{ padding: "1px 5px", fontSize: 8.5 }}
-                      onClick={() => toggleHideRef.current(id)}
-                      title="Hide this layer"
-                    >
-                      {hiddenIds.includes(id) ? "Hidden" : "Hide"}
-                    </button>
                   </div>
                 </div>
               </div>
@@ -7342,8 +7388,10 @@ export default function RoomBuilder() {
               setBuildingMaterialIndex(0);
               setTransparentInactive(false);
               setUltraRealistic(true);
-              setTintActiveOn(false);
-              setTintInactiveOn(false);
+              setTintActiveOn(true);
+              setTintActiveColor(0xffffff);
+              setTintInactiveOn(true);
+              setTintInactiveColor(0xff6b1a);
               setThemeAnchor(null);
               setThemePresetIndex(0);
               setThemeWheelOpen(false);
@@ -7377,6 +7425,7 @@ export default function RoomBuilder() {
           <button
             className="rb-btn"
             title="Delete whatever is currently selected"
+            style={{ display: "flex", alignItems: "center" }}
             onClick={() => {
               if (selectedBalconyId != null) deleteBalconyRef.current();
               else if (selectedStairId != null) deleteStairRef.current();
@@ -7385,7 +7434,7 @@ export default function RoomBuilder() {
               else if (selectedRoomId != null) deleteRoomRef.current();
             }}
           >
-            Delete
+            <Trash2 size={16} strokeWidth={2} />
           </button>
           <div style={{ width: 14 }} />
           <button className="rb-btn" disabled={!canUndo} title="Undo" style={{ display: "flex", alignItems: "center" }} onClick={() => undoRef.current()}>
