@@ -6393,14 +6393,14 @@ export default function RoomBuilder() {
         let el = floorLabelPool.get(entry.id);
         if (!el) {
           // plain floating text -- no button/pill chrome, just a label,
-          // matching the measurement labels' own treatment (color + shadow
-          // for legibility against whatever's behind it, nothing else).
+          // exactly matching the measurement labels' own font/size/shadow
+          // treatment (see updateMeasureLabels below).
           el = document.createElement("div");
           el.style.position = "absolute";
           el.style.transform = "translate(0, -50%)";
           el.style.pointerEvents = "auto";
           el.style.cursor = "pointer";
-          el.style.fontSize = "11px";
+          el.style.fontSize = "10.5px";
           el.style.fontWeight = "700";
           el.style.fontFamily = "'Roboto', system-ui, sans-serif";
           el.style.whiteSpace = "nowrap";
@@ -6414,21 +6414,39 @@ export default function RoomBuilder() {
         }
         el.onclick = () => selectFloorById(entry.id);
         const isActive = entry.id === activeFloorId;
-        el.style.color = isActive ? "#FF6B1A" : "rgba(255,255,255,0.7)";
+        // matches whatever the Active/Inactive tint swatches are currently
+        // set to, not a hardcoded pair -- the active layer's label reads in
+        // the Active tint color, every other layer's in the Inactive one.
+        el.style.color = "#" + new THREE.Color(isActive ? currentTintActiveColor : currentTintInactiveColor).getHexString();
         el.textContent = floorNamesRef.current[entry.id] || `Layer ${floors.findIndex((f) => f.id === entry.id) + 1}`;
-        // floats well clear of the floor's own right (+X) edge, vertically
-        // centered on the layer -- "well over to the right, in the centre"
-        // of it.
+        // Anchored in SCREEN space, not world space -- a fixed world-space
+        // +X offset would swing to the front/left/behind the building as
+        // the camera orbits. Instead project every corner of the floor's
+        // footprint (top and bottom) and take the rightmost one on screen,
+        // so the label always floats just past the building's own silhouette
+        // no matter which way it's currently facing.
         const fp = entry.data.footprint;
-        const pt = new THREE.Vector3(fp.xMax + 7, entry.data.height / 2, 0);
-        pt.y += g.position.y;
-        const inFront = pt.clone().sub(activeCamera.position).dot(camForward) > 0;
-        if (!inFront) { el.style.display = "none"; return; }
-        const ndc = pt.clone().project(activeCamera);
-        if (ndc.x < -1.3 || ndc.x > 1.3 || ndc.y < -1.3 || ndc.y > 1.3) { el.style.display = "none"; return; }
+        const baseY = g.position.y, topY = baseY + entry.data.height;
+        const centerWorld = new THREE.Vector3((fp.xMin + fp.xMax) / 2, baseY + entry.data.height / 2, (fp.zMin + fp.zMax) / 2);
+        const centerInFront = centerWorld.clone().sub(activeCamera.position).dot(camForward) > 0;
+        if (!centerInFront) { el.style.display = "none"; return; }
+        const centerNdc = centerWorld.clone().project(activeCamera);
+        let maxScreenX = -Infinity;
+        [[fp.xMin, fp.zMin], [fp.xMax, fp.zMin], [fp.xMin, fp.zMax], [fp.xMax, fp.zMax]].forEach(([x, z]) => {
+          [baseY, topY].forEach((y) => {
+            const p = new THREE.Vector3(x, y, z);
+            if (p.clone().sub(activeCamera.position).dot(camForward) <= 0) return;
+            const ndc = p.project(activeCamera);
+            const sx = (ndc.x * 0.5 + 0.5) * rect.width;
+            if (sx > maxScreenX) maxScreenX = sx;
+          });
+        });
+        if (maxScreenX === -Infinity) { el.style.display = "none"; return; }
+        const sy = (-centerNdc.y * 0.5 + 0.5) * rect.height;
+        if (maxScreenX < -50 || maxScreenX > rect.width + 300 || sy < -100 || sy > rect.height + 100) { el.style.display = "none"; return; }
         el.style.display = "block";
-        el.style.left = ((ndc.x * 0.5 + 0.5) * rect.width) + "px";
-        el.style.top = ((-ndc.y * 0.5 + 0.5) * rect.height) + "px";
+        el.style.left = (maxScreenX + 16) + "px";
+        el.style.top = sy + "px";
       });
       floorLabelPool.forEach((el, id) => { if (!seen.has(id)) el.style.display = "none"; });
     }
