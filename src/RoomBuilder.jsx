@@ -726,12 +726,12 @@ export default function RoomBuilder() {
   const [ultraRealistic, setUltraRealistic] = useState(true);
   const ultraRealisticApiRef = useRef(() => {});
   useEffect(() => { ultraRealisticApiRef.current(ultraRealistic); }, [ultraRealistic]);
-  const [tintInactiveOn, setTintInactiveOn] = useState(false);
+  const [tintInactiveOn, setTintInactiveOn] = useState(true);
   const [tintInactiveColor, setTintInactiveColor] = useState(0xff6b1a);
   const tintInactiveApiRef = useRef(() => {});
   useEffect(() => { tintInactiveApiRef.current(tintInactiveOn, tintInactiveColor); }, [tintInactiveOn, tintInactiveColor]);
-  const [tintActiveOn, setTintActiveOn] = useState(false);
-  const [tintActiveColor, setTintActiveColor] = useState(0xff6b1a);
+  const [tintActiveOn, setTintActiveOn] = useState(true);
+  const [tintActiveColor, setTintActiveColor] = useState(0xffffff);
   const tintActiveApiRef = useRef(() => {});
   useEffect(() => { tintActiveApiRef.current(tintActiveOn, tintActiveColor); }, [tintActiveOn, tintActiveColor]);
   const [themeWheelOpen, setThemeWheelOpen] = useState(false);
@@ -3659,6 +3659,12 @@ export default function RoomBuilder() {
       recomputeWallFloorMaterials();
     }
     tintActiveApiRef.current = applyTintActive;
+    // same mount-ordering issue as recomputeWallFloorMaterials above -- the
+    // [tintActiveOn]/[tintInactiveOn] effects fire before these refs exist
+    // on the very first mount, so their default-on values would otherwise
+    // never actually reach the materials until the user toggled something.
+    applyTintInactive(true, 0xff6b1a);
+    applyTintActive(true, 0xffffff);
 
     // colors every prop kind to its own tone from a chosen theme (or, when
     // cleared, reverts each one to its own default color) -- mutating the
@@ -4539,20 +4545,18 @@ export default function RoomBuilder() {
           return;
         }
         // with no partitions yet, the whole floor already IS the "room" --
-        // there's nothing distinct to extract. commitRoomFromFound would
-        // still clone the floor's entire data into a brand-new room object
-        // and switch editing focus onto that clone; from that point on the
-        // clone and the floor silently diverge, so a Layer height change
-        // afterward stops visibly affecting anything (the floor's own data
-        // changed, but what's on screen is now the clone) until you
-        // deselect and the two disagree. So a tap-drag here just moves the
-        // floor itself instead.
+        // there's nothing distinct to extract, but a plain tap should still
+        // select it (for Cut/Copy/Paste/Duplicate/Delete/Curved corners),
+        // same as tapping a partitioned sub-room does. A real drag instead
+        // moves the floor itself, same as before -- "pending-room-move"
+        // decides which one this gesture turns out to be, exactly like the
+        // window/door tools' own pending-then-draw states.
         if (!state.partitions || state.partitions.length === 0) {
-          pushUndo();
           const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
           dragState = {
-            type: "room-move", plane, start: hit.point.clone(),
+            type: "pending-room-move", plane, start: hit.point.clone(), hitPoint: hit.point.clone(),
             startOffsetX: floorEntry.offsetX || 0, startOffsetZ: floorEntry.offsetZ || 0,
+            startScreen: { x: e.clientX, y: e.clientY },
           };
           capture(e);
           return;
@@ -4857,6 +4861,20 @@ export default function RoomBuilder() {
           dragState = { type: "door-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
           previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: doorHeightRef.current, isDoor: true };
           rebuild();
+        }
+        return;
+      }
+
+      if (dragState.type === "pending-room-move") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          dragState = {
+            type: "room-move", plane: dragState.plane, start: dragState.start,
+            startOffsetX: dragState.startOffsetX, startOffsetZ: dragState.startOffsetZ,
+          };
         }
         return;
       }
@@ -5180,6 +5198,12 @@ export default function RoomBuilder() {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
           state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
         }
+      } else if (dragState.type === "pending-room-move") {
+        // a tap with no meaningful drag on an undivided floor -- select the
+        // whole floor as a room (Cut/Copy/Paste/Duplicate/Delete/Curved
+        // corners), same as tapping an already-partitioned sub-room does.
+        const floorEntry = floors.find((f) => f.id === activeFloorId);
+        if (floorEntry) commitRoomFromFound({ bbox: floorEntry.data.footprint }, dragState.hitPoint);
       } else if (dragState.type === "select-drag") {
         const u0 = Math.min(dragState.u0, dragState.u1);
         const u1 = Math.max(dragState.u0, dragState.u1);
@@ -6606,10 +6630,12 @@ export default function RoomBuilder() {
           --bg-panel-translucent: var(--bg-content);
           --bg-strip: #1c1c1e;
           --splitter: var(--bg-strip);
-          /* the layer/recent panels' own edge against the 3D view, and the
-             gap above Recent -- pinned to the exact same top-band color as
-             --splitter, not a separately-picked shade. */
-          --divider-strong: var(--splitter);
+          /* a light grey (not the near-black --splitter) for the
+             layer/recent panels' own edge against the 3D view and the gap
+             above Recent -- matching the tone of the app's other light-grey
+             chrome (e.g. --border-separator) rather than crushing to black
+             against the dark content. */
+          --divider-strong: #59595d;
           --wheel-seam: #000000;
           --bg-control: #3a3a3c;
           --bg-control-hover: #444446;
@@ -6929,9 +6955,9 @@ export default function RoomBuilder() {
               }}
             >
               {entry.thumb ? (
-                <img src={entry.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 1, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
+                <img src={entry.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
               ) : (
-                <div style={{ width: 56, height: 56, borderRadius: 1, background: "var(--bg-thumb)" }} />
+                <div style={{ width: 56, height: 56, borderRadius: 6, background: "var(--bg-thumb)" }} />
               )}
             </button>
           ))}
@@ -7101,7 +7127,7 @@ export default function RoomBuilder() {
                   ref={(el) => { if (el) thumbCanvasMapRef.current.set(id, el); }}
                   width={480}
                   height={480}
-                  style={{ borderRadius: 1, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
+                  style={{ borderRadius: 6, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
                 />
                 <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, height: 56, flex: 1, minWidth: 0 }}>
                   {renamingFloorId === id ? (
