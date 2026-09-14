@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2 } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -530,6 +530,7 @@ export default function RoomBuilder() {
   const dividerVLineRef = useRef(null);
   const dividerHLineRef = useRef(null);
   const measureLayerRef = useRef(null);
+  const floorLabelLayerRef = useRef(null);
   const resetFnRef = useRef(null);
   const panelHeightApiRef = useRef({ setHeight: () => {}, getHeight: () => WALL_HEIGHT });
   const rebuildGridRef = useRef(() => {});
@@ -558,7 +559,7 @@ export default function RoomBuilder() {
   const [openingAxisHorizontal, setOpeningAxisHorizontal] = useState(false);
   const openingAxisHorizontalRef = useRef(openingAxisHorizontal);
   useEffect(() => { openingAxisHorizontalRef.current = openingAxisHorizontal; }, [openingAxisHorizontal]);
-  const [doorHeight, setDoorHeight] = useState(12 * FT);
+  const [doorHeight, setDoorHeight] = useState(10 * FT);
   const doorHeightRef = useRef(doorHeight);
   useEffect(() => { doorHeightRef.current = doorHeight; }, [doorHeight]);
   const [doorSplit, setDoorSplit] = useState(false);
@@ -2799,7 +2800,11 @@ export default function RoomBuilder() {
           floor.userData = { kind: "floor", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(floor);
           floorMeshesForCeiling.push(floor);
-          if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props")) pickList.push(floor);
+          // pickable regardless of tool -- tapping a floor to select/move a
+          // room, or to re-focus a room that's gone inactive (see the
+          // onPointerDown floor-tap handling), needs to work no matter which
+          // tool happens to be selected, not just Wall/Stairs/Props.
+          if (buildingActiveFloor) pickList.push(floor);
           builtCurvedFloor = true;
         }
       }
@@ -2833,7 +2838,7 @@ export default function RoomBuilder() {
           const rf = rm.data.footprint, ox = rm.offsetX || 0, oz = rm.offsetZ || 0;
           return cx >= rf.xMin + ox && cx <= rf.xMax + ox && cz >= rf.zMin + oz && cz <= rf.zMax + oz;
         });
-        if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props") && !coveredByRoom) pickList.push(floor);
+        if (buildingActiveFloor && !coveredByRoom) pickList.push(floor);
       });
 
       const w = fp.xMax - fp.xMin;
@@ -2848,7 +2853,7 @@ export default function RoomBuilder() {
         fmesh.userData = { kind: "floor", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(fmesh);
         floorMeshesForCeiling.push(fmesh);
-        if (buildingActiveFloor && (toolRef.current === "move" || toolRef.current === "stairs" || toolRef.current === "props")) pickList.push(fmesh);
+        if (buildingActiveFloor) pickList.push(fmesh);
       });
 
       if (buildingActiveFloor && hudRef.current) {
@@ -3526,6 +3531,7 @@ export default function RoomBuilder() {
     let currentTintActiveOn = false, currentTintActiveColor = 0xff6b1a;
     let currentTintInactiveOn = false, currentTintInactiveColor = 0xff6b1a;
     let currentThemeWallColor = null, currentThemeFloorColor = null;
+    let currentThemeRoofColor = null, currentThemePlatformColor = null, currentThemeStairColor = null;
     function recomputeWallFloorMaterials() {
       const preset = BUILDING_MATERIAL_PRESETS[currentBuildingMaterialIndex];
       const forceColor = !!preset.forceColor;
@@ -3580,6 +3586,24 @@ export default function RoomBuilder() {
       ceilingMat.metalness = metalness;
       ceilingMat.envMap = shinyEnvMap;
       ceilingMat.needsUpdate = true;
+
+      // the balcony's own roof/platform and any staircase default to
+      // matching the wall color (or a room theme's own distinct tone for
+      // each), and now track the Active tint the same way the wall itself
+      // does -- previously these three sat outside recomputeWallFloorMaterials
+      // entirely, so toggling the tint on/off visibly changed the walls but
+      // left these untouched.
+      const roofColor = new THREE.Color(currentThemeRoofColor != null ? currentThemeRoofColor : mainColor);
+      if (currentTintActiveOn) roofColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      balconyRoofMat.color.copy(roofColor);
+
+      const platformColor = new THREE.Color(currentThemePlatformColor != null ? currentThemePlatformColor : mainColor);
+      if (currentTintActiveOn) platformColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      balconyPlatformMat.color.copy(platformColor);
+
+      const stairColor = new THREE.Color(currentThemeStairColor != null ? currentThemeStairColor : mainColor);
+      if (currentTintActiveOn) stairColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      stairMat.color.copy(stairColor);
 
       let floorBase, floorRough, floorMetal, floorMap, floorRoughnessMap;
       if (forceColor && preset.floorLighten != null) {
@@ -3700,11 +3724,11 @@ export default function RoomBuilder() {
       if (!anchor) {
         currentThemeWallColor = null;
         currentThemeFloorColor = null;
+        currentThemeRoofColor = null;
+        currentThemePlatformColor = null;
+        currentThemeStairColor = null;
         recomputeWallFloorMaterials();
-        stairMat.color.set(COLORS.wall);
-        balconyPlatformMat.color.set(COLORS.wall);
         pillarMat.color.set(PILLAR_DEFAULT_COLOR);
-        balconyRoofMat.color.set(COLORS.wall);
         applyPropColors(null);
         return;
       }
@@ -3750,11 +3774,11 @@ export default function RoomBuilder() {
       };
       currentThemeWallColor = palette.wall;
       currentThemeFloorColor = palette.floor;
+      currentThemeRoofColor = palette.roof;
+      currentThemePlatformColor = palette.platform;
+      currentThemeStairColor = palette.stairs;
       recomputeWallFloorMaterials();
-      stairMat.color.set(palette.stairs);
-      balconyPlatformMat.color.set(palette.platform);
       pillarMat.color.set(palette.railing);
-      balconyRoofMat.color.set(palette.roof);
       applyPropColors(palette);
     }
     themeApiRef.current = applyRoomTheme;
@@ -4541,7 +4565,13 @@ export default function RoomBuilder() {
       // under that point and lets you drag it away; tapping a wall/partition
       // switches editing focus onto whatever it belongs to (the floor itself,
       // or one specific room) before continuing as normal.
-      if (toolRef.current === "move" && kind === "floor") {
+      // Selecting/moving a room by tapping its floor works from any tool --
+      // not just Wall ("move") -- except Stairs and Props (with a
+      // non-balcony shape picked), which already give a plain floor tap
+      // their own meaning (draw a staircase / drop a prop) just below.
+      const floorTapClaimedByOtherTool = toolRef.current === "stairs" ||
+        (toolRef.current === "props" && propsShapeRef.current !== "balcony");
+      if (!floorTapClaimedByOtherTool && kind === "floor") {
         setSelectedPropId(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         const floorEntry = floors.find((f) => f.id === activeFloorId);
@@ -5607,11 +5637,11 @@ export default function RoomBuilder() {
       if (!room) return;
       const clamped = Math.max(MIN_WALL_HEIGHT, Math.min(MAX_WALL_HEIGHT, h));
       room.data.height = clamped;
-      // the reverse of the sync in setActiveFloorHeight -- if this room IS
-      // the whole floor (pulled out by a plain tap on an undivided floor),
-      // keep the floor's own data.height and the Layers panel's "Layer
-      // height" display in step with it too.
-      if (floorEntry && findWholeFloorRoom(floorEntry) === room) {
+      // the reverse of the sync in setActiveFloorHeight -- this room is by
+      // definition the one currently focused on its floor, so keep the
+      // floor's own data.height (and the Layers panel's "Layer height"
+      // display, which reads from it) in step too.
+      if (floorEntry) {
         floorEntry.data.height = clamped;
         floorEntry.data.panelHeights = {};
         syncFloorsToReact();
@@ -6237,13 +6267,17 @@ export default function RoomBuilder() {
       // the user is adjusting the room's overall height, the clear intent is
       // for every wall to track it, so per-wall overrides reset here.
       entry.data.panelHeights = {};
-      // when the whole floor has been pulled out into its own room (a plain
-      // tap on an undivided floor does this -- see commitRoomFromFound),
-      // that room's own data.height is what actually renders, not the
-      // floor's -- without this, dragging this slider silently edited a
-      // number nothing on screen was reading from.
-      const wholeRoom = findWholeFloorRoom(entry);
-      if (wholeRoom) { wholeRoom.data.height = clamped; wholeRoom.data.panelHeights = {}; }
+      // if a room on this floor is currently focused, ITS data is what
+      // actually renders, not the floor's own -- without this, dragging
+      // this slider silently edited a number nothing on screen was reading
+      // from. Keyed on activeRoomId (not "whichever room's footprint
+      // happens to match the floor's"), since after duplicating a
+      // whole-floor room there are two rooms with that same footprint and
+      // only the one you're actually looking at should track this slider.
+      if (activeRoomId != null) {
+        const room = (entry.rooms || []).find((r) => r.id === activeRoomId);
+        if (room) { room.data.height = clamped; room.data.panelHeights = {}; }
+      }
       restackFloors();
       const g = floorGroups.get(activeFloorId);
       if (g) target.y = g.position.y + entry.data.height * 0.32;
@@ -6353,9 +6387,67 @@ export default function RoomBuilder() {
       }
     }
 
+    const floorLabelPool = new Map(); // floorId -> label element
+    function updateFloorLabels() {
+      const layer = floorLabelLayerRef.current;
+      if (!layer) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      const camForward = new THREE.Vector3();
+      activeCamera.getWorldDirection(camForward);
+      const seen = new Set();
+      floors.forEach((entry) => {
+        const visible = isolatedFloorIds.size > 0 ? isolatedFloorIds.has(entry.id) : !hiddenFloorIds.has(entry.id);
+        const g = floorGroups.get(entry.id);
+        if (!visible || !g) return;
+        seen.add(entry.id);
+        let el = floorLabelPool.get(entry.id);
+        if (!el) {
+          el = document.createElement("div");
+          el.style.position = "absolute";
+          el.style.transform = "translate(0, -50%)";
+          el.style.pointerEvents = "auto";
+          el.style.cursor = "pointer";
+          el.style.fontSize = "10.5px";
+          el.style.fontWeight = "600";
+          el.style.fontFamily = "'Roboto', system-ui, sans-serif";
+          el.style.whiteSpace = "nowrap";
+          el.style.padding = "3px 8px";
+          el.style.borderRadius = "999px";
+          el.style.background = "var(--bg-strip)";
+          el.style.border = "1px solid var(--splitter)";
+          el.style.color = "var(--text-primary)";
+          el.style.userSelect = "none";
+          layer.appendChild(el);
+          floorLabelPool.set(entry.id, el);
+        }
+        el.onclick = () => selectFloorById(entry.id);
+        const isActive = entry.id === activeFloorId;
+        el.style.borderColor = isActive ? "#FF6B1A" : "var(--splitter)";
+        el.style.opacity = isActive ? "1" : "0.75";
+        el.textContent = floorNamesRef.current[entry.id] || `Layer ${floors.findIndex((f) => f.id === entry.id) + 1}`;
+        // floats just past the floor's own right (+X) edge, vertically
+        // centered on the layer -- "right beside and in the centre" of it.
+        const fp = entry.data.footprint;
+        const pt = new THREE.Vector3(fp.xMax + 1.2, entry.data.height / 2, 0);
+        pt.y += g.position.y;
+        const inFront = pt.clone().sub(activeCamera.position).dot(camForward) > 0;
+        if (!inFront) { el.style.display = "none"; return; }
+        const ndc = pt.clone().project(activeCamera);
+        if (ndc.x < -1.3 || ndc.x > 1.3 || ndc.y < -1.3 || ndc.y > 1.3) { el.style.display = "none"; return; }
+        el.style.display = "block";
+        el.style.left = ((ndc.x * 0.5 + 0.5) * rect.width) + "px";
+        el.style.top = ((-ndc.y * 0.5 + 0.5) * rect.height) + "px";
+      });
+      floorLabelPool.forEach((el, id) => { if (!seen.has(id)) el.style.display = "none"; });
+    }
+    function hideFloorLabels() {
+      floorLabelPool.forEach((el) => { el.style.display = "none"; });
+    }
+
     function hideOverlayLabels() {
       if (heightLabelRef.current) heightLabelRef.current.style.display = "none";
       measureLabelPool.forEach((elx) => { elx.style.display = "none"; });
+      hideFloorLabels();
     }
 
     let raf;
@@ -6393,6 +6485,10 @@ export default function RoomBuilder() {
         // while walking, so keep their live overlays working too.
         updateHeightLabel();
         updateMeasureLabels();
+        // floating layer-select labels are a "looking at the building from
+        // outside" affordance -- first-person walk mode hides them, same
+        // reasoning as the quad-view panes below.
+        hideFloorLabels();
         raf = requestAnimationFrame(tick);
         return;
       }
@@ -6432,6 +6528,7 @@ export default function RoomBuilder() {
         renderActive(activeCamera);
         updateHeightLabel();
         updateMeasureLabels();
+        updateFloorLabels();
         if (dividerHandleRef.current) dividerHandleRef.current.style.display = "none";
         if (dividerVLineRef.current) dividerVLineRef.current.style.display = "none";
         if (dividerHLineRef.current) dividerHLineRef.current.style.display = "none";
@@ -6455,6 +6552,7 @@ export default function RoomBuilder() {
       if (minorGrid) { minorGrid.geometry.dispose(); minorGrid.material.dispose(); }
       if (majorGrid) { majorGrid.geometry.dispose(); majorGrid.material.dispose(); }
       measureLabelPool.forEach((elx) => elx.remove());
+      floorLabelPool.forEach((elx) => elx.remove());
       wallMat.dispose();
       floorMat.dispose();
       wallMatDim.dispose();
@@ -6503,6 +6601,8 @@ export default function RoomBuilder() {
   const defaultLayersWidth = () => 210;
   useEffect(() => { setLayersPanelWidth(defaultLayersWidth()); }, []);
   const [floorNames, setFloorNames] = useState({});
+  const floorNamesRef = useRef({});
+  useEffect(() => { floorNamesRef.current = floorNames; }, [floorNames]);
   const [renamingFloorId, setRenamingFloorId] = useState(null);
   const [renameInputValue, setRenameInputValue] = useState("");
 
@@ -6916,6 +7016,7 @@ export default function RoomBuilder() {
         }}
       />
       <div ref={measureLayerRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }} />
+      <div ref={floorLabelLayerRef} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }} />
 
       {walkMode && (
         <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", color: "var(--text-primary)", fontSize: 9.5, background: "var(--bg-floating)", backdropFilter: "blur(12px)", padding: "5px 10px", borderRadius: 8, pointerEvents: "none" }}>
@@ -7171,7 +7272,7 @@ export default function RoomBuilder() {
                   height={480}
                   style={{ borderRadius: 6, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
                 />
-                <div style={{ display: "flex", flexDirection: "column", height: 56, flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", flexDirection: "column", height: 64, flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", flex: 1, alignItems: "center", minHeight: 0 }}>
                     {renamingFloorId === id ? (
                       <input
@@ -7198,12 +7299,13 @@ export default function RoomBuilder() {
                         style={{
                           color: "var(--text-primary)", fontSize: 9.5, cursor: "text",
                           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                          // a bare flex-column child stretches to the column's
-                          // full width by default -- without this, the rename
-                          // hotspot was the whole row's width, not just the
-                          // name text itself, so clicking anywhere near it
-                          // (not just on the name) would trigger rename mode.
-                          alignSelf: "flex-start", maxWidth: "100%", display: "inline-block",
+                          // the wrapping div is a row-direction flex container
+                          // sized to content (not stretched full-width), so
+                          // the rename hotspot is naturally just the name
+                          // text -- no alignSelf override needed here, which
+                          // would otherwise fight the wrapper's alignItems:
+                          // center and pin the name to the top of its row.
+                          maxWidth: "100%", display: "inline-block",
                         }}
                         onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
@@ -7402,7 +7504,7 @@ export default function RoomBuilder() {
               setOpeningDividers(3);
               setOpeningAxisVertical(true);
               setOpeningAxisHorizontal(false);
-              setDoorHeight(12 * FT);
+              setDoorHeight(10 * FT);
               setDoorSplit(false);
               setPropsShape("cube");
               setCurvedCornersOn(false);
@@ -7421,6 +7523,15 @@ export default function RoomBuilder() {
             }}
           >
             Reset
+          </button>
+          <button
+            className="rb-btn"
+            title="Duplicate the selected room"
+            disabled={selectedRoomId == null}
+            style={{ display: "flex", alignItems: "center" }}
+            onClick={() => duplicateRoomRef.current()}
+          >
+            <Copy size={16} strokeWidth={2} />
           </button>
           <button
             className="rb-btn"
