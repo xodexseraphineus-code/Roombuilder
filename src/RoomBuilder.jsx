@@ -2710,8 +2710,8 @@ export default function RoomBuilder() {
         const mesh = new THREE.Mesh(geo, mat);
         const offset = T / 2 + 0.015;
         let posX, posZ;
-        if (lengthAxis === "x") { posX = (u0 + u1) / 2; posZ = coord + normal.z * offset; }
-        else { posZ = (u0 + u1) / 2; posX = coord + normal.x * offset; }
+        if (lengthAxis === "x") { posX = (u0 + u1) / 2; posZ = coord - normal.z * offset; }
+        else { posZ = (u0 + u1) / 2; posX = coord - normal.x * offset; }
         mesh.position.set(posX, H / 2, posZ);
         mesh.lookAt(mesh.position.clone().add(normal));
         mesh.userData = { kind: "selection", id: sel.id, panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
@@ -3899,13 +3899,15 @@ export default function RoomBuilder() {
       buildingFloorEntry = entry;
       currentWallMat = isActive ? wallMat : wallMatDim;
       currentFloorMat = isActive ? floorMat : floorMatDim;
-      // if a room's footprint exactly matches this floor's own -- or its
-      // rooms collectively tile the whole thing, as the wall-cycle gesture's
-      // two-way split does -- that room (or those rooms) has fully replaced
-      // the floor's own walls -- skip rendering the floor's own content
-      // there so the two don't visually compete (and to leave the room(s)
-      // as the only clickable thing in that space).
-      const wholeFloorClaimed = floorFullyClaimedByRooms(entry);
+      // if a room's footprint exactly matches this floor's own, its rooms
+      // collectively tile the whole thing, or a split gesture explicitly
+      // flagged its own base content as superseded (baseContentReplaced --
+      // needed for the notch-delete split, which leaves a real gap rather
+      // than tiling the footprint) -- either way the floor's own walls
+      // have fully been replaced, so skip rendering them here to avoid
+      // the two visually competing (and to leave the room(s) as the only
+      // clickable thing in that space).
+      const wholeFloorClaimed = !!entry.baseContentReplaced || floorFullyClaimedByRooms(entry);
       if (sceneGroup) {
         if (wholeFloorClaimed) clearGroup(sceneGroup);
         else rebuildCurrentFloorGeometry();
@@ -4923,6 +4925,13 @@ export default function RoomBuilder() {
       entry.rooms.push(roomA, roomB);
       entry.data.partitions = [];
       entry.data.bumpouts = [];
+      // the two new rooms don't tile the floor's own footprint exactly (a
+      // gap-based split leaves real empty space between them, which
+      // floorFullyClaimedByRooms' area check would read as "not fully
+      // claimed") -- flag it explicitly so the floor's own original walls
+      // stay suppressed regardless, rather than reappearing around/through
+      // the gap as a third, unwanted enclosed room.
+      entry.baseContentReplaced = true;
     }
 
     // true once a bump-out's inward notch has been pushed all the way to
@@ -4971,6 +4980,7 @@ export default function RoomBuilder() {
       entry.rooms.push({ id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 }, { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 });
       entry.data.partitions = [];
       entry.data.bumpouts = [];
+      entry.baseContentReplaced = true;
     }
 
     function onPointerDown(e) {
