@@ -28,6 +28,8 @@ const DEFAULT_ROOM_HALF_Z = 7.5;
 const MIN_STAIR_SIZE = FT;         // smallest footprint that commits as a staircase
 const MIN_ROOM_DRAW_SIZE = 3 * FT; // smallest footprint that commits as a new drawn room
 const ROOM_SNAP_DIST = 3;          // meters -- generous snap radius for the Room tool's corner/edge snapping
+const WALL_CYCLE_HOLD_MS = 2000;   // once a dragged partition/bump-out snaps flush to an opposing wall, this long a hold advances solid -> door -> fully-open
+const WALL_CYCLE_DOOR_WIDTH = 6 * FT; // matches the automatic room-to-room connecting door width
 const VIEW_SHIFT = 1.28;          // widen the virtual frame this much to push the model right, clear of the side panel
 const BALCONY_CEILING_DROP = 2 * FT;   // the balcony ceiling/roof sits this far below the room's own default height
 const BALCONY_CEILING_THICKNESS = 0.45; // roof slab thickness
@@ -2757,6 +2759,20 @@ export default function RoomBuilder() {
       });
       if (cursor < hi - 0.001) addSeg(cursor, hi, 0, H);
       addWallHeightHandle(panelKey, lengthAxis, p.u, (lo + hi) / 2, H);
+
+      // press-and-hold preview: once this partition is the one snapped
+      // flush and being held (see tick()), a magenta overlay -- the same
+      // material used for every other pending-change preview in the app --
+      // shows what's about to happen: nothing extra for "solid", a
+      // door-width band for "door", almost the whole span for "fully open".
+      if (dragState && (dragState.type === "partition-draw" || dragState.type === "partition-redrag") && dragState.id === p.id && dragState.wallMode > 0) {
+        const mid = (lo + hi) / 2;
+        const span = dragState.wallMode === 2 ? (hi - lo) - 0.3 : Math.min(WALL_CYCLE_DOOR_WIDTH, hi - lo - 0.4);
+        if (span > 0.1) {
+          const previewMesh = makePanel(lengthAxis, p.u, mid - span / 2, mid + span / 2, T * 1.06, 0, H, selMatPreview);
+          sceneGroup.add(previewMesh);
+        }
+      }
     }
 
     // standard rectangle-minus-rectangle: splits `rect` around `cut`, returning
@@ -3703,17 +3719,28 @@ export default function RoomBuilder() {
     // a plain tap on an undivided floor (see the Room tool's "pending-room-tool"
     // gesture) turns the whole floor into its own room -- a full clone of the
     // floor's data, footprint included, pushed into entry.rooms so it's
-    // selectable/editable like any other room. That leaves two separate
-    // data objects (entry.data and the room's own) with the same footprint;
-    // this finds that room so floor-level controls (Layer height) can keep
-    // it in sync with whichever one is actually being rendered.
-    function findWholeFloorRoom(entry) {
-      const fp2 = entry.data.footprint;
-      return (entry.rooms || []).find((rm) => {
-        const rf = rm.data.footprint;
-        return Math.abs(rf.xMin - fp2.xMin) < 0.05 && Math.abs(rf.xMax - fp2.xMax) < 0.05 &&
-               Math.abs(rf.zMin - fp2.zMin) < 0.05 && Math.abs(rf.zMax - fp2.zMax) < 0.05;
-      });
+    // selectable/editable like any other room; the wall-cycle gesture (see
+    // splitFloorWithPartition) does the same but as two rooms tiling the
+    // floor instead of one. Either way the floor's own base content should
+    // stay hidden underneath them rather than visually competing with it.
+    function floorFullyClaimedByRooms(entry) {
+      const fp = entry.data.footprint;
+      const totalArea = (fp.xMax - fp.xMin) * (fp.zMax - fp.zMin);
+      const rooms = entry.rooms || [];
+      if (totalArea <= 0 || rooms.length === 0) return false;
+      let coveredArea = 0;
+      for (let i = 0; i < rooms.length; i++) {
+        const rfp = rooms[i].data.footprint;
+        if (rfp.xMin < fp.xMin - 0.05 || rfp.xMax > fp.xMax + 0.05 || rfp.zMin < fp.zMin - 0.05 || rfp.zMax > fp.zMax + 0.05) return false;
+        for (let j = 0; j < i; j++) {
+          const ofp = rooms[j].data.footprint;
+          const ox = Math.min(rfp.xMax, ofp.xMax) - Math.max(rfp.xMin, ofp.xMin);
+          const oz = Math.min(rfp.zMax, ofp.zMax) - Math.max(rfp.zMin, ofp.zMin);
+          if (ox > 0.05 && oz > 0.05) return false; // overlapping rooms -- not a clean tiling
+        }
+        coveredArea += (rfp.xMax - rfp.xMin) * (rfp.zMax - rfp.zMin);
+      }
+      return coveredArea >= totalArea - 0.5;
     }
 
     // finds every pair of rooms on this floor that are flush against each
@@ -3732,6 +3759,10 @@ export default function RoomBuilder() {
       for (let i = 0; i < rooms.length; i++) {
         for (let j = i + 1; j < rooms.length; j++) {
           const a = rooms[i], b = rooms[j];
+          // a pair the wall-cycle gesture explicitly split as "solid" (or
+          // "fully open", which supplies its own wide manual opening
+          // instead) opts out of the automatic connecting door here.
+          if ((a.blockConnections || []).includes(b.id) || (b.blockConnections || []).includes(a.id)) continue;
           const afp = a.data.footprint, bfp = b.data.footprint;
           const aOX = a.offsetX || 0, aOZ = a.offsetZ || 0;
           const bOX = b.offsetX || 0, bOZ = b.offsetZ || 0;
@@ -3841,11 +3872,13 @@ export default function RoomBuilder() {
       buildingFloorEntry = entry;
       currentWallMat = isActive ? wallMat : wallMatDim;
       currentFloorMat = isActive ? floorMat : floorMatDim;
-      // if a room's footprint exactly matches this floor's own, that room has
-      // fully replaced the floor's own walls -- skip rendering the floor's
-      // own content there so the two don't visually compete (and to leave
-      // the room as the only clickable thing in that space).
-      const wholeFloorClaimed = !!findWholeFloorRoom(entry);
+      // if a room's footprint exactly matches this floor's own -- or its
+      // rooms collectively tile the whole thing, as the wall-cycle gesture's
+      // two-way split does -- that room (or those rooms) has fully replaced
+      // the floor's own walls -- skip rendering the floor's own content
+      // there so the two don't visually compete (and to leave the room(s)
+      // as the only clickable thing in that space).
+      const wholeFloorClaimed = floorFullyClaimedByRooms(entry);
       if (sceneGroup) {
         if (wholeFloorClaimed) clearGroup(sceneGroup);
         else rebuildCurrentFloorGeometry();
@@ -4798,6 +4831,81 @@ export default function RoomBuilder() {
       return id;
     }
 
+    // true once a partition has been pushed all the way to the wall
+    // opposite the one it grew from -- clampPartitionExt already snaps it
+    // flush there, so this just checks it landed at that flush value.
+    function partitionIsFullSpan(p) {
+      const parent = getPanelInfo(p.panel);
+      if (!parent || !wallDefs[p.panel]) return false;
+      const span = parent.thickAxis === "z" ? state.footprint.zMax - state.footprint.zMin : state.footprint.xMax - state.footprint.xMin;
+      return p.ext <= -(span - 0.05);
+    }
+    // only attempted for the simple case the wall-cycle gesture is meant
+    // for: a plain rectangular floor, nothing extracted from it yet, and
+    // this partition the only thing on it -- a floor that already has other
+    // partitions/bumpouts, or already has rooms of its own, just keeps the
+    // new partition as an ordinary wall instead (same as dragging one has
+    // always done), rather than attempting a full-fidelity split of
+    // whatever shape it's already in.
+    function canAutoSplitFloor(entry) {
+      return activeRoomId == null && (entry.rooms || []).length === 0 &&
+        entry.data.bumpouts.length === 0 && entry.data.partitions.length === 1;
+    }
+    // turns the single room a just-snapped-flush partition divided into two
+    // fully independent rooms -- each a real Room entity with its own
+    // walls, so both can carry their own doors/windows/props and be
+    // dragged around separately, exactly like any other extracted room.
+    // wallMode (set by the press-and-hold cycle in onPointerMove/tick):
+    // 0 = solid wall between them, no connection; 1 = leave it to the
+    // ordinary automatic-connecting-door system (computeRoomConnections)
+    // now that they're flush-touching; 2 = a wide, floor-to-ceiling opening
+    // spanning almost the whole shared wall on both sides, reading as the
+    // wall having been removed entirely.
+    function splitFloorWithPartition(entry, p, wallMode) {
+      const parent = getPanelInfo(p.panel);
+      if (!parent) return;
+      const fp = entry.data.footprint;
+      let rectA, rectB, aPanel, bPanel, openLo, openHi;
+      if (parent.thickAxis === "z") {
+        // grew in from the north/south wall -- splits along x into a west
+        // room (A) and an east room (B), sharing a wall at x = p.u.
+        rectA = { xMin: fp.xMin, xMax: p.u, zMin: fp.zMin, zMax: fp.zMax };
+        rectB = { xMin: p.u, xMax: fp.xMax, zMin: fp.zMin, zMax: fp.zMax };
+        aPanel = "east"; bPanel = "west";
+        openLo = fp.zMin; openHi = fp.zMax;
+      } else {
+        // grew in from the east/west wall -- splits along z into a north
+        // room (A) and a south room (B), sharing a wall at z = p.u.
+        rectA = { xMin: fp.xMin, xMax: fp.xMax, zMin: fp.zMin, zMax: p.u };
+        rectB = { xMin: fp.xMin, xMax: fp.xMax, zMin: p.u, zMax: fp.zMax };
+        aPanel = "south"; bPanel = "north";
+        openLo = fp.xMin; openHi = fp.xMax;
+      }
+      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = entry.data.height;
+      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = entry.data.height;
+      const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
+      const roomB = { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 };
+      if (wallMode !== 1) {
+        // solid (0) has nothing connecting them at all; fully-open (2)
+        // supplies its own wide manual opening below instead of the
+        // standard-width automatic one -- either way, suppress that.
+        roomA.blockConnections = [roomB.id];
+        roomB.blockConnections = [roomA.id];
+      }
+      if (wallMode === 2) {
+        const inset = Math.min(0.15, (openHi - openLo) * 0.04);
+        const u0 = openLo + inset, u1 = openHi - inset;
+        if (u1 - u0 >= MIN_OPENING) {
+          dataA.openings.push({ id: idSeq++, panel: aPanel, u0, u1, height: dataA.height, isDoor: true, bottomOverride: 0, dividers: 0 });
+          dataB.openings.push({ id: idSeq++, panel: bPanel, u0, u1, height: dataB.height, isDoor: true, bottomOverride: 0, dividers: 0 });
+        }
+      }
+      entry.rooms = entry.rooms || [];
+      entry.rooms.push(roomA, roomB);
+      entry.data.partitions = [];
+      entry.data.bumpouts = [];
+    }
+
     function onPointerDown(e) {
       if (e.pointerType === "touch") e.preventDefault();
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -5480,6 +5588,15 @@ export default function RoomBuilder() {
             if (isFullSpan(newExt) && !isFullSpan(p.ext)) {
               playClickSound();
               dragState.snapHoldUntil = now + 500;
+              // landing flush against the opposite wall is also the moment
+              // the press-and-hold solid -> door -> fully-open cycle (see
+              // tick()) starts counting from -- pulling back off the wall
+              // below cancels it again.
+              dragState.holdCycleStart = now;
+              dragState.wallMode = 0;
+            } else if (!isFullSpan(newExt) && isFullSpan(p.ext)) {
+              dragState.holdCycleStart = null;
+              dragState.wallMode = 0;
             }
             p.ext = newExt;
           }
@@ -5764,7 +5881,18 @@ export default function RoomBuilder() {
         }
       } else if (dragState.type === "partition-draw" || dragState.type === "partition-redrag") {
         const p = state.partitions.find((pp) => pp.id === dragState.id);
-        if (p && Math.abs(p.ext) < 0.04) state.partitions = state.partitions.filter((pp) => pp.id !== p.id);
+        if (p && Math.abs(p.ext) < 0.04) {
+          state.partitions = state.partitions.filter((pp) => pp.id !== p.id);
+        } else if (p && dragState.holdCycleStart != null && partitionIsFullSpan(p)) {
+          // released while snapped flush and mid-hold -- the room this
+          // partition just closed off becomes two independent rooms (see
+          // splitFloorWithPartition), with the boundary the hold cycle
+          // landed on: solid, an ordinary door, or fully open.
+          const floorEntry = floors.find((f) => f.id === activeFloorId);
+          if (floorEntry && floorEntry.data === state && canAutoSplitFloor(floorEntry)) {
+            splitFloorWithPartition(floorEntry, p, dragState.wallMode || 0);
+          }
+        }
       } else if (dragState.type === "opening-draw") {
         const u0 = Math.min(dragState.u0, dragState.u1);
         const u1 = Math.max(dragState.u0, dragState.u1);
@@ -6997,6 +7125,25 @@ export default function RoomBuilder() {
       const now = performance.now();
       const dt = Math.min(0.1, (now - lastTickTime) / 1000);
       lastTickTime = now;
+
+      // the press-and-hold solid -> door -> fully-open cycle needs to keep
+      // advancing purely from elapsed time while the pointer sits still (no
+      // pointermove events fire during a genuinely stationary hold), so it
+      // ticks here rather than only in onPointerMove.
+      if (dragState && (dragState.type === "partition-draw" || dragState.type === "partition-redrag") && dragState.holdCycleStart != null) {
+        const p = state.partitions.find((pp) => pp.id === dragState.id);
+        if (p && partitionIsFullSpan(p)) {
+          const newMode = Math.floor((now - dragState.holdCycleStart) / WALL_CYCLE_HOLD_MS) % 3;
+          if (newMode !== dragState.wallMode) {
+            dragState.wallMode = newMode;
+            playClickSound();
+            rebuild();
+          }
+        } else {
+          dragState.holdCycleStart = null;
+          dragState.wallMode = 0;
+        }
+      }
 
       if (walkModeRef.current) {
         renderer.setScissorTest(false);
