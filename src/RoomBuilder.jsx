@@ -27,7 +27,8 @@ const DEFAULT_ROOM_HALF_Z = 7.5;
 const MIN_STAIR_SIZE = FT;         // smallest footprint that commits as a staircase
 const MIN_ROOM_DRAW_SIZE = 3 * FT; // smallest footprint that commits as a new drawn room
 const ROOM_SNAP_DIST = 3;          // meters -- generous snap radius for the Room tool's corner/edge snapping
-const WALL_CYCLE_HOLD_MS = 2000;   // once a dragged partition/bump-out snaps flush to an opposing wall, this long a hold advances solid -> door -> fully-open
+const WALL_CYCLE_HOLD_MS = 2000;   // once a dragged partition snaps flush to an opposing wall, this long a hold advances solid -> door -> fully-open
+const WALL_DELETE_HOLD_MS = 1000;  // once a pushed selection's bump-out snaps flush to an opposing wall, this long a hold arms deleting it
 const WALL_CYCLE_DOOR_WIDTH = 6 * FT; // matches the automatic room-to-room connecting door width
 const VIEW_SHIFT = 1.28;          // widen the virtual frame this much to push the model right, clear of the side panel
 const BALCONY_CEILING_DROP = 2 * FT;   // the balcony ceiling/roof sits this far below the room's own default height
@@ -2719,28 +2720,6 @@ export default function RoomBuilder() {
         if (sel.id !== "__preview__" && isPickableTarget) pickList.push(mesh);
       });
 
-      // press-and-hold preview: once a pushed-flush bump-out on THIS wall
-      // is the one being held (see tick()), a magenta band over its notch
-      // -- the same preview material used everywhere else -- shows it's
-      // about to be deleted outright, opening a gap here.
-      if (dragState && dragState.type === "panel-extrude" && dragState.wallMode === 1) {
-        const bo = bumpoutsFor(panelKey).find((b) => "bf:" + b.id === dragState.panelKey);
-        if (bo) {
-          const u0 = Math.max(wallU0, Math.min(bo.u0, wallU1));
-          const u1 = Math.max(wallU0, Math.min(bo.u1, wallU1));
-          if (u1 - u0 > 0.05) {
-            const geo = new THREE.PlaneGeometry(u1 - u0, H);
-            const mesh = new THREE.Mesh(geo, selMatPreview);
-            const offset = T / 2 + 0.02;
-            let posX, posZ;
-            if (lengthAxis === "x") { posX = (u0 + u1) / 2; posZ = coord + normal.z * offset; }
-            else { posZ = (u0 + u1) / 2; posX = coord + normal.x * offset; }
-            mesh.position.set(posX, H / 2, posZ);
-            mesh.lookAt(mesh.position.clone().add(normal));
-            sceneGroup.add(mesh);
-          }
-        }
-      }
     }
 
     function renderPartition(p) {
@@ -4925,13 +4904,12 @@ export default function RoomBuilder() {
       entry.rooms.push(roomA, roomB);
       entry.data.partitions = [];
       entry.data.bumpouts = [];
-      // the two new rooms don't tile the floor's own footprint exactly (a
-      // gap-based split leaves real empty space between them, which
-      // floorFullyClaimedByRooms' area check would read as "not fully
-      // claimed") -- flag it explicitly so the floor's own original walls
-      // stay suppressed regardless, rather than reappearing around/through
-      // the gap as a third, unwanted enclosed room.
       entry.baseContentReplaced = true;
+      // land on room A as the active one -- otherwise neither new room's
+      // own walls are pickable (only the active room's are), leaving both
+      // uneditable right after the split until the Room tool is used to
+      // tap one back into focus.
+      switchActiveRoom(roomA.id);
     }
 
     // true once a bump-out's inward notch has been pushed all the way to
@@ -4976,11 +4954,23 @@ export default function RoomBuilder() {
       if (sizeA < MIN_SIZE || sizeB < MIN_SIZE) return; // the notch landed too close to a corner to leave two real rooms
       const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = entry.data.height;
       const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = entry.data.height;
+      const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
+      const roomB = { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 };
       entry.rooms = entry.rooms || [];
-      entry.rooms.push({ id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 }, { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 });
+      entry.rooms.push(roomA, roomB);
       entry.data.partitions = [];
       entry.data.bumpouts = [];
+      // the two new rooms don't tile the floor's own footprint (the gap is
+      // deliberately left uncovered), so floorFullyClaimedByRooms' area
+      // check alone would read this floor as "not fully claimed" and let
+      // its original walls reappear around/through the gap as a third,
+      // unwanted enclosed room -- flag it explicitly instead.
       entry.baseContentReplaced = true;
+      // land on room A as the active one -- otherwise neither new room's
+      // own walls are pickable (only the active room's are), leaving both
+      // uneditable right after the split until the Room tool is used to
+      // tap one back into focus.
+      switchActiveRoom(roomA.id);
     }
 
     function onPointerDown(e) {
@@ -7256,7 +7246,7 @@ export default function RoomBuilder() {
       if (dragState && dragState.type === "panel-extrude" && dragState.panelKey.startsWith("bf:") && dragState.holdCycleStart != null) {
         const bo = state.bumpouts.find((b) => "bf:" + b.id === dragState.panelKey);
         if (bo && bumpoutIsFullSpan(bo)) {
-          const armed = now - dragState.holdCycleStart >= WALL_CYCLE_HOLD_MS ? 1 : 0;
+          const armed = now - dragState.holdCycleStart >= WALL_DELETE_HOLD_MS ? 1 : 0;
           if (armed !== dragState.wallMode) {
             dragState.wallMode = armed;
             playClickSound();
