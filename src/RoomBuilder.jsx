@@ -100,7 +100,7 @@ function hexToHsl(hex) {
 }
 // shifts a hex color's hue/saturation/lightness by the wheel's global
 // adjustment sliders -- used both for the generic disc's colors and for a
-// curated preset's, so the sliders affect whatever is currently shown.
+// named theme's, so the sliders affect whatever is currently shown.
 function adjustHex(hex, hueShift, satMul, lightMul) {
   const { h, s, l } = hexToHsl(hex);
   return hslToHex((h + hueShift + 360) % 360, Math.max(0, Math.min(100, s * satMul)), Math.max(2, Math.min(98, l * lightMul)));
@@ -140,19 +140,20 @@ function themeColorsFor(hueDeg, sat, midLight = THEME_WALL_MIDLIGHT) {
   };
 }
 const WHEEL_HUE_COUNT = 12;
-const WHEEL_TINT_RINGS = 4; // four tones per hue -- vivid at the rim, pale near the hub
+const WHEEL_TINT_RINGS = 6; // six tones per hue -- a near-white tint at the hub, ramping up to the most intense, fully-saturated version of the hue at the rim
 const WHEEL_GREY_STEPS = 17; // 15 greys + pure white + pure black
-// the hue/tint disc -- twelve 30-degree hue sectors, each with four tone
-// cells running from a vivid, near-fully-saturated color at the rim to a
-// pale near-white tint approaching the hub.
+// the hue/tint disc -- twelve 30-degree hue sectors, each with six tone
+// cells running from a near-white tint close to the hub out to a vivid,
+// fully-saturated color at the rim.
 const WHEEL_DISC_CELLS = (() => {
   const cells = [];
   for (let h = 0; h < WHEEL_HUE_COUNT; h++) {
     const hueDeg = (h / WHEEL_HUE_COUNT) * 360;
     for (let r = 0; r < WHEEL_TINT_RINGS; r++) {
       const t = r / (WHEEL_TINT_RINGS - 1);
-      const lightness = 90 - t * 42; // pale near the hub (r=0) -> vivid at the rim (r=max)
-      cells.push({ hue: h, ring: r, hueDeg, hex: hslToHex(hueDeg, 88, lightness) });
+      const lightness = 95 - t * 47; // near-white near the hub (r=0) -> vivid at the rim (r=max)
+      const saturation = 18 + t * 82; // barely tinted near the hub -> fully saturated at the rim
+      cells.push({ hue: h, ring: r, hueDeg, hex: hslToHex(hueDeg, saturation, lightness) });
     }
   }
   return cells;
@@ -194,33 +195,29 @@ function buildPalette(name, wall, floor, railing, prop) {
     wheel: [wall, floor, railing, prop],
   };
 }
-// Curated, hand-picked palettes representing recognizable color-scheme
-// styles (as opposed to the generic hue wheel's one-anchor-point math),
-// each named for wall/floor/railing/prop straight off the reference
-// mockup's own theme-palette swatches. `wheel` is what repopulates the
-// disc while a preset is active: four flat quarter-wedges (not the usual
-// twelve sectors) so the palette reads as a small, deliberate set rather
-// than a full spectrum; tapping any lit wedge applies the preset.
-// each preset's wall is always its most vivid tone (weighted toward
-// mid-lightness, since a raw HSL saturation number reads as pale rather
-// than vivid up near white or crushed down near black) -- picked by that
-// rule from the four colors, with floor kept the lightest of what's left
-// and railing the darkest, so the room still reads coherent.
-const CURATED_PALETTES = [
-  buildPalette("Mono", 0x9a9a9a, 0xe8e8e8, 0x2a2a2a, 0x5c5c5c),
-  buildPalette("Ocean", 0x3f7ea6, 0xdcecf0, 0x123a52, 0x6fc7d4),
-  buildPalette("Forest", 0x8fae5a, 0xe2e8d4, 0x233620, 0x5a7a4a),
-  buildPalette("Desert", 0xe0603c, 0xf3e0c4, 0x7a4326, 0xd99a5c),
-  buildPalette("Pastel", 0xf3b6c2, 0xfbeee0, 0x8fb8ae, 0xaed4e0),
-  buildPalette("Rich", 0x8b1f3d, 0xcbb8dc, 0x140f1a, 0x1f3d3a),
-  // explicit per-role mapping requested for Neon: pink walls, orange-yellow
-  // floor, neon-blue railing, neon-green props.
-  buildPalette("Neon", 0xff2ec4, 0xffb020, 0x2ee6ff, 0x39ff6a),
-  buildPalette("Kitchen", 0xb3453a, 0xd9cfc0, 0x2e2a26, 0x8a6b4a),
-  buildPalette("Office", 0x4a6fa5, 0xc7c2b8, 0x24211d, 0x8f8a7c),
-  buildPalette("Living room", 0xc9a978, 0xe8d9c0, 0x4a3826, 0x7a8f6e),
-  buildPalette("Bedroom", 0xa88bb8, 0xf1e7ec, 0x4a3d4e, 0xcdb8cc),
-  buildPalette("Exterior", 0x5c7a4a, 0xb0a894, 0x2a2824, 0x9c9488),
+// Twelve named color themes, lifted straight off two reference mood-board
+// sheets ("10 Creative Colour Themes" and the first two entries of "10
+// Visionary Colour Themes") -- each one's six swatches are its actual
+// six-color strip from the sheet, read left to right, with no computed
+// gradient involved. In theme-wheel mode each theme fills one of the
+// wheel's twelve wedges with its own six swatches (hub-side ring first,
+// rim ring last), so tapping a theme's wedge shows exactly that theme's
+// real palette rather than a generic tint ramp. Tapping one of the six
+// rings promotes that swatch to the wall; see applyRoomTheme for how the
+// other five resolve into floor/prop/railing.
+const THEME_PALETTES = [
+  { name: "Neon Dream", swatches: [0xe91e8c, 0x8b1fc9, 0x5b3ce0, 0x2255e6, 0x00c2e0, 0x0d1128] },
+  { name: "Pastel Serenity", swatches: [0xf0c3a8, 0xeec6c6, 0xf4ddd2, 0xc6dbcd, 0xb7cee0, 0xc5c6d6] },
+  { name: "Korean Minimal", swatches: [0xc8b090, 0x8a5a3d, 0x9b9184, 0x89877e, 0x7b8470, 0x2a2620] },
+  { name: "Cyberpunk", swatches: [0x4a1050, 0xe6198f, 0x9a80d6, 0x1f70c6, 0x16305a, 0x0c1220] },
+  { name: "Modernism", swatches: [0x161616, 0x4a4a4a, 0x8e8e8e, 0xd7d3c7, 0xb7a787, 0xa8481f] },
+  { name: "Earth & Nature", swatches: [0x3c4a2d, 0x6a7949, 0xa8815b, 0xb0673f, 0x89492f, 0xddcfb7] },
+  { name: "Japandi", swatches: [0x2b2b2b, 0x575757, 0x837d73, 0xe7e1d3, 0x899080, 0x393b2f] },
+  { name: "Artistic Bold", swatches: [0xa3222c, 0xe2662c, 0xe2b02c, 0x1f4f8f, 0x2879a0, 0xe0a8ba] },
+  { name: "Monochrome+", swatches: [0x0a0a0a, 0x4a4a4a, 0x8a8a8a, 0xc8c8c8, 0x5c1c28, 0xc8949c] },
+  { name: "Ethereal Future", swatches: [0xd7c7e7, 0xe7c7db, 0xefd7df, 0xbfd7cf, 0xb7c7cf, 0xcfcfd3] },
+  { name: "Miyazaki", swatches: [0x3c5140, 0x899a6b, 0xb7cfd7, 0xc7dbdf, 0xebdbc7, 0xbf6f4f] },
+  { name: "Ghost in the Shell", swatches: [0x1b2740, 0x394960, 0x5b6f87, 0xa7bbc7, 0xdbe1e3, 0xdfd3d1] },
 ];
 
 // a short synthesized click (Web Audio, no audio file to fetch) for wall/
@@ -291,21 +288,22 @@ function angleDiffDeg(a, b) {
 // The color-theme wheel: a persistent, draggable, spinnable floating disc
 // (not a modal -- no backdrop, so the 3D view stays interactive while it's
 // open), modeled on Teenage Engineering's color-wheel tool: a small
-// greyscale ring at the hub, surrounded by a full hue/tint disc (angle =
-// hue, radius = a vivid-at-the-rim-to-pale-near-the-hub tint gradient).
-// Three distinct gestures: drag the hub to reposition the whole widget;
-// tap the hub (no real movement) to cycle through curated named palettes,
-// which repopulate the disc with that palette's own colors; drag anywhere
-// on the colorful disc itself to spin it, with a bit of momentum once
-// released, like a real dial.
-function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, presetIndex, onCyclePreset, hueShift, satMul, lightMul, onSlider }) {
+// greyscale ring at the hub, surrounded by a full disc (angle = one of
+// twelve slots, radius = six tone rings). Three distinct gestures: drag
+// the hub to reposition the whole widget; tap the hub (no real movement)
+// to toggle which grid the disc shows -- the generic 12-hue x 6-ring tonal
+// wheel, or the 12 named image-derived themes, each filling its wedge with
+// its own six real swatch colors -- without applying anything itself; drag
+// anywhere on the colorful disc itself to spin it, with a bit of momentum
+// once released, like a real dial.
+function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, mode, onToggleMode, hueShift, satMul, lightMul, onSlider }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     const id = requestAnimationFrame(() => setEntered(true));
     return () => cancelAnimationFrame(id);
   }, []);
 
-  // --- hub: drag to move, tap (little/no movement) to cycle presets ---
+  // --- hub: drag to move, tap (little/no movement) to toggle hue/theme mode ---
   function startHubGesture(e) {
     e.preventDefault();
     e.stopPropagation();
@@ -319,7 +317,7 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
     function onUp() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (moved < 6) onCyclePreset();
+      if (moved < 6) onToggleMode();
     }
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -388,11 +386,11 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
   // reading as "triangular wedges" between cells instead of a uniform
   // single-pixel line.
 
-  const preset = presetIndex > 0 ? CURATED_PALETTES[presetIndex - 1] : null;
   const isActiveCell = (hueDeg, ring) => activeTheme && activeTheme.type === "hue" && activeTheme.hueDeg === hueDeg && activeTheme.ring === ring;
   const isActiveGrey = (step) => activeTheme && activeTheme.type === "grey" && activeTheme.step === step;
-  const isActivePreset = (slice) => activeTheme && activeTheme.type === "preset" && activeTheme.name === (preset && preset.name) && activeTheme.slice === slice;
+  const isActiveTheme = (name, ring) => activeTheme && activeTheme.type === "theme" && activeTheme.name === name && activeTheme.ring === ring;
   const adj = (hex) => adjustHex(hex, hueShift, satMul, lightMul);
+  const activeThemeName = mode === "theme" && activeTheme && activeTheme.type === "theme" ? activeTheme.name : "";
 
   return (
     <div
@@ -402,6 +400,19 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
         userSelect: "none", WebkitUserSelect: "none",
       }}
     >
+      {/* the active theme's name, in the same font/size as the ribbon's own
+          floating labels (.ribbon-label, replicated inline since this sits
+          outside the ribbon) -- only shown once a theme wedge is actually
+          picked, not merely while browsing the theme grid. */}
+      <div
+        style={{
+          height: 12, marginBottom: 4, textAlign: "center", fontFamily: "var(--font-mono)",
+          fontSize: 9.5, fontWeight: 500, color: "var(--text-secondary)", whiteSpace: "nowrap",
+          opacity: entered ? 1 : 0, transition: "opacity 0.25s ease",
+        }}
+      >
+        {activeThemeName}
+      </div>
       <div
         style={{
           width: size, height: size, position: "relative",
@@ -419,22 +430,22 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
         >
           <circle cx={cx} cy={cy} r={discR1} fill="transparent" style={{ cursor: "grab" }} />
           <g transform={`rotate(${rotation} ${cx} ${cy})`} style={{ cursor: "grab", touchAction: "none" }}>
-            {preset
-              ? Array.from({ length: 4 }, (_, slice) => {
-                  const hex = preset.wheel[slice % preset.wheel.length];
-                  return (
+            {mode === "theme"
+              ? THEME_PALETTES.flatMap((theme, ti) => {
+                  const angleDeg = (ti / WHEEL_HUE_COUNT) * 360;
+                  return theme.swatches.map((hex, ring) => (
                     <path
-                      key={`preset${slice}`}
-                      d={ringWedgePath(cx, cy, discR0, discR1, slice * 90 - 90, 90, 0)}
+                      key={`t${ti}-r${ring}`}
+                      d={ringWedgePath(cx, cy, discR0 + ring * ringDepth, discR0 + (ring + 1) * ringDepth, angleDeg - 90, hueSpan, 0)}
                       fill={hexToCss(adj(hex))}
-                      stroke={isActivePreset(slice) ? "var(--accent)" : "var(--wheel-seam)"}
-                      strokeWidth={isActivePreset(slice) ? 1.5 : 1}
+                      stroke={isActiveTheme(theme.name, ring) ? "var(--accent)" : "var(--wheel-seam)"}
+                      strokeWidth={isActiveTheme(theme.name, ring) ? 1.75 : 1}
                       style={{ cursor: "pointer" }}
-                      onClick={() => pick({ type: "preset", name: preset.name, slice })}
+                      onClick={() => pick({ type: "theme", name: theme.name, ring })}
                     >
-                      <title>{`${preset.name} theme`}</title>
+                      <title>{`${theme.name} · ${hexToCss(adj(hex))}`}</title>
                     </path>
-                  );
+                  ));
                 })
               : WHEEL_DISC_CELLS.map((cell) => (
                   <path
@@ -466,16 +477,16 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, pre
         </svg>
         <div
           onPointerDown={startHubGesture}
-          title={`Drag to move, tap to cycle color-scheme presets -- ${preset ? preset.name : "Theme"}`}
+          title={`Drag to move, tap to switch between the hue wheel and the theme wheel -- currently: ${mode === "theme" ? "Themes" : "Hue"}`}
           style={{
             position: "absolute", left: cx - hubR, top: cy - hubR, width: hubR * 2, height: hubR * 2, borderRadius: "50%",
             background: "#1a1a1a", border: "1px solid var(--border-control)",
             display: "flex", alignItems: "center", justifyContent: "center", cursor: "grab", touchAction: "none",
           }}
         >
-          {/* a plain plus mark, like the reference's own hub -- the preset
-              name is still there on hover (see the title above) rather
-              than cluttering the hub visually. */}
+          {/* a plain plus mark, like the reference's own hub -- which mode
+              is active is still there on hover (see the title above)
+              rather than cluttering the hub visually. */}
           <span style={{ fontSize: 15, lineHeight: 1, color: "#ffffff", pointerEvents: "none", fontWeight: 300 }}>+</span>
         </div>
         {/* close button lives outside the disc, upper-right, rather than
@@ -754,19 +765,21 @@ export default function RoomBuilder() {
       y: typeof window !== "undefined" ? Math.max(320, window.innerHeight - ribbonHeight - edgeBuffer - wheelHalf) : 420,
     };
   });
-  // { type: "hue", hueDeg, ring } | { type: "grey", step, midLight } | { type: "preset", name } | null
+  // { type: "hue", hueDeg, ring } | { type: "grey", step, midLight } | { type: "theme", name, ring } | null
   const [themeAnchor, setThemeAnchor] = useState(null);
   const themeApiRef = useRef(() => {});
   // global wheel sliders -- re-tint whatever's currently picked (anchor or
-  // preset) without changing what's picked itself.
+  // theme) without changing what's picked itself.
   const [themeHueShift, setThemeHueShift] = useState(0);
   const [themeSatMul, setThemeSatMul] = useState(1);
   const [themeLightMul, setThemeLightMul] = useState(1);
   useEffect(() => {
     themeApiRef.current(themeAnchor, { hueShift: themeHueShift, satMul: themeSatMul, lightMul: themeLightMul });
   }, [themeAnchor, themeHueShift, themeSatMul, themeLightMul]);
-  // 0 = the generic hue/tint disc; 1..N indexes into CURATED_PALETTES
-  const [themePresetIndex, setThemePresetIndex] = useState(0);
+  // which grid the wheel currently shows -- "hue" (the generic 12-hue x
+  // 6-ring tonal disc) or "theme" (the 12 named image-derived themes).
+  // Tapping the hub only flips this; it never applies a color by itself.
+  const [themeWheelMode, setThemeWheelMode] = useState("hue");
   const [viewLayout, setViewLayout] = useState("single");
   const viewLayoutRef = useRef(viewLayout);
   useEffect(() => { viewLayoutRef.current = viewLayout; }, [viewLayout]);
@@ -3842,8 +3855,9 @@ export default function RoomBuilder() {
     }
     // the room color theme: either one anchor point (a hue-wheel cell, or a
     // step on the grey ring) expanding into a related palette via
-    // themeColorsFor, or a curated named preset supplying every color
-    // outright -- either way, one distinct tone reaches each of the wall,
+    // themeColorsFor, or a tapped ring on a named image-derived theme
+    // supplying every color outright -- either way, one distinct tone
+    // reaches each of the wall,
     // floor, stairs, balcony platform, balcony railings, and every prop kind.
     function applyRoomTheme(anchor, slider) {
       if (!anchor) {
@@ -3858,28 +3872,21 @@ export default function RoomBuilder() {
         return;
       }
       let rawPalette;
-      if (anchor.type === "preset") {
-        const preset = CURATED_PALETTES.find((p) => p.name === anchor.name) || CURATED_PALETTES[0];
-        // no slice (just cycled to this preset on the hub) -- the curated
-        // default, wall already its most vivid tone. A slice (the user
-        // explicitly tapped one of the four wedges) overrides that: the
-        // tapped color becomes the wall, the lightest of the remaining
-        // three becomes the floor, and the rest recolor the props/railing
-        // -- recomputed from scratch via buildPalette so stairs/platform/
-        // roof/props all stay derived consistently from the new roles
-        // rather than just overwriting wall/floor on the old palette.
-        if (anchor.slice != null && preset.wheel) {
-          const i = anchor.slice % preset.wheel.length;
-          const wall = preset.wheel[i];
-          const rest = preset.wheel.filter((_, j) => j !== i);
-          const ranked = rest.map((hex) => ({ hex, l: hexToHsl(hex).l })).sort((a, b) => b.l - a.l);
-          const floor = ranked[0].hex;
-          const prop = ranked[1] ? ranked[1].hex : ranked[0].hex;
-          const railing = ranked[2] ? ranked[2].hex : prop;
-          rawPalette = buildPalette(preset.name, wall, floor, railing, prop);
-        } else {
-          rawPalette = preset;
-        }
+      if (anchor.type === "theme") {
+        const theme = THEME_PALETTES.find((p) => p.name === anchor.name) || THEME_PALETTES[0];
+        // the tapped ring's swatch becomes the wall; the lightest of the
+        // remaining five becomes the floor and the rest recolor the props/
+        // railing -- recomputed from scratch via buildPalette so stairs/
+        // platform/roof/props all stay derived consistently from the new
+        // roles, same as a hue-wheel pick.
+        const i = (anchor.ring != null ? anchor.ring : 0) % theme.swatches.length;
+        const wall = theme.swatches[i];
+        const rest = theme.swatches.filter((_, j) => j !== i);
+        const ranked = rest.map((hex) => ({ hex, l: hexToHsl(hex).l })).sort((a, b) => b.l - a.l);
+        const floor = ranked[0].hex;
+        const prop = ranked[1] ? ranked[1].hex : ranked[0].hex;
+        const railing = ranked[2] ? ranked[2].hex : prop;
+        rawPalette = buildPalette(theme.name, wall, floor, railing, prop);
       } else if (anchor.type === "grey") {
         rawPalette = themeColorsFor(0, 0, anchor.midLight);
       } else {
@@ -8300,18 +8307,8 @@ export default function RoomBuilder() {
           pos={themeWheelPos}
           onPosChange={setThemeWheelPos}
           activeTheme={themeAnchor}
-          presetIndex={themePresetIndex}
-          onCyclePreset={() => {
-            // cycling to a named preset now applies it immediately (its
-            // default, most-vivid-tone-as-wall palette) instead of waiting
-            // for a wedge tap -- tapping a specific wedge afterward still
-            // overrides which color becomes the wall.
-            setThemePresetIndex((i) => {
-              const next = (i + 1) % (CURATED_PALETTES.length + 1);
-              if (next > 0) setThemeAnchor({ type: "preset", name: CURATED_PALETTES[next - 1].name });
-              return next;
-            });
-          }}
+          mode={themeWheelMode}
+          onToggleMode={() => setThemeWheelMode((m) => (m === "hue" ? "theme" : "hue"))}
           onPick={(anchor) => setThemeAnchor(anchor)}
           onClose={() => setThemeWheelOpen(false)}
           hueShift={themeHueShift}
