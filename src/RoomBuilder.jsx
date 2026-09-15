@@ -4864,16 +4864,63 @@ export default function RoomBuilder() {
       const span = parent.thickAxis === "z" ? state.footprint.zMax - state.footprint.zMin : state.footprint.xMax - state.footprint.xMin;
       return p.ext <= -(span - 0.05);
     }
+    // guards the auto-split gestures against firing on stale/cross-floor
+    // state -- true only when `state` genuinely is the given floor's own
+    // top-level content (activeRoomId null) or its currently active room's
+    // data (activeRoomId set), never some other floor's retargeted content.
+    function stateMatchesFloorContext(floorEntry) {
+      if (!floorEntry) return false;
+      if (activeRoomId == null) return floorEntry.data === state;
+      return (floorEntry.rooms || []).some((r) => r.id === activeRoomId && r.data === state);
+    }
+
+    // lands the two rooms a split just produced in place of whatever was
+    // being edited -- the floor's own top-level content (its first-ever
+    // split) if activeRoomId is null, or an existing room being subdivided
+    // further (splicing it out for its two halves, leaving any other
+    // sibling rooms on the floor untouched) otherwise. multiPick controls
+    // whether the pair stays mutually pickable regardless of which is
+    // active -- true for a real gap between them, false when they still
+    // share a wall plane (only one side of a shared wall should ever be
+    // grabbable at once, to avoid a tug-of-war over the same geometry).
+    function replaceWithSplitRooms(floorEntry, roomA, roomB, multiPick) {
+      floorEntry.rooms = floorEntry.rooms || [];
+      if (activeRoomId == null) {
+        floorEntry.rooms.push(roomA, roomB);
+        floorEntry.data.partitions = [];
+        floorEntry.data.bumpouts = [];
+        // a gap-split's two rooms don't tile the floor's own footprint (the
+        // gap is deliberately left uncovered), so floorFullyClaimedByRooms'
+        // area check alone would read this floor as "not fully claimed" and
+        // let its original walls reappear around/through the gap as a
+        // third, unwanted enclosed room -- flag it explicitly instead.
+        floorEntry.baseContentReplaced = true;
+      } else {
+        const idx = floorEntry.rooms.findIndex((r) => r.id === activeRoomId);
+        if (idx === -1) floorEntry.rooms.push(roomA, roomB);
+        else floorEntry.rooms.splice(idx, 1, roomA, roomB);
+      }
+      if (multiPick) floorEntry.allowMultiRoomPick = true;
+      // land on room A as the (silently) active one -- "silent" keeps its
+      // floor from showing the "selected" highlight until the user
+      // actually taps into it.
+      switchActiveRoom(roomA.id, { silent: true });
+    }
+
     // only attempted for the simple case the wall-cycle gesture is meant
-    // for: a plain rectangular floor, nothing extracted from it yet, and
-    // this partition the only thing on it -- a floor that already has other
-    // partitions/bumpouts, or already has rooms of its own, just keeps the
+    // for: nothing else already going on in whatever's being edited (the
+    // floor's own top-level content, or an existing room being subdivided
+    // further) besides this one partition -- otherwise it just keeps the
     // new partition as an ordinary wall instead (same as dragging one has
     // always done), rather than attempting a full-fidelity split of
     // whatever shape it's already in.
-    function canAutoSplitFloor(entry) {
-      return activeRoomId == null && (entry.rooms || []).length === 0 &&
-        entry.data.bumpouts.length === 0 && entry.data.partitions.length === 1;
+    function canAutoSplitFloor() {
+      if (activeRoomId == null) {
+        const entry = floors.find((f) => f.id === activeFloorId);
+        return !!entry && (entry.rooms || []).length === 0 &&
+          entry.data.bumpouts.length === 0 && entry.data.partitions.length === 1;
+      }
+      return state.bumpouts.length === 0 && state.partitions.length === 1;
     }
     // turns the single room a just-snapped-flush partition divided into two
     // fully independent rooms -- each a real Room entity with its own
@@ -4885,10 +4932,10 @@ export default function RoomBuilder() {
     // now that they're flush-touching; 2 = a wide, floor-to-ceiling opening
     // spanning almost the whole shared wall on both sides, reading as the
     // wall having been removed entirely.
-    function splitFloorWithPartition(entry, p, wallMode) {
+    function splitFloorWithPartition(floorEntry, p, wallMode) {
       const parent = getPanelInfo(p.panel);
       if (!parent) return;
-      const fp = entry.data.footprint;
+      const fp = state.footprint;
       let rectA, rectB, aPanel, bPanel, openLo, openHi;
       if (parent.thickAxis === "z") {
         // grew in from the north/south wall -- splits along x into a west
@@ -4905,8 +4952,8 @@ export default function RoomBuilder() {
         aPanel = "south"; bPanel = "north";
         openLo = fp.xMin; openHi = fp.xMax;
       }
-      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = entry.data.height;
-      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = entry.data.height;
+      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height;
+      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height;
       const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
       const roomB = { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 };
       if (wallMode !== 1) {
@@ -4924,18 +4971,11 @@ export default function RoomBuilder() {
           dataB.openings.push({ id: idSeq++, panel: bPanel, u0, u1, height: dataB.height, isDoor: true, bottomOverride: 0, dividers: 0 });
         }
       }
-      entry.rooms = entry.rooms || [];
-      entry.rooms.push(roomA, roomB);
-      entry.data.partitions = [];
-      entry.data.bumpouts = [];
-      entry.baseContentReplaced = true;
-      // land on room A as the (silently) active one -- its wall stays
-      // touching room B's along the shared partition plane, so unlike the
-      // gap-split below only ONE side is left pickable at a time (see
-      // isPickableTarget in rebuildRoomEntry); tap into room B via the Room
-      // tool to edit its side. "silent" keeps its floor from showing the
-      // "selected" highlight until the user actually taps into it.
-      switchActiveRoom(roomA.id, { silent: true });
+      // its wall stays touching the other half's along the shared partition
+      // plane, so unlike the gap-split below only ONE side should be left
+      // pickable at a time (see isPickableTarget in rebuildRoomEntry); tap
+      // into the other one via the Room tool to edit its side.
+      replaceWithSplitRooms(floorEntry, roomA, roomB, false);
     }
 
     // true once a bump-out's inward notch has been pushed all the way to
@@ -4947,22 +4987,28 @@ export default function RoomBuilder() {
       const span = parent.thickAxis === "z" ? state.footprint.zMax - state.footprint.zMin : state.footprint.xMax - state.footprint.xMin;
       return bo.depth <= -(span - 0.05);
     }
-    // same "simple floor, nothing else going on" gate as canAutoSplitFloor,
-    // just for the width-selection version of this gesture instead of the
-    // point-anchored partition one.
-    function canAutoSplitFloorByBumpout(entry) {
-      return activeRoomId == null && (entry.rooms || []).length === 0 &&
-        entry.data.partitions.length === 0 && entry.data.bumpouts.length === 1;
+    // same "nothing else going on" gate as canAutoSplitFloor, just for the
+    // width-selection version of this gesture instead of the point-anchored
+    // partition one -- and, same as there, checked against whichever is
+    // currently being edited (the floor's own top-level content, or an
+    // existing room being subdivided further).
+    function canAutoSplitFloorByBumpout() {
+      if (activeRoomId == null) {
+        const entry = floors.find((f) => f.id === activeFloorId);
+        return !!entry && (entry.rooms || []).length === 0 &&
+          entry.data.partitions.length === 0 && entry.data.bumpouts.length === 1;
+      }
+      return state.partitions.length === 0 && state.bumpouts.length === 1;
     }
     // a selected width pushed flush across the whole room and held there
     // doesn't become a shared wall like the point-partition gesture does --
     // it deletes that whole width outright, leaving two fully independent
     // rooms with a real gap (the notch's own width) between them, each a
     // complete, self-contained room like any other extracted one.
-    function splitFloorWithBumpoutGap(entry, bo) {
+    function splitFloorWithBumpoutGap(floorEntry, bo) {
       const parent = getPanelInfo(bo.panel);
       if (!parent) return;
-      const fp = entry.data.footprint;
+      const fp = state.footprint;
       let rectA, rectB;
       if (parent.thickAxis === "z") {
         // grew in from the north/south wall -- the gap runs along x,
@@ -4978,32 +5024,15 @@ export default function RoomBuilder() {
       const sizeA = parent.thickAxis === "z" ? rectA.xMax - rectA.xMin : rectA.zMax - rectA.zMin;
       const sizeB = parent.thickAxis === "z" ? rectB.xMax - rectB.xMin : rectB.zMax - rectB.zMin;
       if (sizeA < MIN_SIZE || sizeB < MIN_SIZE) return; // the notch landed too close to a corner to leave two real rooms
-      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = entry.data.height;
-      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = entry.data.height;
+      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height;
+      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height;
       const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
       const roomB = { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 };
-      entry.rooms = entry.rooms || [];
-      entry.rooms.push(roomA, roomB);
-      entry.data.partitions = [];
-      entry.data.bumpouts = [];
-      // the two new rooms don't tile the floor's own footprint (the gap is
-      // deliberately left uncovered), so floorFullyClaimedByRooms' area
-      // check alone would read this floor as "not fully claimed" and let
-      // its original walls reappear around/through the gap as a third,
-      // unwanted enclosed room -- flag it explicitly instead.
-      entry.baseContentReplaced = true;
-      // the two rooms sit on opposite sides of a real gap (unlike the
+      // the two new rooms sit on opposite sides of a real gap (unlike the
       // point-partition split, which leaves them touching along a shared
       // wall plane), so there's no ambiguity in letting both be clickable
-      // at once -- see the isPickableTarget check in rebuildRoomEntry.
-      entry.allowMultiRoomPick = true;
-      // land on room A as the (silently) active one so `state` points
-      // somewhere valid right away -- allowMultiRoomPick already makes
-      // BOTH new rooms' walls pickable regardless of which is active; this
-      // is just a sane default so panel-height/curved-corner UI etc. has
-      // something to read. "silent" keeps its floor from showing the
-      // "selected" highlight until the user actually taps into it.
-      switchActiveRoom(roomA.id, { silent: true });
+      // at once regardless of which is active.
+      replaceWithSplitRooms(floorEntry, roomA, roomB, true);
     }
 
     function onPointerDown(e) {
@@ -6008,7 +6037,7 @@ export default function RoomBuilder() {
             // two separate ones with a real gap between them (see
             // splitFloorWithBumpoutGap).
             const floorEntry = floors.find((f) => f.id === activeFloorId);
-            if (floorEntry && floorEntry.data === state && canAutoSplitFloorByBumpout(floorEntry)) {
+            if (stateMatchesFloorContext(floorEntry) && canAutoSplitFloorByBumpout()) {
               splitFloorWithBumpoutGap(floorEntry, bo);
             }
           }
@@ -6023,7 +6052,7 @@ export default function RoomBuilder() {
           // splitFloorWithPartition), with the boundary the hold cycle
           // landed on: solid, an ordinary door, or fully open.
           const floorEntry = floors.find((f) => f.id === activeFloorId);
-          if (floorEntry && floorEntry.data === state && canAutoSplitFloor(floorEntry)) {
+          if (stateMatchesFloorContext(floorEntry) && canAutoSplitFloor()) {
             splitFloorWithPartition(floorEntry, p, dragState.wallMode || 0);
           }
         }
