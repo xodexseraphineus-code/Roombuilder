@@ -1793,6 +1793,11 @@ export default function RoomBuilder() {
     let floors = [{ id: 1, data: makeFloorData(), rooms: [] }];
     let activeFloorId = 1;
     let activeRoomId = null; // id of the room (within the active floor) currently focused for editing, or null for the floor itself
+    // true when activeRoomId was set programmatically (e.g. right after an
+    // auto-split) rather than by the user tapping into the room -- suppresses
+    // the "selected" floor highlight for that one entry without touching
+    // pickability, which is keyed off activeRoomId alone.
+    let activeRoomSilent = false;
     let buildingRoomId = null; // which room's data we're currently building geometry for (null = the floor's own content)
     let buildingFloorEntry = null; // the floor entry currently being built (so its .rooms list is reachable while rendering)
     const isolatedFloorIds = new Set();
@@ -3935,8 +3940,18 @@ export default function RoomBuilder() {
       rg.position.set(room.offsetX || 0, 0, room.offsetZ || 0);
       sceneGroup = rg;
       buildingActiveFloor = floorIsActive;
-      const isSelectedRoom = floorIsActive && activeRoomId === room.id;
-      isPickableTarget = isSelectedRoom;
+      const isActiveRoom = floorIsActive && activeRoomId === room.id;
+      // a gap-split floor's two rooms are genuinely separate, non-touching
+      // rooms carved out of the same original one by a single gesture, not
+      // drawn independently via the Room tool -- so unlike an ordinary
+      // multi-room floor (where two rooms can share a wall plane, and only
+      // letting the active one grab it avoids a tug-of-war over the same
+      // geometry), EITHER should be directly clickable to edit here. Tapping
+      // a wall already promotes its owner to the active room (see the
+      // ownerRoomId check in onPointerDown), so this only widens which
+      // walls are reachable, not what happens once one is.
+      isPickableTarget = isActiveRoom || (floorIsActive && !!floorEntry.allowMultiRoomPick);
+      const isSelectedRoom = isActiveRoom && !activeRoomSilent;
       buildingRoomId = room.id;
       buildingFloorEntry = floorEntry;
       currentWallMat = !floorIsActive ? wallMatDim : wallMat;
@@ -4905,11 +4920,13 @@ export default function RoomBuilder() {
       entry.data.partitions = [];
       entry.data.bumpouts = [];
       entry.baseContentReplaced = true;
-      // land on room A as the active one -- otherwise neither new room's
-      // own walls are pickable (only the active room's are), leaving both
-      // uneditable right after the split until the Room tool is used to
-      // tap one back into focus.
-      switchActiveRoom(roomA.id);
+      // land on room A as the (silently) active one -- its wall stays
+      // touching room B's along the shared partition plane, so unlike the
+      // gap-split below only ONE side is left pickable at a time (see
+      // isPickableTarget in rebuildRoomEntry); tap into room B via the Room
+      // tool to edit its side. "silent" keeps its floor from showing the
+      // "selected" highlight until the user actually taps into it.
+      switchActiveRoom(roomA.id, { silent: true });
     }
 
     // true once a bump-out's inward notch has been pushed all the way to
@@ -4966,11 +4983,18 @@ export default function RoomBuilder() {
       // its original walls reappear around/through the gap as a third,
       // unwanted enclosed room -- flag it explicitly instead.
       entry.baseContentReplaced = true;
-      // land on room A as the active one -- otherwise neither new room's
-      // own walls are pickable (only the active room's are), leaving both
-      // uneditable right after the split until the Room tool is used to
-      // tap one back into focus.
-      switchActiveRoom(roomA.id);
+      // the two rooms sit on opposite sides of a real gap (unlike the
+      // point-partition split, which leaves them touching along a shared
+      // wall plane), so there's no ambiguity in letting both be clickable
+      // at once -- see the isPickableTarget check in rebuildRoomEntry.
+      entry.allowMultiRoomPick = true;
+      // land on room A as the (silently) active one so `state` points
+      // somewhere valid right away -- allowMultiRoomPick already makes
+      // BOTH new rooms' walls pickable regardless of which is active; this
+      // is just a sane default so panel-height/curved-corner UI etc. has
+      // something to read. "silent" keeps its floor from showing the
+      // "selected" highlight until the user actually taps into it.
+      switchActiveRoom(roomA.id, { silent: true });
     }
 
     function onPointerDown(e) {
@@ -5326,6 +5350,10 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        // a deliberate tap on this room's own wall/partition, even if it was
+        // already the (silently, auto-landed) active one -- it's genuinely
+        // selected now, same as tapping into it via the Room tool would do.
+        else if (ownerRoomId != null && activeRoomSilent) switchActiveRoom(ownerRoomId, { silent: false });
         // switchActiveRoom resets `state` to the active floor when it
         // clears room focus -- reassert the cross-floor retarget so the
         // drag that's about to start still lands on the right floor.
@@ -6345,9 +6373,10 @@ export default function RoomBuilder() {
     // moves wall-editing focus onto a room (or back to the floor itself when
     // id is null) -- everything else (tap a wall, cut an opening, add a
     // partition) already works once `state` points at the right data object.
-    function switchActiveRoom(id) {
-      if (activeRoomId === id) return;
+    function switchActiveRoom(id, { silent = false } = {}) {
+      if (activeRoomId === id && activeRoomSilent === silent) return;
       activeRoomId = id;
+      activeRoomSilent = silent;
       const floorEntry = floors.find((f) => f.id === activeFloorId);
       if (id == null) {
         state = floorEntry ? floorEntry.data : makeFloorData();
@@ -6362,7 +6391,10 @@ export default function RoomBuilder() {
         }
       }
       setSelectedPanel(null);
-      setSelectedRoomId(id);
+      // a silent entry (auto-landed here by our own code, not a user tap)
+      // deliberately leaves the room unselected -- no Cut/Copy/Delete arming,
+      // no "selected" floor highlight -- it's just made editable.
+      if (!silent) setSelectedRoomId(id);
       setSelectedStairId(null);
         setSelectedPropId(null);
       setSelectedBalconyId(null);
