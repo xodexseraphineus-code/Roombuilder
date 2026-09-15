@@ -19,7 +19,6 @@ const MIN_RADIUS = 4;             // closest the camera can zoom in
 const MAX_RADIUS = 250;           // farthest the camera can zoom out (tall buildings need more room)
 const MIN_OPENING = 0.5;          // smallest opening you can cut
 const MIN_HIGHLIGHT = 0.15;       // smallest highlight worth keeping
-const HOLD_MS = 420;              // press-and-hold duration to arm a partition/cut
 const MOVE_PX = 6;                // pixels of movement that resolves a quick drag
 const DEFAULT_OPENING_HEIGHT = +(WALL_HEIGHT * 0.8).toFixed(2);
 const FT = 0.3048;                // grid/measurement units are shown in feet
@@ -4793,24 +4792,6 @@ export default function RoomBuilder() {
     function pointerDist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
     function pointerMid(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
     function capture(e) { try { renderer.domElement.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ } }
-    function armTimer() {
-      const token = {};
-      return {
-        token,
-        id: setTimeout(() => {
-          if (!dragState || dragState.token !== token) return;
-          dragState.armed = true;
-          // an audible cue right when holding still long enough arms
-          // partition-creation -- without it, nothing on screen changes
-          // between "still resolving the hold" and "ready, drag now",
-          // so a press-and-immediately-push reads as broken rather than
-          // as the wrong gesture (a quick perpendicular drag here instead
-          // moves/resizes the whole wall, not a new dividing one).
-          playClickSound();
-        }, HOLD_MS),
-      };
-    }
-
     // extracts the detected region into its own draggable room. If the floor
     // has no partitions, the detected region IS the floor's whole current
     // shape, so we deep-clone the entire floor data (bumpouts, selections,
@@ -5326,11 +5307,10 @@ export default function RoomBuilder() {
         const side = Math.sign((thickCoord - info.coord) * normalComponent) || 1;
         dragState = { type: "pending-balcony", panelKey, info, hitPoint: hp, side, startScreen: { x: e.clientX, y: e.clientY } };
       } else {
-        const t = armTimer();
         dragState = {
           type: "pending", panelKey, info, hitPoint: hp,
           selIdAtPoint: kind === "selection" ? obj.userData.id : null,
-          startScreen: { x: e.clientX, y: e.clientY }, token: t.token, holdTimer: t.id,
+          startScreen: { x: e.clientX, y: e.clientY },
         };
       }
       capture(e);
@@ -5446,11 +5426,19 @@ export default function RoomBuilder() {
         const dx = e.clientX - dragState.startScreen.x;
         const dy = e.clientY - dragState.startScreen.y;
         const dist = Math.hypot(dx, dy);
-        if (!dragState.armed && dist > MOVE_PX) {
-          clearTimeout(dragState.holdTimer);
+        if (dist > MOVE_PX) {
           pushUndo();
           const info = dragState.info;
           const cls = classifyDrag(info, dragState.hitPoint, dx, dy);
+          // an inward push straight off a plain base wall (no selection
+          // sitting there already) now goes straight into creating a new
+          // dividing partition from that point -- no need to hold still
+          // first. Re-adjusting an existing bump-out's own depth, dragging
+          // a wall outward, or dragging along its length are all
+          // unaffected -- this only redirects the one gesture that used to
+          // just move/resize the whole wall.
+          const ns = worldDirScreen(dragState.hitPoint, info.normal);
+          const isInward = (dx * ns.x + dy * ns.y) < 0;
           if (cls === "select") {
             const u = panelU(info, dragState.hitPoint);
             dragState = { type: "select-drag", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
@@ -5466,20 +5454,14 @@ export default function RoomBuilder() {
             } else {
               dragState = { type: "panel-extrude", panelKey: dragState.panelKey, thickAxis: info.thickAxis, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), startCoord: info.coord };
             }
+          } else if (isInward && wallDefs[dragState.panelKey]) {
+            const id = idSeq++;
+            state.partitions.push({ id, panel: dragState.panelKey, u: panelU(info, dragState.hitPoint), ext: 0 });
+            dragState = { type: "partition-draw", id, normal: info.normal, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), baseExt: 0 };
           } else {
             dragState = { type: "panel-extrude", panelKey: dragState.panelKey, thickAxis: info.thickAxis, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), startCoord: info.coord };
           }
           if (dragState.type === "panel-extrude") setSelectedPanel(dragState.panelKey);
-          rebuild();
-          return;
-        }
-        if (dragState.armed && dist > 2) {
-          pushUndo();
-          const info = dragState.info;
-          const u = panelU(info, dragState.hitPoint);
-          const id = idSeq++;
-          state.partitions.push({ id, panel: dragState.panelKey, u, ext: 0 });
-          dragState = { type: "partition-draw", id, normal: info.normal, plane: makeVerticalPlane(info.normal, dragState.hitPoint), start: dragState.hitPoint.clone(), baseExt: 0 };
           rebuild();
           return;
         }
