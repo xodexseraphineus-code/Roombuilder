@@ -2067,7 +2067,12 @@ export default function RoomBuilder() {
         const def = wallDefs[parentPanelKey];
         const fp = state.footprint;
         const span = def.thickAxis === "z" ? fp.zMax - fp.zMin : fp.xMax - fp.xMin;
-        return Math.max(-(span - MIN_SIZE), depth);
+        const v = Math.max(-(span - MIN_SIZE), depth);
+        // pushed close enough to the far wall to be deliberately reaching
+        // for it -- snap the rest of the way flush instead of stopping
+        // MIN_SIZE short, mirroring how a dragged partition already snaps
+        // flush near the opposite wall (see clampPartitionExt).
+        return depth < -(span - CLOSE_SNAP_DIST) ? -span : v;
       }
       return Math.max(-3, depth);
     }
@@ -2713,6 +2718,29 @@ export default function RoomBuilder() {
         sceneGroup.add(mesh);
         if (sel.id !== "__preview__" && isPickableTarget) pickList.push(mesh);
       });
+
+      // press-and-hold preview: once a pushed-flush bump-out on THIS wall
+      // is the one being held (see tick()), a magenta band over its notch
+      // -- the same preview material used everywhere else -- shows it's
+      // about to be deleted outright, opening a gap here.
+      if (dragState && dragState.type === "panel-extrude" && dragState.wallMode === 1) {
+        const bo = bumpoutsFor(panelKey).find((b) => "bf:" + b.id === dragState.panelKey);
+        if (bo) {
+          const u0 = Math.max(wallU0, Math.min(bo.u0, wallU1));
+          const u1 = Math.max(wallU0, Math.min(bo.u1, wallU1));
+          if (u1 - u0 > 0.05) {
+            const geo = new THREE.PlaneGeometry(u1 - u0, H);
+            const mesh = new THREE.Mesh(geo, selMatPreview);
+            const offset = T / 2 + 0.02;
+            let posX, posZ;
+            if (lengthAxis === "x") { posX = (u0 + u1) / 2; posZ = coord + normal.z * offset; }
+            else { posZ = (u0 + u1) / 2; posX = coord + normal.x * offset; }
+            mesh.position.set(posX, H / 2, posZ);
+            mesh.lookAt(mesh.position.clone().add(normal));
+            sceneGroup.add(mesh);
+          }
+        }
+      }
     }
 
     function renderPartition(p) {
@@ -4897,6 +4925,54 @@ export default function RoomBuilder() {
       entry.data.bumpouts = [];
     }
 
+    // true once a bump-out's inward notch has been pushed all the way to
+    // the wall opposite the one it grew from -- clampBumpDepth already
+    // snaps it flush there, so this just checks it landed at that value.
+    function bumpoutIsFullSpan(bo) {
+      const parent = getPanelInfo(bo.panel);
+      if (!parent || !wallDefs[bo.panel]) return false;
+      const span = parent.thickAxis === "z" ? state.footprint.zMax - state.footprint.zMin : state.footprint.xMax - state.footprint.xMin;
+      return bo.depth <= -(span - 0.05);
+    }
+    // same "simple floor, nothing else going on" gate as canAutoSplitFloor,
+    // just for the width-selection version of this gesture instead of the
+    // point-anchored partition one.
+    function canAutoSplitFloorByBumpout(entry) {
+      return activeRoomId == null && (entry.rooms || []).length === 0 &&
+        entry.data.partitions.length === 0 && entry.data.bumpouts.length === 1;
+    }
+    // a selected width pushed flush across the whole room and held there
+    // doesn't become a shared wall like the point-partition gesture does --
+    // it deletes that whole width outright, leaving two fully independent
+    // rooms with a real gap (the notch's own width) between them, each a
+    // complete, self-contained room like any other extracted one.
+    function splitFloorWithBumpoutGap(entry, bo) {
+      const parent = getPanelInfo(bo.panel);
+      if (!parent) return;
+      const fp = entry.data.footprint;
+      let rectA, rectB;
+      if (parent.thickAxis === "z") {
+        // grew in from the north/south wall -- the gap runs along x,
+        // leaving a west room (A) and an east room (B).
+        rectA = { xMin: fp.xMin, xMax: bo.u0, zMin: fp.zMin, zMax: fp.zMax };
+        rectB = { xMin: bo.u1, xMax: fp.xMax, zMin: fp.zMin, zMax: fp.zMax };
+      } else {
+        // grew in from the east/west wall -- the gap runs along z,
+        // leaving a north room (A) and a south room (B).
+        rectA = { xMin: fp.xMin, xMax: fp.xMax, zMin: fp.zMin, zMax: bo.u0 };
+        rectB = { xMin: fp.xMin, xMax: fp.xMax, zMin: bo.u1, zMax: fp.zMax };
+      }
+      const sizeA = parent.thickAxis === "z" ? rectA.xMax - rectA.xMin : rectA.zMax - rectA.zMin;
+      const sizeB = parent.thickAxis === "z" ? rectB.xMax - rectB.xMin : rectB.zMax - rectB.zMin;
+      if (sizeA < MIN_SIZE || sizeB < MIN_SIZE) return; // the notch landed too close to a corner to leave two real rooms
+      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = entry.data.height;
+      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = entry.data.height;
+      entry.rooms = entry.rooms || [];
+      entry.rooms.push({ id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 }, { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 });
+      entry.data.partitions = [];
+      entry.data.bumpouts = [];
+    }
+
     function onPointerDown(e) {
       if (e.pointerType === "touch") e.preventDefault();
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -5544,7 +5620,25 @@ export default function RoomBuilder() {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
         const delta = dragState.thickAxis === "z" ? pt.z - dragState.start.z : pt.x - dragState.start.x;
+        const bumpoutBefore = dragState.panelKey.startsWith("bf:")
+          ? state.bumpouts.find((b) => "bf:" + b.id === dragState.panelKey) : null;
+        const wasFullSpan = bumpoutBefore ? bumpoutIsFullSpan(bumpoutBefore) : false;
         applyPanelExtrude(dragState.panelKey, dragState.startCoord + delta);
+        if (bumpoutBefore) {
+          // same idea as a partition landing flush -- reaching the far
+          // wall with a selected width also starts the press-and-hold
+          // timer (see tick()), just with one outcome (delete the notch,
+          // splitting into two separate rooms) instead of a 3-way cycle.
+          const nowFullSpan = bumpoutIsFullSpan(bumpoutBefore);
+          if (nowFullSpan && !wasFullSpan) {
+            playClickSound();
+            dragState.holdCycleStart = performance.now();
+            dragState.wallMode = 0;
+          } else if (!nowFullSpan && wasFullSpan) {
+            dragState.holdCycleStart = null;
+            dragState.wallMode = 0;
+          }
+        }
         rebuild();
       } else if (dragState.type === "select-drag") {
         const pt = new THREE.Vector3();
@@ -5869,7 +5963,18 @@ export default function RoomBuilder() {
         if (dragState.panelKey.startsWith("bf:")) {
           const id = Number(dragState.panelKey.slice(3));
           const bo = state.bumpouts.find((b) => b.id === id);
-          if (bo && Math.abs(bo.depth) < 0.04) state.bumpouts = state.bumpouts.filter((b) => b.id !== id);
+          if (bo && Math.abs(bo.depth) < 0.04) {
+            state.bumpouts = state.bumpouts.filter((b) => b.id !== id);
+          } else if (bo && dragState.holdCycleStart != null && dragState.wallMode === 1 && bumpoutIsFullSpan(bo)) {
+            // released while flush against the far wall and held long
+            // enough -- delete this whole width, splitting the room into
+            // two separate ones with a real gap between them (see
+            // splitFloorWithBumpoutGap).
+            const floorEntry = floors.find((f) => f.id === activeFloorId);
+            if (floorEntry && floorEntry.data === state && canAutoSplitFloorByBumpout(floorEntry)) {
+              splitFloorWithBumpoutGap(floorEntry, bo);
+            }
+          }
         }
       } else if (dragState.type === "partition-draw" || dragState.type === "partition-redrag") {
         const p = state.partitions.find((pp) => pp.id === dragState.id);
@@ -7128,6 +7233,22 @@ export default function RoomBuilder() {
           const newMode = Math.floor((now - dragState.holdCycleStart) / WALL_CYCLE_HOLD_MS) % 3;
           if (newMode !== dragState.wallMode) {
             dragState.wallMode = newMode;
+            playClickSound();
+            rebuild();
+          }
+        } else {
+          dragState.holdCycleStart = null;
+          dragState.wallMode = 0;
+        }
+      }
+      // same idea for a selected width pushed flush -- just one threshold
+      // ("armed to delete") instead of a 3-way cycle.
+      if (dragState && dragState.type === "panel-extrude" && dragState.panelKey.startsWith("bf:") && dragState.holdCycleStart != null) {
+        const bo = state.bumpouts.find((b) => "bf:" + b.id === dragState.panelKey);
+        if (bo && bumpoutIsFullSpan(bo)) {
+          const armed = now - dragState.holdCycleStart >= WALL_CYCLE_HOLD_MS ? 1 : 0;
+          if (armed !== dragState.wallMode) {
+            dragState.wallMode = armed;
             playClickSound();
             rebuild();
           }
