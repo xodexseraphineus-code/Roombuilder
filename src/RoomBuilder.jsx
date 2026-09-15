@@ -535,6 +535,167 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, mod
   );
 }
 
+// ---------- Ground environment (grass/street/city/island) ----------
+// the outdoor site slab: 3x its original footprint, with trees, streets, a
+// toy skyline, or an island-in-the-ocean scattered around the building
+// depending on which of the four world types is currently picked.
+const GROUND_SIZE = 150; // 3x the original 50x50 slab
+const GROUND_RADIUS = GROUND_SIZE / 2;
+const GROUND_EDGE_FADE_FRAC = 0.2; // outer 20% of the radius is the transparent fade band
+const GROUND_CORE_RADIUS = GROUND_RADIUS * (1 - GROUND_EDGE_FADE_FRAC);
+const GROUND_THEMES = ["grass", "street", "city", "island"];
+const GROUND_THEME_LABELS = ["Grass & trees", "Sidewalk & road", "City skyline", "Island & ocean"];
+const GROUND_TILE_SIZE = 3; // world meters per texture tile, for every ground-plane pattern below
+
+// a tiny ramp sampled by hardware bilinear filtering rather than
+// hand-rasterized -- smooth at any zoom no matter how few texels it holds.
+// Mapped along a ring's *radial* UV fraction (see setRadialUV below), so
+// only the thin outer band of the site pays any alpha-blending cost at
+// all; the big inner disc renders fully opaque.
+function makeFadeRamp() {
+  const N = 32;
+  const data = new Uint8Array(N * 4);
+  const EASE_POWER = 1.6; // >1 => slow right off the inner edge, faster toward the outer edge
+  for (let i = 0; i < N; i++) {
+    const t = i / (N - 1); // 0 at the inner edge, 1 at the outer edge
+    const a = Math.round(255 * Math.pow(1 - t, EASE_POWER));
+    data[i * 4 + 0] = 255; data[i * 4 + 1] = 255; data[i * 4 + 2] = 255; data[i * 4 + 3] = a;
+  }
+  const tex = new THREE.DataTexture(data, N, 1, THREE.RGBAFormat);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+// re-maps a ring/annulus geometry's UV so u runs 0 (inner edge) -> 1 (outer
+// edge) uniformly at every angle -- three.js's own ring UVs are a flat
+// disc projection, not a radial fraction, so they can't drive a radial
+// fade texture directly.
+function setRadialUV(geometry, innerRadius, outerRadius) {
+  const pos = geometry.attributes.position;
+  const uv = geometry.attributes.uv;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    const r = Math.sqrt(x * x + y * y);
+    uv.setXY(i, (r - innerRadius) / (outerRadius - innerRadius), 0.5);
+  }
+  uv.needsUpdate = true;
+}
+// re-maps a flat disc/ring's UV to plain world-space meters instead of
+// three.js's disc projection, so a repeating tile texture (grass flecks,
+// sidewalk pavers, ocean ripple) reads as a consistent grid at every
+// radius instead of stretching toward the center.
+function setPlanarUV(geometry, tileSize) {
+  const pos = geometry.attributes.position;
+  const uv = geometry.attributes.uv;
+  for (let i = 0; i < pos.count; i++) uv.setXY(i, pos.getX(i) / tileSize, pos.getY(i) / tileSize);
+  uv.needsUpdate = true;
+}
+// a small deterministic PRNG (mulberry32) -- the scattered trees/buildings
+// stay put across re-renders and toggles instead of reshuffling every
+// time, which would look distracting rather than "aesthetically pleasing".
+function makeRng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// scatters `count` points inside a disc of `radius` using `rng`, skipping a
+// padded exclusion rectangle (the building's own footprint) and keeping a
+// minimum spacing between points -- shared by every theme's trees/
+// buildings/palms so they read as deliberately placed, not overlapping.
+function scatterPoints(rng, count, radius, exclude, minSpacing) {
+  const pts = [];
+  let attempts = 0;
+  while (pts.length < count && attempts < count * 40) {
+    attempts++;
+    const a = rng() * Math.PI * 2;
+    const r = Math.sqrt(rng()) * radius;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (x > exclude.xMin && x < exclude.xMax && z > exclude.zMin && z < exclude.zMax) continue;
+    if (pts.some((p) => Math.hypot(p.x - x, p.z - z) < minSpacing)) continue;
+    pts.push({ x, z, angle: rng() * Math.PI * 2, scale: 0.75 + rng() * 0.6 });
+  }
+  return pts;
+}
+// a soft, hand-painted-looking mottled tile (two close tones of one base
+// color, in a loose scatter of blotches, wrapped across the tile edges so
+// the seam disappears under RepeatWrapping) -- a flat storybook-
+// illustration texture instead of one flat, characterless color.
+function makeMottledTile(rng, size, baseColor, spotColor, spotCount) {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = baseColor;
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = spotColor;
+  ctx.globalAlpha = 0.5;
+  for (let i = 0; i < spotCount; i++) {
+    const x = rng() * size, y = rng() * size;
+    const rx = size * (0.05 + rng() * 0.09), ry = rx * (0.6 + rng() * 0.5);
+    const rot = rng() * Math.PI;
+    for (const [dx, dy] of [[0, 0], [size, 0], [-size, 0], [0, size], [0, -size]]) {
+      ctx.beginPath();
+      ctx.ellipse(x + dx, y + dy, rx, ry, rot, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+// a light grid of paver lines over a flat concrete tone -- the "sidewalk"
+// pattern, tiled at GROUND_TILE_SIZE via RepeatWrapping.
+function makeSidewalkTile(size, cellsPerTile) {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#cbc7bc";
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = "#a9a498";
+  ctx.lineWidth = Math.max(1, size * 0.012);
+  const step = size / cellsPerTile;
+  for (let i = 1; i < cellsPerTile; i++) {
+    ctx.beginPath(); ctx.moveTo(i * step, 0); ctx.lineTo(i * step, size); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * step); ctx.lineTo(size, i * step); ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+// a dark asphalt strip with a dashed centre line and pale curb edges,
+// tiled lengthwise (V) via RepeatWrapping so the dashes repeat evenly
+// along however long the road plane ends up being.
+function makeRoadTexture(size) {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#3d3f42";
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = "#e8d94a";
+  ctx.lineWidth = size * 0.035;
+  ctx.setLineDash([size * 0.18, size * 0.14]);
+  ctx.beginPath(); ctx.moveTo(0, size / 2); ctx.lineTo(size, size / 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "#d8d4c8";
+  ctx.lineWidth = size * 0.025;
+  ctx.beginPath(); ctx.moveTo(0, size * 0.06); ctx.lineTo(size, size * 0.06); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, size * 0.94); ctx.lineTo(size, size * 0.94); ctx.stroke();
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping; // the road's length axis (U) -- dashes repeat along it
+  tex.wrapT = THREE.ClampToEdgeWrapping; // the road's width axis (V) -- one curb-to-curb span, no repeat
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export default function RoomBuilder() {
   const mountRef = useRef(null);
   const hudRef = useRef(null);
@@ -593,6 +754,12 @@ export default function RoomBuilder() {
   const ceilingApiRef = useRef({ setEnabled: () => {} });
   const [groundOn, setGroundOn] = useState(false);
   const groundApiRef = useRef({ setEnabled: () => {} });
+  // which outdoor world the ground shows -- 0 grass/trees, 1 sidewalk+road,
+  // 2 city skyline, 3 island+ocean. The quadrant button in the Layers
+  // panel (shown only once Ground is on) cycles through these on tap.
+  const [groundTheme, setGroundTheme] = useState(0);
+  const groundThemeApiRef = useRef(() => {});
+  useEffect(() => { groundThemeApiRef.current(groundTheme); }, [groundTheme]);
   const wallThicknessApiRef = useRef({ setThickness: () => {} });
   const sceneIoApiRef = useRef({ save: () => null, load: () => {} });
   // "Recent" scenes -- a browser-local (localStorage) autosave history,
@@ -956,57 +1123,220 @@ export default function RoomBuilder() {
     orthoFillRight.position.set(30, 2, 0);
     scene.add(orthoFillRight);
 
-    // a 50x50m site ground plane under the room, so a building smaller than
-    // that (like the 25x15 default) reads as sitting on a slab rather than
-    // floating in the void -- sits just below the room floor slab (which
-    // spans y=-0.08 to y=0) so the two never z-fight. Off by default (a
-    // toggle in the Layers panel); a high-resolution radial alpha map fades
-    // it to fully transparent over the outer 20% of its radius, then eases
-    // into full opacity moving further in -- gradual right after that
-    // transparent band, accelerating as it approaches the center, rather
-    // than a plain linear ramp or a hard edge.
-    function makeRadialFadeTexture(size) {
-      const canvas = document.createElement("canvas");
-      canvas.width = canvas.height = size;
-      const ctx = canvas.getContext("2d");
-      const r = size / 2;
-      const grad = ctx.createRadialGradient(r, r, 0, r, r, r);
-      const EDGE_TRANSPARENT_FRAC = 0.2; // outer 20% of the radius stays fully transparent
-      const EASE_POWER = 2.4; // >1 => slow right off the transparent band, faster toward the center
-      const STOPS = 128;
-      for (let i = 0; i <= STOPS; i++) {
-        const rf = i / STOPS; // 0 at center, 1 at the edge
-        let alpha;
-        if (rf >= 1 - EDGE_TRANSPARENT_FRAC) {
-          alpha = 0;
-        } else {
-          const t = 1 - rf / (1 - EDGE_TRANSPARENT_FRAC); // 1 at center, 0 at the transparent band's inner edge
-          alpha = Math.pow(t, EASE_POWER);
-        }
-        grad.addColorStop(rf, `rgba(255,255,255,${alpha})`);
-      }
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, size, size);
-      return new THREE.CanvasTexture(canvas);
-    }
-    const groundFadeTex = makeRadialFadeTexture(1024);
-    const groundMat = new THREE.MeshStandardMaterial({
-      // a default, slightly-dark neutral grey (roughly the Layers panel's
-      // own thumbnail tone) rather than a grassy green.
-      color: 0x9a9a9a,
-      roughness: 0.95,
-      metalness: 0,
-      envMapIntensity: 0.35,
-      transparent: true,
-      alphaMap: groundFadeTex,
+    // a big outdoor site slab under the room (3x the original 50x50m, so a
+    // building smaller than that still reads as sitting on real ground
+    // rather than a postage stamp), sitting just below the room floor slab
+    // (which spans y=-0.08 to y=0) so the two never z-fight. Off by default
+    // (a toggle in the Layers panel). Split into two pieces rather than one
+    // big alpha-blended quad: a fully opaque inner disc (cheap to draw --
+    // early-z, no blending) plus a thin transparent ring right at the edge
+    // that fades to the scene background. Only that thin ring pays any
+    // blending cost at all, and its fade ramp is a tiny texture read via
+    // hardware bilinear filtering rather than a hand-rasterized gradient,
+    // so it stays perfectly smooth at any zoom instead of banding.
+    const groundGroup = new THREE.Group();
+    groundGroup.position.y = -0.1;
+    groundGroup.visible = false;
+    scene.add(groundGroup);
+
+    const groundFadeTex = makeFadeRamp();
+    const groundFadeGeo = new THREE.RingGeometry(GROUND_CORE_RADIUS, GROUND_RADIUS, 128, 1);
+    setRadialUV(groundFadeGeo, GROUND_CORE_RADIUS, GROUND_RADIUS);
+    const groundFadeMat = new THREE.MeshStandardMaterial({
+      color: 0x9a9a9a, roughness: 0.95, metalness: 0, transparent: true, alphaMap: groundFadeTex,
     });
-    const groundPlane = new THREE.Mesh(new THREE.PlaneGeometry(50, 50), groundMat);
-    groundPlane.rotation.x = -Math.PI / 2;
-    groundPlane.position.y = -0.1;
-    groundPlane.receiveShadow = true;
-    groundPlane.visible = false;
-    scene.add(groundPlane);
-    groundApiRef.current = { setEnabled: (on) => { groundPlane.visible = on; } };
+    const groundFadeMesh = new THREE.Mesh(groundFadeGeo, groundFadeMat);
+    groundFadeMesh.rotation.x = -Math.PI / 2;
+    groundFadeMesh.receiveShadow = true;
+    groundGroup.add(groundFadeMesh);
+
+    // the theme-specific content (the opaque core plane plus whatever
+    // decorations that world adds) lives in its own group so switching
+    // worlds can cleanly clear+rebuild just this part without touching the
+    // always-present fade ring above.
+    const envContentGroup = new THREE.Group();
+    groundGroup.add(envContentGroup);
+
+    // the building's own world-space footprint (its own base plus every
+    // room pulled out of it, on every floor) -- decorations are scattered
+    // around this rectangle (padded out a bit) rather than through it.
+    function computeBuildingBoundsXZ() {
+      let xMin = Infinity, xMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+      floors.forEach((f) => {
+        const fp = f.data.footprint, ox = f.offsetX || 0, oz = f.offsetZ || 0;
+        xMin = Math.min(xMin, fp.xMin + ox); xMax = Math.max(xMax, fp.xMax + ox);
+        zMin = Math.min(zMin, fp.zMin + oz); zMax = Math.max(zMax, fp.zMax + oz);
+        (f.rooms || []).forEach((r) => {
+          const rfp = r.data.footprint, rox = r.offsetX || 0, roz = r.offsetZ || 0;
+          xMin = Math.min(xMin, rfp.xMin + rox); xMax = Math.max(xMax, rfp.xMax + rox);
+          zMin = Math.min(zMin, rfp.zMin + roz); zMax = Math.max(zMax, rfp.zMax + roz);
+        });
+      });
+      if (!isFinite(xMin)) return { xMin: -DEFAULT_ROOM_HALF_X, xMax: DEFAULT_ROOM_HALF_X, zMin: -DEFAULT_ROOM_HALF_Z, zMax: DEFAULT_ROOM_HALF_Z };
+      return { xMin, xMax, zMin, zMax };
+    }
+
+    // a matched pair of InstancedMesh (trunk + canopy) -- one draw call per
+    // part no matter how many trees, so a whole forest costs about as much
+    // as a single tree would.
+    function addTrees(rng, points, group, opts) {
+      if (!points.length) return;
+      const { trunkColor, canopyColors, trunkH = [1.1, 1.9], canopyR = [0.9, 1.6] } = opts;
+      const trunkMesh = new THREE.InstancedMesh(
+        new THREE.CylinderGeometry(0.11, 0.16, 1, 6),
+        new THREE.MeshStandardMaterial({ color: trunkColor, roughness: 0.9 }),
+        points.length
+      );
+      trunkMesh.castShadow = true; trunkMesh.receiveShadow = true;
+      const canopyMesh = new THREE.InstancedMesh(
+        new THREE.ConeGeometry(1, 1, 7),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85 }),
+        points.length
+      );
+      canopyMesh.castShadow = true; canopyMesh.receiveShadow = true;
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion(), col = new THREE.Color();
+      points.forEach((p, i) => {
+        const th = (trunkH[0] + rng() * (trunkH[1] - trunkH[0])) * p.scale;
+        const cr = (canopyR[0] + rng() * (canopyR[1] - canopyR[0])) * p.scale;
+        const ch = cr * 1.8;
+        m.compose(new THREE.Vector3(p.x, th / 2, p.z), q, new THREE.Vector3(1, th, 1));
+        trunkMesh.setMatrixAt(i, m);
+        m.compose(new THREE.Vector3(p.x, th + ch * 0.42, p.z), q, new THREE.Vector3(cr, ch, cr));
+        canopyMesh.setMatrixAt(i, m);
+        canopyMesh.setColorAt(i, col.set(canopyColors[i % canopyColors.length]));
+      });
+      trunkMesh.instanceMatrix.needsUpdate = true;
+      canopyMesh.instanceMatrix.needsUpdate = true;
+      canopyMesh.instanceColor.needsUpdate = true;
+      group.add(trunkMesh, canopyMesh);
+    }
+    // one InstancedMesh of unit cubes, each independently scaled/rotated/
+    // tinted -- reads as "a city full of different little towers" for the
+    // cost of a single draw call.
+    function addBuildings(rng, points, group) {
+      if (!points.length) return;
+      const palette = [0xdff0f7, 0xffe3c2, 0xffd0da, 0xd7ead2, 0xe4d7f5, 0xfff3b0];
+      const mesh = new THREE.InstancedMesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75 }),
+        points.length
+      );
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      const m = new THREE.Matrix4(), col = new THREE.Color();
+      points.forEach((p, i) => {
+        const w = (2.2 + rng() * 2.4) * p.scale, d = (2.2 + rng() * 2.4) * p.scale, h = (3 + rng() * 9) * p.scale;
+        m.compose(
+          new THREE.Vector3(p.x, h / 2, p.z),
+          new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), p.angle),
+          new THREE.Vector3(w, h, d)
+        );
+        mesh.setMatrixAt(i, m);
+        mesh.setColorAt(i, col.set(palette[Math.floor(rng() * palette.length)]));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.instanceColor.needsUpdate = true;
+      group.add(mesh);
+    }
+    function tiledCoreMesh(radius, texture) {
+      const geo = new THREE.CircleGeometry(radius, 96);
+      setPlanarUV(geo, GROUND_TILE_SIZE);
+      texture.repeat.set((radius * 2) / GROUND_TILE_SIZE, (radius * 2) / GROUND_TILE_SIZE);
+      const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0xffffff, map: texture, roughness: 0.95 }));
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.receiveShadow = true;
+      return mesh;
+    }
+    function buildGrassGround(bounds) {
+      const rngTex = makeRng(77);
+      envContentGroup.add(tiledCoreMesh(GROUND_CORE_RADIUS, makeMottledTile(rngTex, 256, "#8bc76a", "#6fae55", 26)));
+      const padded = { xMin: bounds.xMin - 2.5, xMax: bounds.xMax + 2.5, zMin: bounds.zMin - 2.5, zMax: bounds.zMax + 2.5 };
+      const rng = makeRng(99);
+      const pts = scatterPoints(rng, 30, GROUND_CORE_RADIUS - 6, padded, 3.2);
+      addTrees(rng, pts, envContentGroup, { trunkColor: 0x8a5a3d, canopyColors: [0x6fae55, 0x8bc76a, 0x579a48] });
+    }
+    function buildStreetGround(bounds) {
+      envContentGroup.add(tiledCoreMesh(GROUND_CORE_RADIUS, makeSidewalkTile(256, 3)));
+      const roadWidth = 9, roadLength = GROUND_SIZE * 0.92;
+      const roadTex = makeRoadTexture(256);
+      roadTex.repeat.set(roadLength / 8, 1);
+      // PlaneGeometry's local X becomes world X after the flat rotation below
+      // (local Y becomes world Z) -- length first, width second, so the road
+      // actually runs along the building's front instead of through its depth.
+      const road = new THREE.Mesh(new THREE.PlaneGeometry(roadLength, roadWidth), new THREE.MeshStandardMaterial({ color: 0xffffff, map: roadTex, roughness: 0.85 }));
+      road.rotation.x = -Math.PI / 2;
+      road.position.set(0, 0.015, bounds.zMax + 6 + roadWidth / 2);
+      road.receiveShadow = true;
+      envContentGroup.add(road);
+      // a short row of lamp posts along the sidewalk side of the road
+      const rng = makeRng(4242);
+      const postPts = [];
+      const postX0 = -roadLength * 0.42, postSpacing = roadLength * 0.14;
+      for (let i = 0; i < 7; i++) postPts.push({ x: postX0 + i * postSpacing, z: road.position.z - roadWidth / 2 - 0.6, angle: 0, scale: 1 });
+      const postMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.06, 0.06, 3, 6), new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.6 }), postPts.length);
+      const lampMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 10, 8), new THREE.MeshStandardMaterial({ color: 0xffe9a8, emissive: 0x6b5620, roughness: 0.4 }), postPts.length);
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion();
+      postPts.forEach((p, i) => {
+        m.compose(new THREE.Vector3(p.x, 1.5, p.z), q, new THREE.Vector3(1, 1, 1));
+        postMesh.setMatrixAt(i, m);
+        m.compose(new THREE.Vector3(p.x, 3.05, p.z), q, new THREE.Vector3(1, 1, 1));
+        lampMesh.setMatrixAt(i, m);
+      });
+      postMesh.instanceMatrix.needsUpdate = true; lampMesh.instanceMatrix.needsUpdate = true;
+      postMesh.castShadow = true; postMesh.receiveShadow = true;
+      envContentGroup.add(postMesh, lampMesh);
+      void rng; // reserved for future street-side variety
+    }
+    function buildCityGround(bounds) {
+      envContentGroup.add(tiledCoreMesh(GROUND_CORE_RADIUS, makeSidewalkTile(256, 2)));
+      const padded = { xMin: bounds.xMin - 4, xMax: bounds.xMax + 4, zMin: bounds.zMin - 4, zMax: bounds.zMax + 4 };
+      const rng = makeRng(555);
+      const pts = scatterPoints(rng, 26, GROUND_CORE_RADIUS - 8, padded, 5.5);
+      addBuildings(rng, pts, envContentGroup);
+    }
+    function buildIslandGround(bounds) {
+      const sandRadius = Math.max(bounds.xMax - bounds.xMin, bounds.zMax - bounds.zMin) * 0.9 + 8;
+      const sandRng = makeRng(3);
+      const sand = tiledCoreMesh(sandRadius, makeMottledTile(sandRng, 256, "#eddca2", "#e0c986", 18));
+      sand.position.y = 0.02; // the island sits a hair above the ocean ring, without poking above the room's own floor
+      envContentGroup.add(sand);
+
+      const oceanGeo = new THREE.RingGeometry(sandRadius, GROUND_CORE_RADIUS, 96, 1);
+      setPlanarUV(oceanGeo, GROUND_TILE_SIZE * 1.5);
+      const oceanRng = makeRng(9);
+      const oceanTex = makeMottledTile(oceanRng, 256, "#6ec6e0", "#8ad7ea", 22);
+      oceanTex.repeat.set((GROUND_CORE_RADIUS * 2) / (GROUND_TILE_SIZE * 1.5), (GROUND_CORE_RADIUS * 2) / (GROUND_TILE_SIZE * 1.5));
+      const oceanMesh = new THREE.Mesh(oceanGeo, new THREE.MeshStandardMaterial({ color: 0xffffff, map: oceanTex, roughness: 0.4, metalness: 0.05 }));
+      oceanMesh.rotation.x = -Math.PI / 2;
+      oceanMesh.receiveShadow = true;
+      envContentGroup.add(oceanMesh);
+
+      const padded = { xMin: bounds.xMin - 2, xMax: bounds.xMax + 2, zMin: bounds.zMin - 2, zMax: bounds.zMax + 2 };
+      const rng = makeRng(21);
+      const pts = scatterPoints(rng, 10, sandRadius - 2, padded, 3.5);
+      addTrees(rng, pts, envContentGroup, { trunkColor: 0xb08a5a, canopyColors: [0x6fae55, 0x8bc76a], trunkH: [1.6, 2.4], canopyR: [0.6, 0.95] });
+    }
+    const GROUND_FADE_TINTS = { grass: 0x8fae7c, street: 0x9a9a9a, city: 0x9a9a9a, island: 0x4a8fae };
+    let currentGroundTheme = 0;
+    function applyGroundTheme(themeIndex) {
+      currentGroundTheme = themeIndex;
+      clearGroup(envContentGroup);
+      const key = GROUND_THEMES[themeIndex] || "grass";
+      groundFadeMat.color.set(GROUND_FADE_TINTS[key]);
+      const bounds = computeBuildingBoundsXZ();
+      if (key === "grass") buildGrassGround(bounds);
+      else if (key === "street") buildStreetGround(bounds);
+      else if (key === "city") buildCityGround(bounds);
+      else buildIslandGround(bounds);
+    }
+    groundThemeApiRef.current = applyGroundTheme;
+    groundApiRef.current = {
+      setEnabled: (on) => {
+        groundGroup.visible = on;
+        // refreshed against whatever the building looks like right now,
+        // each time the ground is actually switched on to look at.
+        if (on) applyGroundTheme(currentGroundTheme);
+      },
+    };
 
     // ---------- "Realistic" mode: image-based lighting + postprocessing ----------
     let ultraRealisticOn = false;
@@ -6786,8 +7116,9 @@ export default function RoomBuilder() {
       floorGrainTex.dispose();
       floorRoughTex.dispose();
       concretePanelTex.dispose();
-      groundPlane.geometry.dispose();
-      groundMat.dispose();
+      clearGroup(envContentGroup);
+      groundFadeGeo.dispose();
+      groundFadeMat.dispose();
       groundFadeTex.dispose();
       realisticEnvMap.dispose();
       reflectionEnvMap.dispose();
@@ -7596,18 +7927,32 @@ export default function RoomBuilder() {
         </div>
 
         <div style={{ padding: "12px 12px", display: "flex", flexDirection: "column", gap: 12 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              className="rb-radio"
-              checked={groundOn}
-              onChange={(e) => {
-                setGroundOn(e.target.checked);
-                groundApiRef.current.setEnabled(e.target.checked);
-              }}
-            />
-            Ground
-          </label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                className="rb-radio"
+                checked={groundOn}
+                onChange={(e) => {
+                  setGroundOn(e.target.checked);
+                  groundApiRef.current.setEnabled(e.target.checked);
+                }}
+              />
+              Ground
+            </label>
+            {groundOn && (
+              <button
+                className="rb-btn"
+                onClick={() => setGroundTheme((i) => (i + 1) % GROUND_THEMES.length)}
+                title={`World: ${GROUND_THEME_LABELS[groundTheme]} (tap to cycle: ${GROUND_THEME_LABELS.join(", ")})`}
+                style={{
+                  padding: 0, width: 18, height: 18, minWidth: 18, borderRadius: "50%", overflow: "hidden",
+                  background: "conic-gradient(from 0deg, #6fae55 0turn 0.25turn, #9a9a9a 0.25turn 0.5turn, #f5f5f2 0.5turn 0.75turn, #232323 0.75turn 1turn)",
+                  border: "1px solid var(--border-control)", flexShrink: 0,
+                }}
+              />
+            )}
+          </div>
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9.5, marginBottom: 4 }}>
               <span>Layer height</span>
