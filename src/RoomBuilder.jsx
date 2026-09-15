@@ -2711,18 +2711,27 @@ export default function RoomBuilder() {
         const u0 = Math.max(wallU0, Math.min(sel.u0, wallU1));
         const u1 = Math.max(wallU0, Math.min(sel.u1, wallU1));
         if (u1 - u0 < 0.05) return;
-        const geo = new THREE.PlaneGeometry(u1 - u0, H);
         const mat = sel.id === "__preview__" ? selMatPreview : selMat;
-        const mesh = new THREE.Mesh(geo, mat);
         const offset = T / 2 + 0.015;
-        let posX, posZ;
-        if (lengthAxis === "x") { posX = (u0 + u1) / 2; posZ = coord - normal.z * offset; }
-        else { posZ = (u0 + u1) / 2; posX = coord - normal.x * offset; }
-        mesh.position.set(posX, H / 2, posZ);
-        mesh.lookAt(mesh.position.clone().add(normal));
-        mesh.userData = { kind: "selection", id: sel.id, panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
-        sceneGroup.add(mesh);
-        if (sel.id !== "__preview__" && isPickableTarget) pickList.push(mesh);
+        // two copies, one just inside the wall's face and one just outside
+        // it: the solid wall between them means only whichever one faces
+        // the camera is ever actually visible, but this way the highlight
+        // stays grabbable (to push it into a bump-out) from either side --
+        // a single, one-sided offset made it pickable only when orbited to
+        // that specific side, since a ray from the other side hits the
+        // solid wall first and never reaches it.
+        [1, -1].forEach((side) => {
+          const geo = new THREE.PlaneGeometry(u1 - u0, H);
+          const mesh = new THREE.Mesh(geo, mat);
+          let posX, posZ;
+          if (lengthAxis === "x") { posX = (u0 + u1) / 2; posZ = coord + side * normal.z * offset; }
+          else { posZ = (u0 + u1) / 2; posX = coord + side * normal.x * offset; }
+          mesh.position.set(posX, H / 2, posZ);
+          mesh.lookAt(mesh.position.clone().add(normal));
+          mesh.userData = { kind: "selection", id: sel.id, panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(mesh);
+          if (sel.id !== "__preview__" && isPickableTarget) pickList.push(mesh);
+        });
       });
 
     }
