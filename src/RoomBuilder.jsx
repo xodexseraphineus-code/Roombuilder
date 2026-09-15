@@ -3357,8 +3357,8 @@ export default function RoomBuilder() {
       });
     }
 
-    // a plain tap on an undivided floor (see the "pending-room-move" gesture
-    // below) turns the whole floor into its own room -- a full clone of the
+    // a plain tap on an undivided floor (see the Room tool's "pending-room-tool"
+    // gesture) turns the whole floor into its own room -- a full clone of the
     // floor's data, footprint included, pushed into entry.rooms so it's
     // selectable/editable like any other room. That leaves two separate
     // data objects (entry.data and the room's own) with the same footprint;
@@ -4496,27 +4496,80 @@ export default function RoomBuilder() {
         return;
       }
 
-      // Room tool: works on the active floor's own ground plane regardless
-      // of what (if anything) is actually under the cursor there -- an
-      // existing floor surface, or completely open space beside it -- since
-      // a brand new room can start from either. Checked before pick()'s own
-      // "nothing hit -> orbit" fallback so an empty-ground tap draws a room
-      // instead of spinning the camera.
+      // Room tool: the one place floor taps do anything now -- selecting or
+      // moving an existing room, extracting one from a partitioned floor,
+      // selecting a whole undivided floor, or drawing a brand new room from
+      // scratch, all live here exclusively. Every other tool used to also
+      // treat a floor tap as "select this room," which made it far too easy
+      // to accidentally grab/move a room while just trying to click a wall
+      // for a window or door -- especially since a click aimed at a wall
+      // easily lands on the floor just behind/below it instead.
       if (toolRef.current === "room") {
         const floorEntry = floors.find((f) => f.id === activeFloorId);
-        const g = floorEntry ? floorGroups.get(activeFloorId) : null;
-        if (floorEntry && g) {
-          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -g.position.y);
-          const ray = rayFromEvent(e);
-          const pt = new THREE.Vector3();
-          if (ray.intersectPlane(plane, pt)) {
-            pushUndo();
-            const snapped = snapRoomPoint(floorEntry, pt.x, pt.z);
-            dragState = { type: "room-draw", plane, x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
-            previewRoom = { x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
-            rebuild();
-            capture(e);
-            return;
+        if (floorEntry) {
+          const roomHit = pick(e);
+          const roomHitKind = roomHit && roomHit.object.userData.kind;
+          const roomHitOwner = roomHit && roomHit.object.userData.ownerRoomId;
+          if (roomHitKind === "floor" && roomHitOwner != null) {
+            // an existing extracted room's own floor -- select it and arm a
+            // drag to move it, exactly like the old tool-agnostic behavior.
+            const room = (floorEntry.rooms || []).find((r) => r.id === roomHitOwner);
+            if (room) {
+              pushUndo();
+              switchActiveRoom(roomHitOwner);
+              const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -roomHit.point.y);
+              dragState = {
+                type: "room-drag", roomId: roomHitOwner, plane, start: roomHit.point.clone(),
+                startOffsetX: room.offsetX || 0, startOffsetZ: room.offsetZ || 0,
+              };
+              capture(e);
+              return;
+            }
+          }
+          if (roomHitKind === "floor" && roomHitOwner == null) {
+            const fEntry = floorEntry.data;
+            if (!fEntry.partitions || fEntry.partitions.length === 0) {
+              // undivided floor -- a plain tap still selects the whole thing
+              // as a room (Cut/Copy/Paste/Duplicate/Curved corners); an
+              // actual drag draws a brand new room instead, exactly like the
+              // window/door tools' own pending-then-draw states decide which
+              // gesture this turns out to be.
+              const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -roomHit.point.y);
+              dragState = {
+                type: "pending-room-tool", plane, start: roomHit.point.clone(), hitPoint: roomHit.point.clone(),
+                startScreen: { x: e.clientX, y: e.clientY },
+              };
+              capture(e);
+              return;
+            }
+            // a partitioned floor -- tapping inside one of its regions
+            // extracts that region into its own selected, draggable room.
+            const rooms = detectRooms();
+            const hx = roomHit.point.x, hz = roomHit.point.z;
+            const found = rooms.find((r) => r.floorRects.some((fr) => hx >= fr.x0 - 0.02 && hx <= fr.x1 + 0.02 && hz >= fr.z0 - 0.02 && hz <= fr.z1 + 0.02));
+            if (found) {
+              commitRoomFromFound(found, roomHit.point.clone());
+              capture(e);
+              return;
+            }
+          }
+          // blank ground, a wall, or anything else -- draw a brand new room
+          // from scratch, on the active floor's own ground plane, regardless
+          // of what's actually under the cursor there.
+          const g = floorGroups.get(activeFloorId);
+          if (g) {
+            const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -g.position.y);
+            const ray = rayFromEvent(e);
+            const pt = new THREE.Vector3();
+            if (ray.intersectPlane(plane, pt)) {
+              pushUndo();
+              const snapped = snapRoomPoint(floorEntry, pt.x, pt.z);
+              dragState = { type: "room-draw", plane, x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
+              previewRoom = { x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
+              rebuild();
+              capture(e);
+              return;
+            }
           }
         }
       }
@@ -4711,62 +4764,11 @@ export default function RoomBuilder() {
         return;
       }
 
-      // Move Walls: tapping the floor selects (or detects) the enclosed room
-      // under that point and lets you drag it away; tapping a wall/partition
-      // switches editing focus onto whatever it belongs to (the floor itself,
-      // or one specific room) before continuing as normal.
-      // Selecting/moving a room by tapping its floor works from any tool --
-      // not just Wall ("move") -- except Stairs and Props (with a
-      // non-balcony shape picked), which already give a plain floor tap
-      // their own meaning (draw a staircase / drop a prop) just below.
-      const floorTapClaimedByOtherTool = toolRef.current === "stairs" ||
-        (toolRef.current === "props" && propsShapeRef.current !== "balcony");
-      if (!floorTapClaimedByOtherTool && kind === "floor") {
-        setSelectedPropId(null);
-        const ownerRoomId = obj.userData.ownerRoomId ?? null;
-        const floorEntry = floors.find((f) => f.id === activeFloorId);
-        if (!floorEntry) return;
-        if (ownerRoomId != null) {
-          const room = (floorEntry.rooms || []).find((r) => r.id === ownerRoomId);
-          if (!room) return;
-          pushUndo();
-          switchActiveRoom(ownerRoomId);
-          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
-          dragState = {
-            type: "room-drag", roomId: ownerRoomId, plane, start: hit.point.clone(),
-            startOffsetX: room.offsetX || 0, startOffsetZ: room.offsetZ || 0,
-          };
-          capture(e);
-          return;
-        }
-        // with no partitions yet, the whole floor already IS the "room" --
-        // there's nothing distinct to extract, but a plain tap should still
-        // select it (for Cut/Copy/Paste/Duplicate/Delete/Curved corners),
-        // same as tapping a partitioned sub-room does. A real drag instead
-        // moves the floor itself, same as before -- "pending-room-move"
-        // decides which one this gesture turns out to be, exactly like the
-        // window/door tools' own pending-then-draw states.
-        if (!state.partitions || state.partitions.length === 0) {
-          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
-          dragState = {
-            type: "pending-room-move", plane, start: hit.point.clone(), hitPoint: hit.point.clone(),
-            startOffsetX: floorEntry.offsetX || 0, startOffsetZ: floorEntry.offsetZ || 0,
-            startScreen: { x: e.clientX, y: e.clientY },
-          };
-          capture(e);
-          return;
-        }
-        const rooms = detectRooms();
-        const hx = hit.point.x, hz = hit.point.z;
-        const found = rooms.find((r) => r.floorRects.some((fr) => hx >= fr.x0 - 0.02 && hx <= fr.x1 + 0.02 && hz >= fr.z0 - 0.02 && hz <= fr.z1 + 0.02));
-        if (!found) return;
-        // extracts the region into its own selected, draggable room right
-        // away -- release without moving and it just stays selected in
-        // place (showing the room menu); keep dragging and it moves.
-        commitRoomFromFound(found, hit.point.clone());
-        capture(e);
-        return;
-      }
+      // Selecting/moving/extracting a room by tapping its floor is now the
+      // Room tool's job exclusively (handled up top, before pick() even
+      // runs) -- every other tool leaves a plain floor tap alone entirely,
+      // so a click aimed at a wall for a window/door never gets swallowed
+      // as "select this room" just because it landed a hair off the wall.
 
       // Stairs tool: tapping the plain floor and dragging draws the
       // footprint rectangle for a new staircase (tapping an existing one is
@@ -5060,16 +5062,26 @@ export default function RoomBuilder() {
         return;
       }
 
-      if (dragState.type === "pending-room-move") {
+      if (dragState.type === "pending-room-tool") {
         const dx = e.clientX - dragState.startScreen.x;
         const dy = e.clientY - dragState.startScreen.y;
         const dist = Math.hypot(dx, dy);
         if (dist > MOVE_PX) {
-          pushUndo();
+          // a real drag past the undivided floor's own edge turns this into
+          // drawing a brand new room instead of just selecting the whole
+          // floor -- the tap point becomes the rectangle's first corner.
+          // (uses its own ray, not the shared one below -- that one isn't
+          // declared yet this early in the function.)
+          const pt = new THREE.Vector3();
+          if (!rayFromEvent(e).intersectPlane(dragState.plane, pt)) return;
+          const floorEntry = floors.find((f) => f.id === activeFloorId);
+          const snappedEnd = floorEntry ? snapRoomPoint(floorEntry, pt.x, pt.z) : { x: pt.x, z: pt.z };
           dragState = {
-            type: "room-move", plane: dragState.plane, start: dragState.start,
-            startOffsetX: dragState.startOffsetX, startOffsetZ: dragState.startOffsetZ,
+            type: "room-draw", plane: dragState.plane,
+            x0: dragState.start.x, z0: dragState.start.z, x1: snappedEnd.x, z1: snappedEnd.z,
           };
+          previewRoom = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
+          rebuild();
         }
         return;
       }
@@ -5275,17 +5287,6 @@ export default function RoomBuilder() {
         const newH = snapValue(dragState.startH + deltaY);
         setPanelHeightValue(dragState.panelKey, newH);
         if (selectedPanelRef.current === dragState.panelKey) setSelectedHeight(getPanelHeight(dragState.panelKey));
-      } else if (dragState.type === "room-move") {
-        const pt = new THREE.Vector3();
-        if (!ray.intersectPlane(dragState.plane, pt)) return;
-        const dx = pt.x - dragState.start.x;
-        const dz = pt.z - dragState.start.z;
-        const entry = floors.find((f) => f.id === activeFloorId);
-        if (entry) {
-          entry.offsetX = snapValue(dragState.startOffsetX + dx);
-          entry.offsetZ = snapValue(dragState.startOffsetZ + dz);
-          restackFloors();
-        }
       } else if (dragState.type === "room-drag") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
@@ -5405,7 +5406,7 @@ export default function RoomBuilder() {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
           state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
         }
-      } else if (dragState.type === "pending-room-move") {
+      } else if (dragState.type === "pending-room-tool") {
         // a tap with no meaningful drag on an undivided floor -- select the
         // whole floor as a room (Cut/Copy/Paste/Duplicate/Delete/Curved
         // corners), same as tapping an already-partitioned sub-room does.
