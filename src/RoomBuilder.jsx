@@ -4797,7 +4797,17 @@ export default function RoomBuilder() {
       const token = {};
       return {
         token,
-        id: setTimeout(() => { if (dragState && dragState.token === token) dragState.armed = true; }, HOLD_MS),
+        id: setTimeout(() => {
+          if (!dragState || dragState.token !== token) return;
+          dragState.armed = true;
+          // an audible cue right when holding still long enough arms
+          // partition-creation -- without it, nothing on screen changes
+          // between "still resolving the hold" and "ready, drag now",
+          // so a press-and-immediately-push reads as broken rather than
+          // as the wrong gesture (a quick perpendicular drag here instead
+          // moves/resizes the whole wall, not a new dividing one).
+          playClickSound();
+        }, HOLD_MS),
       };
     }
 
