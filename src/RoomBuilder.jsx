@@ -52,7 +52,10 @@ const TE_SWATCHES = [0xff6b1a, 0xffffff, 0x4a90d9, 0xf2c230, 0xe5484d];
 
 // the fixed per-shape prop colors, used both as the initial defaults and
 // as what a prop reverts to if a theme's color is ever cleared.
-const PROP_DEFAULT_COLORS = { sphere: 0xd6453c, cone: 0x3f9d5c, cube: 0x3a6bc9, cylinder: 0xd6453c };
+const PROP_DEFAULT_COLORS = {
+  sphere: 0xd6453c, cone: 0x3f9d5c, cube: 0x3a6bc9, cylinder: 0xd6453c,
+  colSquare: 0xf2f0ea, colRound: 0xf2f0ea, jailWall: 0x2a2a2e,
+};
 
 // display names for the six building-material finishes -- kept in this
 // same order as the Three.js closure's own BUILDING_MATERIAL_PRESETS array
@@ -737,12 +740,23 @@ export default function RoomBuilder() {
   const [openingAxisHorizontal, setOpeningAxisHorizontal] = useState(false);
   const openingAxisHorizontalRef = useRef(openingAxisHorizontal);
   useEffect(() => { openingAxisHorizontalRef.current = openingAxisHorizontal; }, [openingAxisHorizontal]);
+  // "grid" (the default mullioned pane), "round", or "louver" -- see
+  // renderOpeningCutout for how each renders.
+  const [openingStyle, setOpeningStyle] = useState("grid");
+  const openingStyleRef = useRef(openingStyle);
+  useEffect(() => { openingStyleRef.current = openingStyle; }, [openingStyle]);
   const [doorHeight, setDoorHeight] = useState(10 * FT);
   const doorHeightRef = useRef(doorHeight);
   useEffect(() => { doorHeightRef.current = doorHeight; }, [doorHeight]);
   const [doorSplit, setDoorSplit] = useState(false);
   const doorSplitRef = useRef(doorSplit);
   useEffect(() => { doorSplitRef.current = doorSplit; }, [doorSplit]);
+  // "standard" (plain rectangular head), "arched", "revolving", or
+  // "turnstile" -- the latter two replace the door leaf entirely with a
+  // freestanding assembly, see renderOpeningCutout/renderDoorAssembly.
+  const [doorStyle, setDoorStyle] = useState("standard");
+  const doorStyleRef = useRef(doorStyle);
+  useEffect(() => { doorStyleRef.current = doorStyle; }, [doorStyle]);
   const [propsShape, setPropsShape] = useState("cube");
   const propsShapeRef = useRef(propsShape);
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
@@ -846,6 +860,10 @@ export default function RoomBuilder() {
   const [selectedBalconyPart, setSelectedBalconyPart] = useState(null); // "pillars" | "ceiling" | null (whole assembly)
   const selectedBalconyPartRef = useRef(selectedBalconyPart);
   useEffect(() => { selectedBalconyPartRef.current = selectedBalconyPart; }, [selectedBalconyPart]);
+  const [selectedTerraceId, setSelectedTerraceId] = useState(null);
+  const selectedTerraceIdRef = useRef(selectedTerraceId);
+  useEffect(() => { selectedTerraceIdRef.current = selectedTerraceId; rebuildModelRef.current(); }, [selectedTerraceId]);
+  const deleteTerraceRef = useRef(() => {});
   const [selectedOpeningId, setSelectedOpeningId] = useState(null); // a window or door cutout in a wall
   const selectedOpeningIdRef = useRef(selectedOpeningId);
   useEffect(() => { selectedOpeningIdRef.current = selectedOpeningId; rebuildModelRef.current(); }, [selectedOpeningId]);
@@ -862,6 +880,14 @@ export default function RoomBuilder() {
   const balconyPillarHeightApiRef = useRef({ setHeight: () => {} });
   const [balconyGlassInfill, setBalconyGlassInfill] = useState(false);
   const balconyGlassApiRef = useRef({ setEnabled: () => {} });
+  // "supported" (posts, no ceiling -- the classic look), "recessed" (a
+  // ceiling slab overhead, no posts -- reads as tucked under the building),
+  // or "cantilevered" (neither -- a bare floating slab). Maps onto the
+  // existing pillarsRemoved/ceilingRemoved flags rather than new geometry.
+  const [balconyStyle, setBalconyStyle] = useState("supported");
+  const balconyStyleRef = useRef(balconyStyle);
+  useEffect(() => { balconyStyleRef.current = balconyStyle; }, [balconyStyle]);
+  const balconyStyleApiRef = useRef({ setStyle: () => {} });
   const deleteBalconyRef = useRef(() => {});
   const deleteOpeningRef = useRef(() => {});
   const deletePropRef = useRef(() => {});
@@ -1785,6 +1811,7 @@ export default function RoomBuilder() {
         props: [],        // {id, kind, x, z} -- decorative sphere/cube/cone/cylinder placed on the floor
         curvedCorners: { enabled: false, radius: 0 }, // rounds the 4 corners of the base footprint's external walls
         balconies: [], // {id, panel, u0, u1, dividerAxis} -- a staircase+platform+pillars assembly with a window/door cutout in the wall behind it
+        terraces: [], // {id, panel, u0, u1, side, depth} -- a flat roof-height deck with a perimeter railing, drawn along a wall like a balcony but with no stairs down to the ground
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
@@ -2233,8 +2260,20 @@ export default function RoomBuilder() {
       cone: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cone, ...PROP_PLASTIC }),
       cube: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cube, ...PROP_PLASTIC }),
       cylinder: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cylinder, ...PROP_PLASTIC }),
+      colSquare: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.colSquare, roughness: 0.75, metalness: 0.02 }),
+      colRound: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.colRound, roughness: 0.75, metalness: 0.02 }),
+      jailWall: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.jailWall, roughness: 0.45, metalness: 0.75 }),
     };
     const PROP_HEIGHT = 8 * FT;
+    // shared, dark-metal frame for a round window's ring, and the slat
+    // material for a louver window -- both persistent (excluded from
+    // disposeObject below) since they're reused across every rebuild.
+    const windowFrameMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2e, roughness: 0.5, metalness: 0.35 });
+    const louverMat = new THREE.MeshStandardMaterial({ color: 0xdedad0, roughness: 0.7, metalness: 0.05 });
+    const LOUVER_TILT = THREE.MathUtils.degToRad(35);
+    // dark metal for the arcade/revolving-door/turnstile assemblies --
+    // architectural hardware rather than a colored prop.
+    const doorMetalMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2e, roughness: 0.4, metalness: 0.6 });
 
     let hiddenLineModeOn = false;
     function addEdges(mesh) {
@@ -2364,6 +2403,140 @@ export default function RoomBuilder() {
       }
     }
 
+    // places an object (built with u=0 as its own center, y in real wall
+    // height, thickness/depth along local Z) onto the wall at the given
+    // lengthAxis/coord/u -- shared by the round/louver window and
+    // arched/revolving/turnstile door assemblies below. Rotation never
+    // moves an object's own position, so the axis-dependent u/coord split
+    // has to be resolved here rather than by rotating something already
+    // positioned; a lengthAxis "z" wall additionally needs its local
+    // (u-along-X, thickness-along-Z) geometry rotated 90 degrees so that
+    // local X (u) faces along world Z instead.
+    function placeOnWall(obj, lengthAxis, coord, u) {
+      if (lengthAxis === "x") {
+        obj.position.x = u;
+        obj.position.z = coord;
+      } else {
+        obj.rotation.y = Math.PI / 2;
+        obj.position.x = coord;
+        obj.position.z = u;
+      }
+      return obj;
+    }
+
+    function addRoundWindow(c, lengthAxis, coord, bottomY, topY) {
+      const uMid = (c.u0 + c.u1) / 2;
+      const yMid = (bottomY + topY) / 2;
+      const radius = Math.max(0.08, Math.min(c.u1 - c.u0, topY - bottomY) / 2 * 0.86);
+      const glass = new THREE.Mesh(new THREE.CircleGeometry(radius, 32), glassMat);
+      glass.position.y = yMid;
+      glass.receiveShadow = true;
+      glass.userData = { kind: "glass" };
+      sceneGroup.add(placeOnWall(glass, lengthAxis, coord, uMid));
+      const frame = new THREE.Mesh(new THREE.TorusGeometry(radius, Math.max(0.03, radius * 0.12), 10, 32), windowFrameMat);
+      frame.position.y = yMid;
+      frame.castShadow = true;
+      sceneGroup.add(placeOnWall(frame, lengthAxis, coord, uMid));
+    }
+
+    function addLouverWindow(c, lengthAxis, coord, bottomY, topY) {
+      const T = state.thickness;
+      const uMid = (c.u0 + c.u1) / 2;
+      const len = Math.max(0.05, (c.u1 - c.u0) - 0.06);
+      const span = topY - bottomY;
+      const count = Math.max(3, Math.round(span / (0.35)));
+      const slatH = span / count;
+      for (let i = 0; i < count; i++) {
+        const yCenter = bottomY + slatH * (i + 0.5);
+        const slat = new THREE.Mesh(new THREE.BoxGeometry(len, slatH * 0.55, T * 0.85), louverMat);
+        slat.position.y = yCenter;
+        slat.rotation.x = LOUVER_TILT;
+        slat.castShadow = true;
+        slat.receiveShadow = true;
+        sceneGroup.add(placeOnWall(slat, lengthAxis, coord, uMid));
+      }
+    }
+
+    // fills the two spandrel corners above a semicircular arch with a
+    // wall-colored panel, leaving the arch itself open -- the underlying
+    // wall cutout stays the plain rectangle addSeg always cuts; this just
+    // dresses its top into an arched head rather than a flat lintel. Built
+    // relative to its own center (u=0 at the doorway's midpoint), like
+    // every other placeOnWall caller, since placeOnWall's z-axis rotation
+    // would otherwise send absolute u coordinates to the wrong world Z.
+    function addArchedDoorHead(c, lengthAxis, coord, doorBottom, doorTop) {
+      const T = state.thickness;
+      const width = c.u1 - c.u0;
+      const archRadius = Math.max(0.05, Math.min(width / 2, (doorTop - doorBottom) * 0.4));
+      const archBaseY = doorTop - archRadius;
+      if (archBaseY <= doorBottom + 0.02) return; // door too short/wide for a meaningful arch
+      const midU = (c.u0 + c.u1) / 2;
+      const u0 = c.u0 - midU, u1 = c.u1 - midU;
+      const shape = new THREE.Shape();
+      shape.moveTo(u0, archBaseY);
+      shape.lineTo(u0, doorTop);
+      shape.lineTo(u1, doorTop);
+      shape.lineTo(u1, archBaseY);
+      shape.lineTo(u0, archBaseY);
+      const hole = new THREE.Path();
+      hole.absarc(0, archBaseY, archRadius, 0, Math.PI, false);
+      shape.holes.push(hole);
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: T, bevelEnabled: false, curveSegments: 16 });
+      geo.translate(0, 0, -T / 2);
+      const mesh = new THREE.Mesh(geo, currentWallMat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      sceneGroup.add(placeOnWall(mesh, lengthAxis, coord, midU));
+    }
+
+    // a cylindrical enclosure with 3 glass wings pivoting through a center
+    // post, filling the doorway in place of a door leaf -- purely visual,
+    // the rectangular opening behind it stays the actual pick/resize target.
+    function addRevolvingDoorAssembly(c, lengthAxis, coord, bottom, top) {
+      const width = c.u1 - c.u0;
+      const uMid = (c.u0 + c.u1) / 2;
+      const radius = Math.max(0.3, width / 2 * 0.92);
+      const height = Math.max(0.3, top - bottom);
+      const midY = (bottom + top) / 2;
+      const group = new THREE.Group();
+      const drum = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, height, 24, 1, true), glassMat);
+      drum.position.y = midY;
+      group.add(drum);
+      for (let i = 0; i < 3; i++) {
+        const wing = new THREE.Mesh(new THREE.BoxGeometry(radius * 2 * 0.94, height * 0.94, 0.03), glassMat);
+        wing.position.y = midY;
+        wing.rotation.y = (i / 3) * Math.PI;
+        group.add(wing);
+      }
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, height, 12), doorMetalMat);
+      post.position.y = midY;
+      group.add(post);
+      sceneGroup.add(placeOnWall(group, lengthAxis, coord, uMid));
+    }
+
+    // a waist-height post with 3 rotating arms, filling the doorway in
+    // place of a door leaf.
+    function addTurnstileAssembly(c, lengthAxis, coord, bottom, top) {
+      const width = c.u1 - c.u0;
+      const uMid = (c.u0 + c.u1) / 2;
+      const height = Math.max(0.3, top - bottom);
+      const armY = Math.min(top - 0.1, bottom + 0.9);
+      const armLen = Math.max(0.2, width / 2 * 0.85);
+      const group = new THREE.Group();
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, height, 12), doorMetalMat);
+      post.position.y = (bottom + top) / 2;
+      group.add(post);
+      for (let i = 0; i < 3; i++) {
+        const pivot = new THREE.Group();
+        const arm = new THREE.Mesh(new THREE.BoxGeometry(armLen, 0.04, 0.04), doorMetalMat);
+        arm.position.set(armLen / 2, armY, 0);
+        pivot.add(arm);
+        pivot.rotation.y = (i / 3) * Math.PI * 2;
+        group.add(pivot);
+      }
+      sceneGroup.add(placeOnWall(group, lengthAxis, coord, uMid));
+    }
+
     function renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion) {
       // bottomOverride lets an opening start above floor level (e.g. a
       // balcony door/window off a raised platform instead of the ground).
@@ -2383,6 +2556,9 @@ export default function RoomBuilder() {
         if (doorBottom > 0.02) addSeg(c.u0, c.u1, 0, doorBottom);
         if (doorTop < H - 0.02) addSeg(c.u0, c.u1, doorTop, H);
         addOpeningHotspotAndHighlight(c, lengthAxis, coord, doorBottom, doorTop);
+        if (c.style === "arched") addArchedDoorHead(c, lengthAxis, coord, doorBottom, doorTop);
+        if (c.style === "revolving") { addRevolvingDoorAssembly(c, lengthAxis, coord, doorBottom, doorTop); return; }
+        if (c.style === "turnstile") { addTurnstileAssembly(c, lengthAxis, coord, doorBottom, doorTop); return; }
         // "split door in two" -- a single center mullion, like a French
         // door, rather than the window system's full column/row grid.
         if (Math.round(c.dividers || 0) >= 1) {
@@ -2400,6 +2576,9 @@ export default function RoomBuilder() {
       addSeg(c.u0, c.u1, 0, bottomY);
       addSeg(c.u0, c.u1, topY, H);
       addOpeningHotspotAndHighlight(c, lengthAxis, coord, bottomY, topY);
+
+      if (c.style === "round") { addRoundWindow(c, lengthAxis, coord, bottomY, topY); return; }
+      if (c.style === "louver") { addLouverWindow(c, lengthAxis, coord, bottomY, topY); return; }
 
       const n = Math.max(0, Math.round(c.dividers || 0));
       const axis = c.dividerAxis || "vertical";
@@ -2454,7 +2633,7 @@ export default function RoomBuilder() {
     function disposeObject(obj) {
       obj.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
-        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== pillarMat && o.material !== pillarMatSelected && o.material !== ceilingMat && o.material !== selMat && o.material !== selMatPreview && o.material !== handleMat && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && !Object.values(propMats).includes(o.material)) {
+        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== pillarMat && o.material !== pillarMatSelected && o.material !== ceilingMat && o.material !== selMat && o.material !== selMatPreview && o.material !== handleMat && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && o.material !== windowFrameMat && o.material !== louverMat && o.material !== doorMetalMat && !Object.values(propMats).includes(o.material)) {
           if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
           else o.material.dispose();
         }
@@ -3283,6 +3462,7 @@ export default function RoomBuilder() {
       renderStairs();
       renderProps();
       renderBalconies();
+      renderTerraces();
       renderCeiling(floorMeshesForCeiling);
     }
 
@@ -3399,10 +3579,20 @@ export default function RoomBuilder() {
     // resizing existed. Cube resizes w/d independently (a true rectangle);
     // sphere/cylinder/cone keep w===d (a uniform radius) and only h varies
     // independently, so a corner drag can never make them elliptical.
-    function propDefaultDiameter(kind) { return kind === "cone" || kind === "cylinder" ? 6 * FT : PROP_HEIGHT; }
-    function propWidthOf(p) { return p.w != null ? p.w : propDefaultDiameter(p.kind); }
-    function propDepthOf(p) { return p.d != null ? p.d : propDefaultDiameter(p.kind); }
-    function propHeightOf(p) { return p.h != null ? p.h : PROP_HEIGHT; }
+    function propDefaultDiameter(kind) {
+      if (kind === "cone" || kind === "cylinder") return 6 * FT;
+      if (kind === "colSquare" || kind === "colRound") return 1 * FT;
+      return PROP_HEIGHT;
+    }
+    function propWidthOf(p) { return p.w != null ? p.w : (p.kind === "jailWall" ? 6 * FT : propDefaultDiameter(p.kind)); }
+    function propDepthOf(p) { return p.d != null ? p.d : (p.kind === "jailWall" ? 0.2 * FT : propDefaultDiameter(p.kind)); }
+    // a column/pillar defaults to spanning floor-to-ceiling rather than the
+    // fixed 8ft other props use, same for a jail-cell wall panel.
+    function propHeightOf(p) {
+      if (p.h != null) return p.h;
+      if (p.kind === "colSquare" || p.kind === "colRound" || p.kind === "jailWall") return state.height;
+      return PROP_HEIGHT;
+    }
     const PROP_MIN_SIZE = 0.2; // smallest edge/diameter/height a prop can be resized to
     const PROP_MAX_SIZE = 30;
     const PROP_HANDLE = 0.16; // small cube handles -- visually unobtrusive, still easy to grab on touch
@@ -3410,18 +3600,48 @@ export default function RoomBuilder() {
     function renderProps() {
       (state.props || []).forEach((p) => {
         const w = propWidthOf(p), d = propDepthOf(p), h = propHeightOf(p);
+        // a barred panel rather than a single solid volume -- built as its
+        // own group of vertical bar cylinders plus top/bottom rails, since
+        // it can't be expressed as one THREE geometry the way every other
+        // prop kind below can.
+        if (p.kind === "jailWall") {
+          const group = new THREE.Group();
+          const barR = Math.min(0.02, d * 0.4);
+          const barGap = Math.max(0.12, barR * 5);
+          const barCount = Math.max(2, Math.floor(w / barGap) + 1);
+          for (let i = 0; i < barCount; i++) {
+            const bx = -w / 2 + (barCount === 1 ? w / 2 : (i * w) / (barCount - 1));
+            const bar = new THREE.Mesh(new THREE.CylinderGeometry(barR, barR, h * 0.98, 8), propMats.jailWall);
+            bar.position.set(bx, h / 2, 0);
+            bar.castShadow = true;
+            group.add(bar);
+          }
+          [0.03, h - 0.03].forEach((ry) => {
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), propMats.jailWall);
+            rail.position.set(0, ry, 0);
+            group.add(rail);
+          });
+          group.position.set(p.x, 0, p.z);
+          group.userData = { kind: "prop", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(group);
+          if (isPickableTarget) pickList.push(group);
+          renderPropSelectionOverlay(p, w, d, h);
+          return;
+        }
         let geo;
         switch (p.kind) {
           case "sphere":
             geo = new THREE.SphereGeometry(w / 2, 20, 16);
             break;
           case "cube":
+          case "colSquare":
             geo = new THREE.BoxGeometry(w, h, d);
             break;
           case "cone":
             geo = new THREE.ConeGeometry(w / 2, h, 24);
             break;
           case "cylinder":
+          case "colRound":
           default:
             geo = new THREE.CylinderGeometry(w / 2, w / 2, h, 24);
             break;
@@ -3438,31 +3658,37 @@ export default function RoomBuilder() {
         mesh.userData = { kind: "prop", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(mesh);
         if (isPickableTarget) pickList.push(mesh);
-
-        if (isPickableTarget && selectedPropIdRef.current === p.id) {
-          const boxGeo = new THREE.BoxGeometry(w, h, d);
-          const wire = new THREE.LineSegments(
-            new THREE.EdgesGeometry(boxGeo),
-            new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthTest: false })
-          );
-          wire.position.set(p.x, h / 2, p.z);
-          wire.renderOrder = 9;
-          sceneGroup.add(wire);
-
-          function addHandle(edge, hx, hy, hz) {
-            const mesh2 = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
-            mesh2.position.set(hx, hy, hz);
-            mesh2.renderOrder = 10;
-            mesh2.userData = { kind: "resize-handle", target: "prop", id: p.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
-            sceneGroup.add(mesh2);
-            pickList.push(mesh2);
-          }
-          [["nw", -1, -1], ["ne", 1, -1], ["sw", -1, 1], ["se", 1, 1]].forEach(([edge, sx, sz]) => {
-            addHandle(edge, p.x + sx * (w / 2), h, p.z + sz * (d / 2));
-          });
-          addHandle("top", p.x, h + PROP_HANDLE * 0.9, p.z);
-        }
+        renderPropSelectionOverlay(p, w, d, h);
       });
+    }
+
+    // the selected-prop bounding wire + 5 resize handles, computed purely
+    // from the prop's own w/d/h/position -- shared by every prop kind
+    // (including jailWall's group, which has no single mesh of its own to
+    // hang this off of).
+    function renderPropSelectionOverlay(p, w, d, h) {
+      if (!isPickableTarget || selectedPropIdRef.current !== p.id) return;
+      const boxGeo = new THREE.BoxGeometry(w, h, d);
+      const wire = new THREE.LineSegments(
+        new THREE.EdgesGeometry(boxGeo),
+        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthTest: false })
+      );
+      wire.position.set(p.x, h / 2, p.z);
+      wire.renderOrder = 9;
+      sceneGroup.add(wire);
+
+      function addHandle(edge, hx, hy, hz) {
+        const mesh2 = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+        mesh2.position.set(hx, hy, hz);
+        mesh2.renderOrder = 10;
+        mesh2.userData = { kind: "resize-handle", target: "prop", id: p.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+        sceneGroup.add(mesh2);
+        pickList.push(mesh2);
+      }
+      [["nw", -1, -1], ["ne", 1, -1], ["sw", -1, 1], ["se", 1, 1]].forEach(([edge, sx, sz]) => {
+        addHandle(edge, p.x + sx * (w / 2), h, p.z + sz * (d / 2));
+      });
+      addHandle("top", p.x, h + PROP_HANDLE * 0.9, p.z);
     }
 
     // rebuilds a balcony's door+flanking-windows openings from scratch off
@@ -3683,6 +3909,80 @@ export default function RoomBuilder() {
           }
           addHandle("left", u0);
           addHandle("right", u1);
+        }
+      });
+    }
+
+    // a flat roof-height deck with a perimeter railing on 3 open sides (the
+    // wall side is skipped, same as a balcony's fence) -- no stairs down to
+    // the ground and no door cutout back into the room, since it's meant to
+    // sit on top of the building rather than extend off an occupied floor.
+    function renderTerraces() {
+      const DEPTH = 10 * FT;
+      const PLATFORM_THICKNESS = 0.25;
+      const RAIL_TOP_H = 3.5 * FT;
+      const POST_SIZE = 0.09;
+      const roofY = state.height;
+      (state.terraces || []).forEach((t) => {
+        const info = getPanelInfo(t.panel);
+        if (!info) return;
+        const side = t.side || 1;
+        const nx = info.normal.x * side, nz = info.normal.z * side;
+        const axis = info.lengthAxis;
+        const isSelected = isPickableTarget && selectedTerraceIdRef.current === t.id;
+        const platMat = isSelected ? floorMatSelected : balconyPlatformMat;
+        const postMat = isSelected ? pillarMatSelected : pillarMat;
+        function toWorld(u, d) {
+          if (axis === "x") return { x: u, z: info.coord + nz * d };
+          return { x: info.coord + nx * d, z: u };
+        }
+        function addPiece(geo, mat, wx, wy, wz, rotY) {
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set(wx, wy, wz);
+          if (rotY) mesh.rotation.y = rotY;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: "terrace", id: t.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(mesh);
+          if (isPickableTarget) pickList.push(mesh);
+        }
+        // platform slab
+        {
+          const uLen = Math.max(0.02, t.u1 - t.u0);
+          const geo = axis === "x" ? new THREE.BoxGeometry(uLen, PLATFORM_THICKNESS, DEPTH) : new THREE.BoxGeometry(DEPTH, PLATFORM_THICKNESS, uLen);
+          const w = toWorld((t.u0 + t.u1) / 2, DEPTH / 2);
+          addPiece(geo, platMat, w.x, roofY - PLATFORM_THICKNESS / 2, w.z);
+        }
+        // perimeter fence posts + top rail, walking the 3 open sides (near
+        // edge, outer edge, far edge) by even arc-length spacing -- same
+        // approach renderBalconies uses for its own fence.
+        const half = POST_SIZE / 2;
+        const pu0 = t.u0 + half, pu1 = t.u1 - half, pd0 = half, pd1 = DEPTH - half;
+        const sideLen = pd1 - pd0, outerLen = pu1 - pu0;
+        const totalLen = Math.max(0.01, sideLen * 2 + outerLen);
+        const perimeterLen = DEPTH * 2 + (t.u1 - t.u0);
+        const n = Math.max(2, Math.round(perimeterLen / (3 * FT)));
+        const points = [];
+        for (let i = 0; i <= n; i++) {
+          const tt = (i / n) * totalLen;
+          let u, d;
+          if (tt <= sideLen) { u = pu0; d = pd0 + tt; }
+          else if (tt <= sideLen + outerLen) { u = pu0 + (tt - sideLen); d = pd1; }
+          else { u = pu1; d = pd1 - (tt - sideLen - outerLen); }
+          points.push([u, d]);
+        }
+        points.forEach(([cu, cd]) => {
+          const w = toWorld(cu, cd);
+          addPiece(new THREE.BoxGeometry(POST_SIZE, RAIL_TOP_H, POST_SIZE), postMat, w.x, roofY + RAIL_TOP_H / 2, w.z);
+        });
+        for (let i = 0; i < points.length - 1; i++) {
+          const wa = toWorld(points[i][0], points[i][1]);
+          const wb = toWorld(points[i + 1][0], points[i + 1][1]);
+          const dx = wb.x - wa.x, dz = wb.z - wa.z;
+          const len = Math.hypot(dx, dz);
+          if (len < 0.02) continue;
+          addPiece(new THREE.BoxGeometry(len, 0.08, POST_SIZE), postMat, (wa.x + wb.x) / 2, roofY + RAIL_TOP_H, (wa.z + wb.z) / 2, Math.atan2(-dz, dx));
         }
       });
     }
@@ -5289,7 +5589,22 @@ export default function RoomBuilder() {
           const perimeterLen = (bal.platformWidth || 10 * FT) * 2 + (bal.u1 - bal.u0);
           setBalconyPillarCount(bal.pillarCount || Math.max(2, Math.round(perimeterLen / (3 * FT))));
           setBalconyGlassInfill(!!bal.glassInfill);
+          setBalconyStyle(bal.pillarsRemoved ? (bal.ceilingRemoved ? "cantilevered" : "recessed") : "supported");
         }
+        return;
+      }
+
+      // A rooftop terrace -- minimal selection for now (delete only, no
+      // resize/parameter editing yet).
+      if (kind === "terrace") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedPropId(null);
+        setSelectedOpeningId(null);
+        setSelectedBalconyId(null);
+        setSelectedTerraceId(obj.userData.id);
         return;
       }
 
@@ -5316,9 +5631,11 @@ export default function RoomBuilder() {
           setOpeningDividers(o.dividers || 0);
           setOpeningAxisVertical(o.dividerAxis === "vertical" || o.dividerAxis === "both");
           setOpeningAxisHorizontal(o.dividerAxis === "horizontal" || o.dividerAxis === "both");
+          setOpeningStyle(o.style || "grid");
         } else if (o && o.isDoor) {
           setDoorHeight(o.height ?? DEFAULT_OPENING_HEIGHT);
           setDoorSplit(!!o.dividers);
+          setDoorStyle(o.style || "standard");
         }
         return;
       }
@@ -5361,10 +5678,11 @@ export default function RoomBuilder() {
         return;
       }
       // Props tool: tapping the floor drops the currently-selected shape
-      // right there. Not a drag gesture -- one tap, one prop placed. The
-      // balcony "shape" is the exception -- it's drawn along a wall (see
-      // the pending-balcony branch below), so a floor tap does nothing.
-      if (toolRef.current === "props" && propsShapeRef.current !== "balcony") {
+      // right there. Not a drag gesture -- one tap, one prop placed. Balcony
+      // and terrace are the exceptions -- both are drawn along a wall (see
+      // the pending-balcony/pending-terrace branches below), so a floor tap
+      // does nothing for either.
+      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace") {
         if (kind === "floor") {
           const ownerRoomId = obj.userData.ownerRoomId ?? null;
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
@@ -5448,6 +5766,14 @@ export default function RoomBuilder() {
         const normalComponent = info.thickAxis === "x" ? info.normal.x : info.normal.z;
         const side = Math.sign((thickCoord - info.coord) * normalComponent) || 1;
         dragState = { type: "pending-balcony", panelKey, info, hitPoint: hp, side, startScreen: { x: e.clientX, y: e.clientY } };
+      } else if (toolRef.current === "props" && propsShapeRef.current === "terrace") {
+        // same wall-drag entry point as balcony above, just its own
+        // dragState type -- see the terrace-draw handling in
+        // onPointerMove/onPointerUp.
+        const thickCoord2 = info.thickAxis === "x" ? hit.point.x : hit.point.z;
+        const normalComponent2 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
+        const side2 = Math.sign((thickCoord2 - info.coord) * normalComponent2) || 1;
+        dragState = { type: "pending-terrace", panelKey, info, hitPoint: hp, side: side2, startScreen: { x: e.clientX, y: e.clientY } };
       } else {
         dragState = {
           type: "pending", panelKey, info, hitPoint: hp,
@@ -5680,6 +6006,21 @@ export default function RoomBuilder() {
         return;
       }
 
+      if (dragState.type === "pending-terrace") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "terrace-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u, side: dragState.side };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: 7 * FT };
+          rebuild();
+        }
+        return;
+      }
+
       const ray = rayFromEvent(e);
 
       if (dragState.type === "panel-extrude") {
@@ -5773,6 +6114,15 @@ export default function RoomBuilder() {
         previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: doorHeightRef.current, isDoor: true };
         rebuild();
       } else if (dragState.type === "balcony-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
+        rebuild();
+      } else if (dragState.type === "terrace-draw") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
         const info = getPanelInfo(dragState.panelKey);
@@ -6070,6 +6420,7 @@ export default function RoomBuilder() {
             // override falls back to.
             id: idSeq++, panel: dragState.panelKey, u0, u1, height: openingHeightRef.current, bottomOverride: 0, dividers: openingDividersRef.current,
             dividerAxis: openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical",
+            style: openingStyleRef.current,
           });
         }
         previewOpening = null;
@@ -6078,7 +6429,7 @@ export default function RoomBuilder() {
         const u1 = Math.max(dragState.u0, dragState.u1);
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
-          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
+          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current });
         }
         previewOpening = null;
       } else if (dragState.type === "balcony-draw") {
@@ -6090,7 +6441,12 @@ export default function RoomBuilder() {
           const bid = idSeq++;
           const dividerAxis = openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical";
           const platformHeight = 3 * FT;
-          const bal = { id: bid, panel: dragState.panelKey, u0, u1, dividerAxis, side: dragState.side || 1, platformHeight };
+          const style = balconyStyleRef.current;
+          const bal = {
+            id: bid, panel: dragState.panelKey, u0, u1, dividerAxis, side: dragState.side || 1, platformHeight,
+            pillarsRemoved: style !== "supported",
+            ceilingRemoved: style !== "recessed",
+          };
           if (!state.balconies) state.balconies = [];
           state.balconies.push(bal);
           regenerateBalconyOpenings(bal);
@@ -6098,6 +6454,17 @@ export default function RoomBuilder() {
           // highlight right after drawing one is more distracting than
           // useful; tap it afterward if you want to edit it.
           setBalconyStairHeight(platformHeight);
+        }
+        previewOpening = null;
+      } else if (dragState.type === "terrace-draw") {
+        const u0 = Math.min(dragState.u0, dragState.u1);
+        const u1 = Math.max(dragState.u0, dragState.u1);
+        const MIN_TERRACE = 4 * FT;
+        if (u1 - u0 >= MIN_TERRACE) {
+          const tid = idSeq++;
+          const terrace = { id: tid, panel: dragState.panelKey, u0, u1, side: dragState.side || 1 };
+          if (!state.terraces) state.terraces = [];
+          state.terraces.push(terrace);
         }
         previewOpening = null;
       } else if (dragState.type === "stair-draw") {
@@ -6522,6 +6889,16 @@ export default function RoomBuilder() {
       rebuild();
     }
     balconyGlassApiRef.current = { setEnabled: setActiveBalconyGlassInfill };
+    function setActiveBalconyStyle(style) {
+      const id = selectedBalconyIdRef.current;
+      if (id == null) return;
+      const bal = (state.balconies || []).find((b) => b.id === id);
+      if (!bal) return;
+      bal.pillarsRemoved = style !== "supported";
+      bal.ceilingRemoved = style !== "recessed";
+      rebuild();
+    }
+    balconyStyleApiRef.current = { setStyle: setActiveBalconyStyle };
 
     function deleteActiveBalcony() {
       const id = selectedBalconyIdRef.current;
@@ -6548,6 +6925,16 @@ export default function RoomBuilder() {
       rebuild();
     }
     deleteBalconyRef.current = deleteActiveBalcony;
+
+    function deleteActiveTerrace() {
+      const id = selectedTerraceIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.terraces = (state.terraces || []).filter((t) => t.id !== id);
+      setSelectedTerraceId(null);
+      rebuild();
+    }
+    deleteTerraceRef.current = deleteActiveTerrace;
 
     function deleteActiveOpening() {
       const id = selectedOpeningIdRef.current;
@@ -6598,7 +6985,15 @@ export default function RoomBuilder() {
       o.dividerAxis = vertical && horizontal ? "both" : horizontal ? "horizontal" : "vertical";
       rebuild();
     }
-    openingEditApiRef.current = { setHeight: setActiveOpeningHeight, setDividers: setActiveOpeningDividers, setAxis: setActiveOpeningAxis };
+    function setActiveOpeningStyle(style) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o) return;
+      o.style = style;
+      rebuild();
+    }
+    openingEditApiRef.current = { setHeight: setActiveOpeningHeight, setDividers: setActiveOpeningDividers, setAxis: setActiveOpeningAxis, setStyle: setActiveOpeningStyle };
 
     // ---------- voice command actions ----------
     // A small, deliberately isolated set of actions a voice command can
@@ -8668,6 +9063,30 @@ export default function RoomBuilder() {
             </div>
           </div>
         )}
+        {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">Window style</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[
+                { key: "grid", label: "Grid" },
+                { key: "round", label: "Round" },
+                { key: "louver", label: "Louver" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${openingStyle === s ? "active" : ""}`}
+                  onClick={() => {
+                    pushUndoRef.current();
+                    setOpeningStyle(s);
+                    if (selectedOpeningId != null) openingEditApiRef.current.setStyle(s);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
           <div className="ribbon-group">
             <span className="ribbon-label">
@@ -8690,19 +9109,41 @@ export default function RoomBuilder() {
           </div>
         )}
         {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
-          <div className="ribbon-group">
+          <div className="ribbon-group" style={{ minWidth: 260 }}>
             <span className="ribbon-label">Style</span>
-            <button
-              className={`rb-btn ${doorSplit ? "active" : ""}`}
-              onClick={() => {
-                pushUndoRef.current();
-                const v = !doorSplit;
-                setDoorSplit(v);
-                if (selectedOpeningId != null) openingEditApiRef.current.setDividers(v ? 1 : 0);
-              }}
-            >
-              Split door
-            </button>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {[
+                { key: "standard", label: "Standard" },
+                { key: "arched", label: "Arched" },
+                { key: "revolving", label: "Revolving" },
+                { key: "turnstile", label: "Turnstile" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${doorStyle === s ? "active" : ""}`}
+                  onClick={() => {
+                    pushUndoRef.current();
+                    setDoorStyle(s);
+                    if (selectedOpeningId != null) openingEditApiRef.current.setStyle(s);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+              {(doorStyle === "standard" || doorStyle === "arched") && (
+                <button
+                  className={`rb-btn ${doorSplit ? "active" : ""}`}
+                  onClick={() => {
+                    pushUndoRef.current();
+                    const v = !doorSplit;
+                    setDoorSplit(v);
+                    if (selectedOpeningId != null) openingEditApiRef.current.setDividers(v ? 1 : 0);
+                  }}
+                >
+                  Split door
+                </button>
+              )}
+            </div>
           </div>
         )}
         {tool === "props" && (
@@ -8725,12 +9166,41 @@ export default function RoomBuilder() {
                   <Icon size={16} strokeWidth={2} />
                 </button>
               ))}
-              <button
-                className={`rb-btn ${propsShape === "balcony" ? "active" : ""}`}
-                onClick={() => setPropsShape("balcony")}
-              >
-                Balcony
-              </button>
+              {[
+                { key: "balcony", label: "Balcony" },
+                { key: "terrace", label: "Terrace" },
+                { key: "jailWall", label: "Jail wall" },
+                { key: "colSquare", label: "Square column" },
+                { key: "colRound", label: "Round column" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${propsShape === s ? "active" : ""}`}
+                  onClick={() => setPropsShape(s)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {tool === "props" && propsShape === "balcony" && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Balcony style</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[
+                { key: "supported", label: "Supported" },
+                { key: "recessed", label: "Recessed" },
+                { key: "cantilevered", label: "Cantilevered" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${balconyStyle === s ? "active" : ""}`}
+                  onClick={() => setBalconyStyle(s)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -8754,6 +9224,30 @@ export default function RoomBuilder() {
               />
               <button className="rb-btn" onClick={() => deleteStairRef.current()}>Delete</button>
               <button className="rb-btn" onClick={() => setSelectedStairId(null)}>Done</button>
+            </div>
+          </div>
+        )}
+        {selectedBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Balcony style</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[
+                { key: "supported", label: "Supported" },
+                { key: "recessed", label: "Recessed" },
+                { key: "cantilevered", label: "Cantilevered" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${balconyStyle === s ? "active" : ""}`}
+                  onClick={() => {
+                    pushUndoRef.current();
+                    setBalconyStyle(s);
+                    balconyStyleApiRef.current.setStyle(s);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -8850,6 +9344,15 @@ export default function RoomBuilder() {
             >
               Glass
             </button>
+          </div>
+        )}
+        {selectedTerraceId != null && (
+          <div className="ribbon-group" style={{ minWidth: 160 }}>
+            <span className="ribbon-label">Terrace selected</span>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="rb-btn" onClick={() => deleteTerraceRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedTerraceId(null)}>Done</button>
+            </div>
           </div>
         )}
         {selectedOpeningId != null && (
