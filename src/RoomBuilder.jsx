@@ -2456,19 +2456,48 @@ export default function RoomBuilder() {
       return obj;
     }
 
+    // a genuine circular hole in the wall -- the wall panel spanning the
+    // whole opening rectangle is solid except for a true circular cutout
+    // (built the same way the arched door's U-shaped hole is: a flat
+    // shape with a hole punched in it, extruded to wall thickness), so
+    // there's no opaque disc in the middle and no open gap between the
+    // window's trim and the surrounding wall. The trim itself is a thin,
+    // flat ring flush with each wall face -- not a tube (torus) standing
+    // proud of the wall on every side.
     function addRoundWindow(c, lengthAxis, coord, bottomY, topY) {
+      const T = state.thickness;
       const uMid = (c.u0 + c.u1) / 2;
       const yMid = (bottomY + topY) / 2;
       const radius = Math.max(0.08, Math.min(c.u1 - c.u0, topY - bottomY) / 2 * 0.86);
-      const glass = new THREE.Mesh(new THREE.CircleGeometry(radius, 32), windowFrameMat);
-      glass.position.y = yMid;
-      glass.receiveShadow = true;
-      glass.userData = { kind: "glass" };
-      sceneGroup.add(placeOnWall(glass, lengthAxis, coord, uMid));
-      const frame = new THREE.Mesh(new THREE.TorusGeometry(radius, Math.max(0.03, radius * 0.12), 10, 32), windowFrameMat);
-      frame.position.y = yMid;
-      frame.castShadow = true;
-      sceneGroup.add(placeOnWall(frame, lengthAxis, coord, uMid));
+      const lu0 = c.u0 - uMid, lu1 = c.u1 - uMid;
+      const shape = new THREE.Shape();
+      shape.moveTo(lu0, bottomY);
+      shape.lineTo(lu0, topY);
+      shape.lineTo(lu1, topY);
+      shape.lineTo(lu1, bottomY);
+      shape.lineTo(lu0, bottomY);
+      const hole = new THREE.Path();
+      hole.absarc(0, yMid, radius, 0, Math.PI * 2, false);
+      shape.holes.push(hole);
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: T, bevelEnabled: false, curveSegments: 48 });
+      geo.translate(0, 0, -T / 2);
+      const wallPanel = new THREE.Mesh(geo, currentWallMat);
+      wallPanel.castShadow = true;
+      wallPanel.receiveShadow = true;
+      sceneGroup.add(placeOnWall(wallPanel, lengthAxis, coord, uMid));
+
+      const trimOuter = radius + Math.max(0.025, radius * 0.08);
+      const trimGeo = new THREE.RingGeometry(radius, trimOuter, 48);
+      const front = new THREE.Mesh(trimGeo, windowFrameMat);
+      front.position.set(0, yMid, T / 2 + 0.002);
+      front.receiveShadow = true;
+      const back = new THREE.Mesh(trimGeo, windowFrameMat);
+      back.position.set(0, yMid, -T / 2 - 0.002);
+      back.rotation.y = Math.PI;
+      back.receiveShadow = true;
+      const trimGroup = new THREE.Group();
+      trimGroup.add(front, back);
+      sceneGroup.add(placeOnWall(trimGroup, lengthAxis, coord, uMid));
     }
 
     function addLouverWindow(c, lengthAxis, coord, bottomY, topY) {
