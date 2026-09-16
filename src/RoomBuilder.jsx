@@ -2489,21 +2489,26 @@ export default function RoomBuilder() {
       }
     }
 
-    // fills the two spandrel corners above a semicircular arch with a
-    // wall-colored panel, leaving the arch itself open -- the underlying
-    // wall cutout stays the plain rectangle addSeg always cuts; this just
-    // dresses its top into an arched head rather than a flat lintel. Built
-    // relative to its own center (u=0 at the doorway's midpoint), like
-    // every other placeOnWall caller, since placeOnWall's z-axis rotation
-    // would otherwise send absolute u coordinates to the wrong world Z.
-    function addArchedDoorHead(c, lengthAxis, coord, doorBottom, doorTop) {
+    // a true U-shaped doorway -- straight sides the full height of the
+    // unit, capped by a semicircular arch -- rather than a full-width
+    // rectangle with just a decorative arched panel on top. The hole is
+    // confined to this unit's own u0/u1 footprint; wall fills everywhere
+    // outside it (the spandrel corners above the arch springline here,
+    // and the margins/gaps between units in renderArchedDoorBank below).
+    // Built relative to its own center (u=0 at the doorway's midpoint),
+    // like every other placeOnWall caller, since placeOnWall's z-axis
+    // rotation would otherwise send absolute u coordinates to the wrong
+    // world Z.
+    const ARCH_UNIT_WIDTH = 6 * FT; // standard door width
+    const ARCH_GAP = 3 * FT;
+    function addArchedDoorUnit(lengthAxis, coord, unitU0, unitU1, doorBottom, doorTop) {
       const T = state.thickness;
-      const width = c.u1 - c.u0;
+      const width = unitU1 - unitU0;
       const archRadius = Math.max(0.05, Math.min(width / 2, (doorTop - doorBottom) * 0.4));
       const archBaseY = doorTop - archRadius;
       if (archBaseY <= doorBottom + 0.02) return; // door too short/wide for a meaningful arch
-      const midU = (c.u0 + c.u1) / 2;
-      const u0 = c.u0 - midU, u1 = c.u1 - midU;
+      const midU = (unitU0 + unitU1) / 2;
+      const u0 = unitU0 - midU, u1 = unitU1 - midU;
       const shape = new THREE.Shape();
       shape.moveTo(u0, archBaseY);
       shape.lineTo(u0, doorTop);
@@ -2519,6 +2524,25 @@ export default function RoomBuilder() {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       sceneGroup.add(placeOnWall(mesh, lengthAxis, coord, midU));
+    }
+
+    // tiles fixed-width arched-doorway units across the drawn span, each
+    // its own true U-shaped hole, with a solid 3ft wall gap separating
+    // consecutive doors instead of one door stretched (and left
+    // rectangular below the arch) across the whole span.
+    function renderArchedDoorBank(c, lengthAxis, coord, bottom, top, addSeg) {
+      const width = c.u1 - c.u0;
+      const count = Math.max(1, Math.floor((width + ARCH_GAP) / (ARCH_UNIT_WIDTH + ARCH_GAP)));
+      const totalWidth = count * ARCH_UNIT_WIDTH + (count - 1) * ARCH_GAP;
+      const startU = c.u0 + Math.max(0, (width - totalWidth) / 2);
+      if (startU > c.u0 + 0.02) addSeg(c.u0, startU, bottom, top);
+      if (c.u1 - (startU + totalWidth) > 0.02) addSeg(startU + totalWidth, c.u1, bottom, top);
+      for (let i = 0; i < count; i++) {
+        const unitU0 = startU + i * (ARCH_UNIT_WIDTH + ARCH_GAP);
+        const unitU1 = unitU0 + ARCH_UNIT_WIDTH;
+        addArchedDoorUnit(lengthAxis, coord, unitU0, unitU1, bottom, top);
+        if (i < count - 1) addSeg(unitU1, unitU1 + ARCH_GAP, bottom, top);
+      }
     }
 
     // a center post with 3 wall-colored wing panels pivoting around it,
@@ -2606,30 +2630,56 @@ export default function RoomBuilder() {
       }
     }
 
-    // a barred jail-cell panel spanning the full drawn doorway width, used
-    // as a door style rather than a floor-tapped prop.
-    function addJailWallDoor(c, lengthAxis, coord, bottom, top) {
-      const width = c.u1 - c.u0;
-      const uMid = (c.u0 + c.u1) / 2;
+    // a barred jail-cell door, a fixed ~10ft-wide unit with a border frame
+    // around it -- renderJailWallBank below tiles as many of these, with a
+    // 2ft wall gap between each, as fit the drawn span.
+    const JAIL_BAR_RADIUS = 0.25 * FT; // 3in radius
+    const JAIL_BAR_SPACING = 1 * FT;
+    const JAIL_UNIT_WIDTH = 10 * FT;
+    const JAIL_GAP = 2 * FT;
+    const JAIL_BORDER_THICKNESS = 0.15 * FT;
+    function addJailWallDoor(lengthAxis, coord, uMid, width, bottom, top) {
       const d = state.thickness * 0.6;
       const h = Math.max(0.1, top - bottom);
-      const barR = 0.02;
-      const barGap = Math.max(0.12, barR * 5);
-      const barCount = Math.max(2, Math.floor(width / barGap) + 1);
+      const barCount = Math.max(2, Math.floor(width / JAIL_BAR_SPACING) + 1);
       const group = new THREE.Group();
       for (let i = 0; i < barCount; i++) {
         const bx = -width / 2 + (barCount === 1 ? width / 2 : (i * width) / (barCount - 1));
-        const bar = new THREE.Mesh(new THREE.CylinderGeometry(barR, barR, h * 0.98, 8), doorMetalMat);
+        const bar = new THREE.Mesh(new THREE.CylinderGeometry(JAIL_BAR_RADIUS, JAIL_BAR_RADIUS, h * 0.98, 10), doorMetalMat);
         bar.position.set(bx, bottom + h / 2, 0);
         bar.castShadow = true;
         group.add(bar);
       }
-      [bottom + 0.03, top - 0.03].forEach((ry) => {
-        const rail = new THREE.Mesh(new THREE.BoxGeometry(width, 0.06, d), doorMetalMat);
+      // border frame around the whole unit
+      const bt = JAIL_BORDER_THICKNESS;
+      [bottom + bt / 2, top - bt / 2].forEach((ry) => {
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(width, bt, d), doorMetalMat);
         rail.position.set(0, ry, 0);
         group.add(rail);
       });
+      [-width / 2 + bt / 2, width / 2 - bt / 2].forEach((bx) => {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(bt, h, d), doorMetalMat);
+        post.position.set(bx, bottom + h / 2, 0);
+        group.add(post);
+      });
       sceneGroup.add(placeOnWall(group, lengthAxis, coord, uMid));
+    }
+
+    // tiles fixed-width jail-cell door units across the drawn span, with a
+    // solid 2ft wall gap separating consecutive doors.
+    function renderJailWallBank(c, lengthAxis, coord, bottom, top, addSeg) {
+      const width = c.u1 - c.u0;
+      const count = Math.max(1, Math.floor((width + JAIL_GAP) / (JAIL_UNIT_WIDTH + JAIL_GAP)));
+      const totalWidth = count * JAIL_UNIT_WIDTH + (count - 1) * JAIL_GAP;
+      const startU = c.u0 + Math.max(0, (width - totalWidth) / 2);
+      if (startU > c.u0 + 0.02) addSeg(c.u0, startU, bottom, top);
+      if (c.u1 - (startU + totalWidth) > 0.02) addSeg(startU + totalWidth, c.u1, bottom, top);
+      for (let i = 0; i < count; i++) {
+        const unitU0 = startU + i * (JAIL_UNIT_WIDTH + JAIL_GAP);
+        const unitU1 = unitU0 + JAIL_UNIT_WIDTH;
+        addJailWallDoor(lengthAxis, coord, (unitU0 + unitU1) / 2, JAIL_UNIT_WIDTH, bottom, top);
+        if (i < count - 1) addSeg(unitU1, unitU1 + JAIL_GAP, bottom, top);
+      }
     }
 
     // 5 evenly-spaced wall columns (square or round), floor to ceiling,
@@ -2678,10 +2728,10 @@ export default function RoomBuilder() {
         if (doorBottom > 0.02) addSeg(c.u0, c.u1, 0, doorBottom);
         if (doorTop < H - 0.02) addSeg(c.u0, c.u1, doorTop, H);
         addOpeningHotspotAndHighlight(c, lengthAxis, coord, doorBottom, doorTop);
-        if (c.style === "arched") addArchedDoorHead(c, lengthAxis, coord, doorBottom, doorTop);
+        if (c.style === "arched") { renderArchedDoorBank(c, lengthAxis, coord, doorBottom, doorTop, addSeg); return; }
         if (c.style === "revolving") { renderRevolvingDoorBank(c, lengthAxis, coord, doorBottom, doorTop, addSeg); return; }
         if (c.style === "turnstile") { renderTurnstileBank(c, lengthAxis, coord, doorBottom, doorTop); return; }
-        if (c.style === "jailWall") { addJailWallDoor(c, lengthAxis, coord, doorBottom, doorTop); return; }
+        if (c.style === "jailWall") { renderJailWallBank(c, lengthAxis, coord, doorBottom, doorTop, addSeg); return; }
         // "split door in two" -- a single center mullion, like a French
         // door, rather than the window system's full column/row grid.
         if (Math.round(c.dividers || 0) >= 1) {
@@ -3874,6 +3924,18 @@ export default function RoomBuilder() {
       });
     }
 
+    // cuts a single door into the wall directly behind a terrace, centered
+    // on its span -- rebuilt from scratch off the terrace's current u0/u1
+    // the same way a balcony's door/window cutouts are.
+    function regenerateTerraceOpenings(t) {
+      state.openings = state.openings.filter((o) => o.fromTerrace !== t.id);
+      const doorW = Math.min(6 * FT, (t.u1 - t.u0) - 0.6);
+      if (doorW > 1 * FT) {
+        const mid = (t.u0 + t.u1) / 2;
+        state.openings.push({ id: idSeq++, panel: t.panel, u0: mid - doorW / 2, u1: mid + doorW / 2, height: doorHeightRef.current, isDoor: true, bottomOverride: 0, fromTerrace: t.id });
+      }
+    }
+
     // the staircase-balcony assembly: a low 3-step stair leading up to a
     // wide platform (4x a normal tread's depth) against the wall, with
     // corner pillars enclosing the platform. The window/door cutout in the
@@ -4136,16 +4198,16 @@ export default function RoomBuilder() {
       });
     }
 
-    // a flat roof-height deck with a perimeter railing on 3 open sides (the
-    // wall side is skipped, same as a balcony's fence) -- no stairs down to
-    // the ground and no door cutout back into the room, since it's meant to
-    // sit on top of the building rather than extend off an occupied floor.
+    // a flat deck sitting just above floor level, with a perimeter railing
+    // on 3 open sides (the wall side is skipped, same as a balcony's
+    // fence) and a door cut into the wall directly behind it -- no stairs
+    // down to the ground, since it's already at floor level.
     function renderTerraces() {
       const DEPTH = 10 * FT;
       const PLATFORM_THICKNESS = 0.25;
       const RAIL_TOP_H = 3.5 * FT;
       const POST_SIZE = 0.09;
-      const roofY = state.height;
+      const terraceY = 0.5 * FT;
       (state.terraces || []).forEach((t) => {
         const info = getPanelInfo(t.panel);
         if (!info) return;
@@ -4154,7 +4216,7 @@ export default function RoomBuilder() {
         const axis = info.lengthAxis;
         const isSelected = isPickableTarget && selectedTerraceIdRef.current === t.id;
         const platMat = isSelected ? floorMatSelected : balconyPlatformMat;
-        const postMat = isSelected ? pillarMatSelected : pillarMat;
+        const postMat = isSelected ? wallMatSelected : wallMat;
         function toWorld(u, d) {
           if (axis === "x") return { x: u, z: info.coord + nz * d };
           return { x: info.coord + nx * d, z: u };
@@ -4175,7 +4237,7 @@ export default function RoomBuilder() {
           const uLen = Math.max(0.02, t.u1 - t.u0);
           const geo = axis === "x" ? new THREE.BoxGeometry(uLen, PLATFORM_THICKNESS, DEPTH) : new THREE.BoxGeometry(DEPTH, PLATFORM_THICKNESS, uLen);
           const w = toWorld((t.u0 + t.u1) / 2, DEPTH / 2);
-          addPiece(geo, platMat, w.x, roofY - PLATFORM_THICKNESS / 2, w.z);
+          addPiece(geo, platMat, w.x, terraceY - PLATFORM_THICKNESS / 2, w.z);
         }
         // perimeter fence posts + top rail, walking the 3 open sides (near
         // edge, outer edge, far edge) by even arc-length spacing -- same
@@ -4197,7 +4259,7 @@ export default function RoomBuilder() {
         }
         points.forEach(([cu, cd]) => {
           const w = toWorld(cu, cd);
-          addPiece(new THREE.BoxGeometry(POST_SIZE, RAIL_TOP_H, POST_SIZE), postMat, w.x, roofY + RAIL_TOP_H / 2, w.z);
+          addPiece(new THREE.BoxGeometry(POST_SIZE, RAIL_TOP_H, POST_SIZE), postMat, w.x, terraceY + RAIL_TOP_H / 2, w.z);
         });
         for (let i = 0; i < points.length - 1; i++) {
           const wa = toWorld(points[i][0], points[i][1]);
@@ -4205,7 +4267,7 @@ export default function RoomBuilder() {
           const dx = wb.x - wa.x, dz = wb.z - wa.z;
           const len = Math.hypot(dx, dz);
           if (len < 0.02) continue;
-          addPiece(new THREE.BoxGeometry(len, 0.08, POST_SIZE), postMat, (wa.x + wb.x) / 2, roofY + RAIL_TOP_H, (wa.z + wb.z) / 2, Math.atan2(-dz, dx));
+          addPiece(new THREE.BoxGeometry(len, 0.08, POST_SIZE), postMat, (wa.x + wb.x) / 2, terraceY + RAIL_TOP_H, (wa.z + wb.z) / 2, Math.atan2(-dz, dx));
         }
       });
     }
@@ -6615,7 +6677,9 @@ export default function RoomBuilder() {
         // turnstiles are much narrower than a standard door -- a tap
         // should place exactly one, not a standard-width span that the
         // turnstile bank then subdivides into several.
-        const doorWidth = doorStyleRef.current === "turnstile" ? TURNSTILE_UNIT_WIDTH : 6 * FT;
+        const doorWidth = doorStyleRef.current === "turnstile" ? TURNSTILE_UNIT_WIDTH
+          : doorStyleRef.current === "jailWall" ? JAIL_UNIT_WIDTH
+          : 6 * FT;
         const u = panelU(info, dragState.hitPoint);
         let u0 = u - doorWidth / 2, u1 = u + doorWidth / 2;
         if (u0 < info.u0) { u0 = info.u0; u1 = u0 + doorWidth; }
@@ -6728,6 +6792,7 @@ export default function RoomBuilder() {
           const terrace = { id: tid, panel: dragState.panelKey, u0, u1, side: dragState.side || 1 };
           if (!state.terraces) state.terraces = [];
           state.terraces.push(terrace);
+          regenerateTerraceOpenings(terrace);
         }
         previewOpening = null;
       } else if (dragState.type === "column-draw") {
@@ -7204,6 +7269,7 @@ export default function RoomBuilder() {
       if (id == null) return;
       pushUndo();
       state.terraces = (state.terraces || []).filter((t) => t.id !== id);
+      state.openings = state.openings.filter((o) => o.fromTerrace !== id);
       setSelectedTerraceId(null);
       rebuild();
     }
@@ -9424,7 +9490,7 @@ export default function RoomBuilder() {
                   {label}
                 </button>
               ))}
-              {(doorStyle === "standard" || doorStyle === "arched") && (
+              {doorStyle === "standard" && (
                 <button
                   className={`rb-btn ${doorSplit ? "active" : ""}`}
                   onClick={() => {
