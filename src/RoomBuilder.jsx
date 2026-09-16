@@ -8748,8 +8748,10 @@ export default function RoomBuilder() {
   // conditions each param group below renders under, so the panel fades
   // out fully (rather than sitting there empty) when none of them apply.
   const showToolPanel =
-    (tool === "move" && selectedRoomId != null && selectedPanel == null) ||
-    (tool === "move" && selectedPanel != null) ||
+    // "move" (Wall) always shows something -- the Room group when a room
+    // is selected, wall-height controls when a panel is selected, and the
+    // Column/Pillar mode selectors the rest of the time (nothing selected).
+    tool === "move" ||
     ((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) ||
     ((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) ||
     tool === "props" ||
