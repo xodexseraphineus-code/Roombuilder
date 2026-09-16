@@ -8,7 +8,7 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
 
-const WALL_HEIGHT = 3.6576; // 12 ft
+const WALL_HEIGHT = 4.8768; // 16 ft
 const MIN_WALL_HEIGHT = 0.5;
 const MAX_WALL_HEIGHT = 50;
 const MIN_SIZE = 1.0;             // smallest a room dimension can shrink to
@@ -763,6 +763,13 @@ export default function RoomBuilder() {
   const [columnShape, setColumnShape] = useState("none");
   const columnShapeRef = useRef(columnShape);
   useEffect(() => { columnShapeRef.current = columnShape; }, [columnShape]);
+  const [pillarShape, setPillarShape] = useState("none");
+  const pillarShapeRef = useRef(pillarShape);
+  useEffect(() => { pillarShapeRef.current = pillarShape; }, [pillarShape]);
+  const [selectedFloorPillarsId, setSelectedFloorPillarsId] = useState(null);
+  const selectedFloorPillarsIdRef = useRef(selectedFloorPillarsId);
+  useEffect(() => { selectedFloorPillarsIdRef.current = selectedFloorPillarsId; rebuildModelRef.current(); }, [selectedFloorPillarsId]);
+  const deleteFloorPillarsRef = useRef(() => {});
   const [wallThickness, setWallThickness] = useState(0.35);
   const [ceilingOn, setCeilingOn] = useState(false);
   // mirrors ceilingEnabled across every floor (not just the active one) so
@@ -1825,6 +1832,7 @@ export default function RoomBuilder() {
         terraces: [], // {id, panel, u0, u1, side, depth} -- a flat roof-height deck with a perimeter railing, drawn along a wall like a balcony but with no stairs down to the ground
         columnBanks: [], // {id, panel, shape, u0, u1} -- a run of 5 evenly-spaced wall columns (square/round), drawn along a wall with the Wall tool
         suppBalconies: [], // {id, panel, u0, u1, side, platformHeight, railingCount} -- a thin floating platform on 2 corner pillars reaching the floor, a glass door, and a roof canopy, no stairs
+        floorPillars: [], // {id, x0, x1, z0, z1, shape} -- a floor-area rectangle filled with a grid of floor-to-(ceiling-1ft) pillars (round/square), drawn with the Wall tool's Pillar mode
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
@@ -2916,6 +2924,20 @@ export default function RoomBuilder() {
       return state.bumpouts.some((b) => b.panel === panelKey && rangesOverlap(u0, u1, b.u0, b.u1));
     }
     function panelU(info, p) { return info.lengthAxis === "x" ? p.x : p.z; }
+    // when a window/door is dragged (or a tap-door's default width is
+    // clamped) all the way out to a wall's own end -- a corner -- leave a
+    // small strip of solid wall there instead of running the opening flush
+    // to the edge.
+    const EDGE_WALL_MARGIN = 0.5 * FT;
+    function applyEdgeMargin(u0, u1, panelKey) {
+      const info = getPanelInfo(panelKey);
+      if (!info) return [u0, u1];
+      let nu0 = u0, nu1 = u1;
+      if (nu0 <= info.u0 + 0.02) nu0 = info.u0 + EDGE_WALL_MARGIN;
+      if (nu1 >= info.u1 - 0.02) nu1 = info.u1 - EDGE_WALL_MARGIN;
+      if (nu1 - nu0 < MIN_OPENING) return [u0, u1]; // wall too short for both margins -- leave it as drawn
+      return [nu0, nu1];
+    }
     function clampWallCoord(wallId, v) {
       const fp = state.footprint;
       if (wallId === "north") return Math.max(-MAX_COORD, Math.min(v, fp.zMax - MIN_SIZE));
@@ -2959,6 +2981,7 @@ export default function RoomBuilder() {
     let previewColumnBank = null; // {panel, shape, u0, u1} while dragging out a new run of wall columns
     let previewStair = null; // {x0,x1,z0,z1} while dragging out a new staircase footprint
     let previewRoom = null; // {x0,x1,z0,z1} while dragging out a new room's footprint
+    let previewPillarArea = null; // {x0,x1,z0,z1} while dragging out a new pillar-grid area
     let measureAnchors = []; // {point: Vector3, text} for the length overlay
     // synthetic door openings for whichever room is currently being built --
     // set by rebuildRoomEntry from computeRoomConnections() just before it,
@@ -3721,6 +3744,7 @@ export default function RoomBuilder() {
       renderBalconies();
       renderTerraces();
       renderSuppBalconies();
+      renderFloorPillars();
       renderCeiling(floorMeshesForCeiling);
     }
 
@@ -3822,6 +3846,18 @@ export default function RoomBuilder() {
       if (previewRoom && buildingRoomId == null) {
         const x0 = Math.min(previewRoom.x0, previewRoom.x1), x1 = Math.max(previewRoom.x0, previewRoom.x1);
         const z0 = Math.min(previewRoom.z0, previewRoom.z1), z1 = Math.max(previewRoom.z0, previewRoom.z1);
+        const w = x1 - x0, d = z1 - z0;
+        if (w > 0.02 && d > 0.02) {
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), selMatPreview);
+          mesh.position.set((x0 + x1) / 2, 0.03, (z0 + z1) / 2);
+          sceneGroup.add(mesh);
+        }
+      }
+      // live rectangle preview while dragging out a new pillar-grid area
+      // with the Wall tool's Pillar mode.
+      if (previewPillarArea && buildingRoomId == null) {
+        const x0 = Math.min(previewPillarArea.x0, previewPillarArea.x1), x1 = Math.max(previewPillarArea.x0, previewPillarArea.x1);
+        const z0 = Math.min(previewPillarArea.z0, previewPillarArea.z1), z1 = Math.max(previewPillarArea.z0, previewPillarArea.z1);
         const w = x1 - x0, d = z1 - z0;
         if (w > 0.02 && d > 0.02) {
           const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), selMatPreview);
@@ -4439,6 +4475,40 @@ export default function RoomBuilder() {
           const geo = axis === "x" ? new THREE.BoxGeometry(uLen, ROOF_THICKNESS, DEPTH) : new THREE.BoxGeometry(DEPTH, ROOF_THICKNESS, uLen);
           const w = toWorld((sb.u0 + sb.u1) / 2, DEPTH / 2);
           addPiece(geo, platMat, w.x, roofBottom + ROOF_THICKNESS / 2, w.z);
+        }
+      });
+    }
+
+    // a grid of floor-to-(ceiling-1ft) pillars filling a drawn floor area,
+    // evenly spaced roughly 3ft apart in both directions so the grid always
+    // reaches every edge of the dragged rectangle exactly, round or square.
+    const PILLAR_DIAMETER = 2 * FT;
+    const PILLAR_SPACING = 3 * FT;
+    const PILLAR_TOP_GAP = 1 * FT;
+    function renderFloorPillars() {
+      (state.floorPillars || []).forEach((p) => {
+        const isSelected = isPickableTarget && selectedFloorPillarsIdRef.current === p.id;
+        const mat = isSelected ? wallMatSelected : wallMat;
+        const pillarH = Math.max(0.1, state.height - PILLAR_TOP_GAP);
+        const w = Math.max(0.02, p.x1 - p.x0), d = Math.max(0.02, p.z1 - p.z0);
+        const countX = Math.max(1, Math.round(w / PILLAR_SPACING) + 1);
+        const countZ = Math.max(1, Math.round(d / PILLAR_SPACING) + 1);
+        for (let i = 0; i < countX; i++) {
+          const x = countX === 1 ? (p.x0 + p.x1) / 2 : p.x0 + w * (i / (countX - 1));
+          for (let j = 0; j < countZ; j++) {
+            const z = countZ === 1 ? (p.z0 + p.z1) / 2 : p.z0 + d * (j / (countZ - 1));
+            const geo = p.shape === "square"
+              ? new THREE.BoxGeometry(PILLAR_DIAMETER, pillarH, PILLAR_DIAMETER)
+              : new THREE.CylinderGeometry(PILLAR_DIAMETER / 2, PILLAR_DIAMETER / 2, pillarH, 24);
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, pillarH / 2, z);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            addEdges(mesh);
+            mesh.userData = { kind: "floorPillar", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            if (isPickableTarget) pickList.push(mesh);
+          }
         }
       });
     }
@@ -6091,6 +6161,22 @@ export default function RoomBuilder() {
         return;
       }
 
+      // a floor-pillar grid -- tapping any pillar in it selects the whole
+      // area (delete-only, like a terrace).
+      if (kind === "floorPillar") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedPropId(null);
+        setSelectedOpeningId(null);
+        setSelectedBalconyId(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedFloorPillarsId(obj.userData.id);
+        return;
+      }
+
       // A window or door cutout in a wall -- selectable from any tool (not
       // just Window/Door), same as stairs and balconies. There's more
       // parametric control planned for doors specifically down the line;
@@ -6156,6 +6242,20 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
           const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
           dragState = { type: "stair-draw", plane, x0: hit.point.x, z0: hit.point.z, x1: hit.point.x, z1: hit.point.z };
+          capture(e);
+        }
+        return;
+      }
+      // Wall tool's Pillar mode: tapping the plain floor and dragging fills
+      // that rectangle with a grid of pillars (see renderFloorPillars).
+      if (toolRef.current === "move" && pillarShapeRef.current !== "none") {
+        if (kind === "floor") {
+          const ownerRoomId = obj.userData.ownerRoomId ?? null;
+          if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+          pushUndo();
+          setSelectedFloorPillarsId(null);
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "pillar-area-draw", plane, x0: hit.point.x, z0: hit.point.z, x1: hit.point.x, z1: hit.point.z };
           capture(e);
         }
         return;
@@ -6853,6 +6953,17 @@ export default function RoomBuilder() {
         dragState.z1 = snapped.z;
         previewRoom = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
         rebuild();
+      } else if (dragState.type === "pillar-area-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const fp = state.footprint;
+        const margin = (state.thickness || 0.35) / 2 + 0.02;
+        const clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, pt.x));
+        const clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, pt.z));
+        dragState.x1 = snapValue(clampedX);
+        dragState.z1 = snapValue(clampedZ);
+        previewPillarArea = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
+        rebuild();
       }
     }
 
@@ -6908,6 +7019,7 @@ export default function RoomBuilder() {
         let u0 = u - doorWidth / 2, u1 = u + doorWidth / 2;
         if (u0 < info.u0) { u0 = info.u0; u1 = u0 + doorWidth; }
         if (u1 > info.u1) { u1 = info.u1; u0 = u1 - doorWidth; }
+        [u0, u1] = applyEdgeMargin(u0, u1, dragState.panelKey);
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
           state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current });
@@ -6957,8 +7069,8 @@ export default function RoomBuilder() {
           }
         }
       } else if (dragState.type === "opening-draw") {
-        const u0 = Math.min(dragState.u0, dragState.u1);
-        const u1 = Math.max(dragState.u0, dragState.u1);
+        let [u0, u1] = [Math.min(dragState.u0, dragState.u1), Math.max(dragState.u0, dragState.u1)];
+        [u0, u1] = applyEdgeMargin(u0, u1, dragState.panelKey);
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           // a new opening that overlaps existing ones on the same panel
           // replaces them, rather than being blocked -- drawing a wider
@@ -6975,8 +7087,8 @@ export default function RoomBuilder() {
         }
         previewOpening = null;
       } else if (dragState.type === "door-draw") {
-        const u0 = Math.min(dragState.u0, dragState.u1);
-        const u1 = Math.max(dragState.u0, dragState.u1);
+        let [u0, u1] = [Math.min(dragState.u0, dragState.u1), Math.max(dragState.u0, dragState.u1)];
+        [u0, u1] = applyEdgeMargin(u0, u1, dragState.panelKey);
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
           state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current });
@@ -7092,6 +7204,14 @@ export default function RoomBuilder() {
           switchActiveRoom(id);
         }
         previewRoom = null;
+      } else if (dragState.type === "pillar-area-draw") {
+        const x0 = Math.min(dragState.x0, dragState.x1), x1 = Math.max(dragState.x0, dragState.x1);
+        const z0 = Math.min(dragState.z0, dragState.z1), z1 = Math.max(dragState.z0, dragState.z1);
+        if (x1 - x0 >= MIN_STAIR_SIZE && z1 - z0 >= MIN_STAIR_SIZE) {
+          if (!state.floorPillars) state.floorPillars = [];
+          state.floorPillars.push({ id: idSeq++, x0, x1, z0, z1, shape: pillarShapeRef.current });
+        }
+        previewPillarArea = null;
       }
 
       dragState = null;
@@ -7511,6 +7631,16 @@ export default function RoomBuilder() {
       rebuild();
     }
     deleteTerraceRef.current = deleteActiveTerrace;
+
+    function deleteActiveFloorPillars() {
+      const id = selectedFloorPillarsIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.floorPillars = (state.floorPillars || []).filter((p) => p.id !== id);
+      setSelectedFloorPillarsId(null);
+      rebuild();
+    }
+    deleteFloorPillarsRef.current = deleteActiveFloorPillars;
 
     function setActiveSuppBalconyHeight(h) {
       const id = selectedSuppBalconyIdRef.current;
@@ -9528,7 +9658,33 @@ export default function RoomBuilder() {
                 <button
                   key={s}
                   className={`rb-btn ${columnShape === s ? "active" : ""}`}
-                  onClick={() => setColumnShape(s)}
+                  onClick={() => {
+                    setColumnShape(s);
+                    if (s !== "none") setPillarShape("none");
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {tool === "move" && selectedPanel == null && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Pillar</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[
+                { key: "none", label: "None" },
+                { key: "round", label: "Round" },
+                { key: "square", label: "Square" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${pillarShape === s ? "active" : ""}`}
+                  onClick={() => {
+                    setPillarShape(s);
+                    if (s !== "none") setColumnShape("none");
+                  }}
                 >
                   {label}
                 </button>
@@ -9979,6 +10135,15 @@ export default function RoomBuilder() {
             <div style={{ display: "flex", gap: 8 }}>
               <button className="rb-btn" onClick={() => deleteTerraceRef.current()}>Delete</button>
               <button className="rb-btn" onClick={() => setSelectedTerraceId(null)}>Done</button>
+            </div>
+          </div>
+        )}
+        {selectedFloorPillarsId != null && (
+          <div className="ribbon-group" style={{ minWidth: 160 }}>
+            <span className="ribbon-label">Pillars selected</span>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="rb-btn" onClick={() => deleteFloorPillarsRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedFloorPillarsId(null)}>Done</button>
             </div>
           </div>
         )}
