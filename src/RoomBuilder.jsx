@@ -7,6 +7,7 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
+import DEFAULT_PRESET_SCENES from "./defaultPresets.json";
 
 const WALL_HEIGHT = 4.8768; // 16 ft
 const MIN_WALL_HEIGHT = 0.5;
@@ -844,6 +845,14 @@ export default function RoomBuilder() {
   function loadRecentScene(entry) {
     currentSceneIdRef.current = entry.id;
     sceneIoApiRef.current.load(entry.snapshot);
+  }
+  // the 5 built-in starting-point presets are read-only, so loading one
+  // starts a fresh scene id (like "New scene" does) rather than reusing the
+  // preset's own id -- edits autosave as their own new Recent entry instead
+  // of ever overwriting the preset.
+  function loadPresetScene(preset) {
+    currentSceneIdRef.current = `scene_${Date.now()}`;
+    sceneIoApiRef.current.load(preset.snapshot);
   }
   const [lightAzimuth, setLightAzimuth] = useState(45);
   const lightAzimuthApiRef = useRef(() => {});
@@ -8596,7 +8605,7 @@ export default function RoomBuilder() {
 
   const RIBBON_HEIGHT = 48;
   const TOPBAR_HEIGHT = 44;
-  const RECENT_HEIGHT = 120;
+  const RECENT_HEIGHT = 150;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
   const panelResizeRef = useRef(null);
   const layersScrollRef = useRef(null);
@@ -9089,8 +9098,19 @@ export default function RoomBuilder() {
           ref={recentScrollInnerRef}
           style={{ position: "static", flex: 1, minHeight: 0, display: "flex", flexWrap: "wrap", gap: 6, alignContent: "flex-start", padding: "0 34px 10px 9px" }}
         >
+          {DEFAULT_PRESET_SCENES.map((preset) => (
+            <button
+              key={preset.id}
+              className="rb-btn"
+              onClick={() => loadPresetScene(preset)}
+              title={preset.name}
+              style={{ padding: 2, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
+            >
+              <img src={preset.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
+            </button>
+          ))}
           {recentScenes.length === 0 && (
-            <span style={{ fontSize: 9, color: "var(--text-tertiary)" }}>Autosaves every 15s</span>
+            <span style={{ fontSize: 9, color: "var(--text-tertiary)", flexBasis: "100%" }}>Autosaves every 15s</span>
           )}
           {recentScenes.map((entry) => (
             <button
