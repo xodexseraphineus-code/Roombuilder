@@ -760,6 +760,9 @@ export default function RoomBuilder() {
   const [propsShape, setPropsShape] = useState("cube");
   const propsShapeRef = useRef(propsShape);
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
+  const [columnShape, setColumnShape] = useState("none");
+  const columnShapeRef = useRef(columnShape);
+  useEffect(() => { columnShapeRef.current = columnShape; }, [columnShape]);
   const [wallThickness, setWallThickness] = useState(0.35);
   const [ceilingOn, setCeilingOn] = useState(false);
   // mirrors ceilingEnabled across every floor (not just the active one) so
@@ -870,7 +873,7 @@ export default function RoomBuilder() {
   const [selectedPropId, setSelectedPropId] = useState(null); // a placed sphere/cube/cone/cylinder prop
   const selectedPropIdRef = useRef(selectedPropId);
   useEffect(() => { selectedPropIdRef.current = selectedPropId; rebuildModelRef.current(); }, [selectedPropId]);
-  const [balconyStairHeight, setBalconyStairHeight] = useState(3 * FT);
+  const [balconyStairHeight, setBalconyStairHeight] = useState(5 * FT);
   const balconyHeightApiRef = useRef({ setHeight: () => {} });
   const [balconyPlatformWidth, setBalconyPlatformWidth] = useState(10 * FT);
   const balconyWidthApiRef = useRef({ setWidth: () => {} });
@@ -1812,6 +1815,7 @@ export default function RoomBuilder() {
         curvedCorners: { enabled: false, radius: 0 }, // rounds the 4 corners of the base footprint's external walls
         balconies: [], // {id, panel, u0, u1, dividerAxis} -- a staircase+platform+pillars assembly with a window/door cutout in the wall behind it
         terraces: [], // {id, panel, u0, u1, side, depth} -- a flat roof-height deck with a perimeter railing, drawn along a wall like a balcony but with no stairs down to the ground
+        columnBanks: [], // {id, panel, shape, u0, u1} -- a run of 5 evenly-spaced wall columns (square/round), drawn along a wall with the Wall tool
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
@@ -1917,6 +1921,7 @@ export default function RoomBuilder() {
       pinchState = null;
       previewSelection = null;
       previewOpening = null;
+      previewColumnBank = null;
       setSelectedPanel(null);
       setSelectedRoomId(null);
       const activeEntry = floors.find((f) => f.id === activeFloorId);
@@ -2010,6 +2015,32 @@ export default function RoomBuilder() {
         else uMax = Math.min(uMax, clip);
       });
       return [uMin, uMax];
+    }
+
+    // if a balcony's drawn span reaches all the way to one of its wall's
+    // own ends (a real building corner rather than just a spot along a
+    // flat run), it wraps 90° onto the adjacent wall sharing that corner
+    // -- a short perpendicular wing roughly 5ft long. Reuses the same
+    // CORNER_MAP the curved-corner clipping above uses to find which wall
+    // shares which corner. Only exterior base walls (not partitions or
+    // pulled-out bump-out faces) support this.
+    const BALCONY_WRAP_LEN = 5 * FT;
+    const BALCONY_WRAP_THRESHOLD = 1.5 * FT;
+    function computeBalconyWraps(panelKey, u0, u1) {
+      if (!wallDefs[panelKey]) return [];
+      const [spanMin, spanMax] = wallSpan(panelKey);
+      const wraps = [];
+      [["min", u0 - spanMin], ["max", spanMax - u1]].forEach(([edge, gap]) => {
+        if (gap > BALCONY_WRAP_THRESHOLD) return;
+        const mapping = CORNER_MAP[panelKey + ":" + edge];
+        if (!mapping) return;
+        const [adjPanel, adjEdge] = mapping;
+        const [adjMin, adjMax] = wallSpan(adjPanel);
+        const wingU0 = adjEdge === "min" ? adjMin : Math.max(adjMin, adjMax - BALCONY_WRAP_LEN);
+        const wingU1 = adjEdge === "min" ? Math.min(adjMax, adjMin + BALCONY_WRAP_LEN) : adjMax;
+        if (wingU1 - wingU0 > 1 * FT) wraps.push({ corner: adjEdge, panel: adjPanel, u0: wingU0, u1: wingU1 });
+      });
+      return wraps;
     }
 
     // resolves ANY panel key (base wall, pulled-out section, or partition) into
@@ -2260,20 +2291,21 @@ export default function RoomBuilder() {
       cone: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cone, ...PROP_PLASTIC }),
       cube: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cube, ...PROP_PLASTIC }),
       cylinder: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cylinder, ...PROP_PLASTIC }),
-      colSquare: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.colSquare, roughness: 0.75, metalness: 0.02 }),
-      colRound: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.colRound, roughness: 0.75, metalness: 0.02 }),
-      jailWall: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.jailWall, roughness: 0.45, metalness: 0.75 }),
+      // columns and the jail-cell wall read as part of the building rather
+      // than a colored prop, so they share the same material as the walls
+      // themselves rather than their own tint.
+      colSquare: wallMat,
+      colRound: wallMat,
+      jailWall: wallMat,
     };
     const PROP_HEIGHT = 8 * FT;
-    // shared, dark-metal frame for a round window's ring, and the slat
-    // material for a louver window -- both persistent (excluded from
-    // disposeObject below) since they're reused across every rebuild.
-    const windowFrameMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2e, roughness: 0.5, metalness: 0.35 });
-    const louverMat = new THREE.MeshStandardMaterial({ color: 0xdedad0, roughness: 0.7, metalness: 0.05 });
+    // the round/louver window trim and the arched/revolving/turnstile door
+    // hardware all read as part of the building too -- same wall material,
+    // not a separate metal/glass finish.
+    const windowFrameMat = wallMat;
+    const louverMat = wallMat;
     const LOUVER_TILT = THREE.MathUtils.degToRad(35);
-    // dark metal for the arcade/revolving-door/turnstile assemblies --
-    // architectural hardware rather than a colored prop.
-    const doorMetalMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2e, roughness: 0.4, metalness: 0.6 });
+    const doorMetalMat = wallMat;
 
     let hiddenLineModeOn = false;
     function addEdges(mesh) {
@@ -2428,7 +2460,7 @@ export default function RoomBuilder() {
       const uMid = (c.u0 + c.u1) / 2;
       const yMid = (bottomY + topY) / 2;
       const radius = Math.max(0.08, Math.min(c.u1 - c.u0, topY - bottomY) / 2 * 0.86);
-      const glass = new THREE.Mesh(new THREE.CircleGeometry(radius, 32), glassMat);
+      const glass = new THREE.Mesh(new THREE.CircleGeometry(radius, 32), windowFrameMat);
       glass.position.y = yMid;
       glass.receiveShadow = true;
       glass.userData = { kind: "glass" };
@@ -2489,52 +2521,142 @@ export default function RoomBuilder() {
       sceneGroup.add(placeOnWall(mesh, lengthAxis, coord, midU));
     }
 
-    // a cylindrical enclosure with 3 glass wings pivoting through a center
-    // post, filling the doorway in place of a door leaf -- purely visual,
-    // the rectangular opening behind it stays the actual pick/resize target.
-    function addRevolvingDoorAssembly(c, lengthAxis, coord, bottom, top) {
-      const width = c.u1 - c.u0;
-      const uMid = (c.u0 + c.u1) / 2;
-      const radius = Math.max(0.3, width / 2 * 0.92);
+    // a center post with 3 wall-colored wing panels pivoting around it,
+    // filling the doorway in place of a door leaf -- purely visual, the
+    // rectangular opening behind it stays the actual pick/resize target.
+    // Sized to a fixed standard door width rather than scaling to whatever
+    // span was drawn -- renderRevolvingDoorBank below tiles as many of
+    // these (with wall spacers between) as fit the drawn span.
+    const REVOLVING_POST_RADIUS = 0.25 * FT; // half a foot diameter
+    const REVOLVING_UNIT_WIDTH = 6 * FT;     // standard door width
+    const REVOLVING_SPACER = 1 * FT;
+    function addRevolvingDoorAssembly(lengthAxis, coord, uMid, bottom, top) {
+      const radius = Math.max(0.3, (REVOLVING_UNIT_WIDTH / 2) * 0.92);
       const height = Math.max(0.3, top - bottom);
       const midY = (bottom + top) / 2;
       const group = new THREE.Group();
-      const drum = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, height, 24, 1, true), glassMat);
-      drum.position.y = midY;
-      group.add(drum);
       for (let i = 0; i < 3; i++) {
-        const wing = new THREE.Mesh(new THREE.BoxGeometry(radius * 2 * 0.94, height * 0.94, 0.03), glassMat);
+        const wing = new THREE.Mesh(new THREE.BoxGeometry(radius * 2 * 0.94, height * 0.94, 0.03), windowFrameMat);
         wing.position.y = midY;
         wing.rotation.y = (i / 3) * Math.PI;
+        wing.castShadow = true;
         group.add(wing);
       }
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, height, 12), doorMetalMat);
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(REVOLVING_POST_RADIUS, REVOLVING_POST_RADIUS, height, 16), doorMetalMat);
       post.position.y = midY;
       group.add(post);
       sceneGroup.add(placeOnWall(group, lengthAxis, coord, uMid));
     }
 
-    // a waist-height post with 3 rotating arms, filling the doorway in
-    // place of a door leaf.
-    function addTurnstileAssembly(c, lengthAxis, coord, bottom, top) {
+    // tiles fixed-width revolving-door units edge-to-edge across the
+    // drawn span, with a solid 1ft wall spacer between each unit (and
+    // filling any leftover margin at the ends with wall too).
+    function renderRevolvingDoorBank(c, lengthAxis, coord, bottom, top, addSeg) {
       const width = c.u1 - c.u0;
-      const uMid = (c.u0 + c.u1) / 2;
+      const count = Math.max(1, Math.floor((width + REVOLVING_SPACER) / (REVOLVING_UNIT_WIDTH + REVOLVING_SPACER)));
+      const totalWidth = count * REVOLVING_UNIT_WIDTH + (count - 1) * REVOLVING_SPACER;
+      const startU = c.u0 + Math.max(0, (width - totalWidth) / 2);
+      if (startU > c.u0 + 0.02) addSeg(c.u0, startU, bottom, top);
+      if (c.u1 - (startU + totalWidth) > 0.02) addSeg(startU + totalWidth, c.u1, bottom, top);
+      for (let i = 0; i < count; i++) {
+        const unitU0 = startU + i * (REVOLVING_UNIT_WIDTH + REVOLVING_SPACER);
+        const unitU1 = unitU0 + REVOLVING_UNIT_WIDTH;
+        addRevolvingDoorAssembly(lengthAxis, coord, (unitU0 + unitU1) / 2, bottom, top);
+        if (i < count - 1) addSeg(unitU1, unitU1 + REVOLVING_SPACER, bottom, top);
+      }
+    }
+
+    // a waist-height post with 3 rotating arms, filling the doorway in
+    // place of a door leaf. Fixed-size regardless of the drawn span --
+    // renderTurnstileBank below tiles as many of these, placed directly
+    // adjacent to one another, as fit the drawn span.
+    const TURNSTILE_POST_RADIUS = 0.25 * FT;  // half a foot diameter
+    const TURNSTILE_ARM_RADIUS = (1 / 6) * FT; // ~4in diameter
+    const TURNSTILE_ARM_LENGTH = 1 * FT;
+    const TURNSTILE_UNIT_WIDTH = TURNSTILE_ARM_LENGTH * 2;
+    function addTurnstileAssembly(lengthAxis, coord, uMid, bottom, top) {
       const height = Math.max(0.3, top - bottom);
       const armY = Math.min(top - 0.1, bottom + 0.9);
-      const armLen = Math.max(0.2, width / 2 * 0.85);
       const group = new THREE.Group();
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, height, 12), doorMetalMat);
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(TURNSTILE_POST_RADIUS, TURNSTILE_POST_RADIUS, height, 16), doorMetalMat);
       post.position.y = (bottom + top) / 2;
       group.add(post);
       for (let i = 0; i < 3; i++) {
         const pivot = new THREE.Group();
-        const arm = new THREE.Mesh(new THREE.BoxGeometry(armLen, 0.04, 0.04), doorMetalMat);
-        arm.position.set(armLen / 2, armY, 0);
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(TURNSTILE_ARM_RADIUS, TURNSTILE_ARM_RADIUS, TURNSTILE_ARM_LENGTH, 10), doorMetalMat);
+        arm.rotation.z = Math.PI / 2;
+        arm.position.set(TURNSTILE_ARM_LENGTH / 2, armY, 0);
+        arm.castShadow = true;
         pivot.add(arm);
         pivot.rotation.y = (i / 3) * Math.PI * 2;
         group.add(pivot);
       }
       sceneGroup.add(placeOnWall(group, lengthAxis, coord, uMid));
+    }
+
+    // tiles fixed-size turnstiles directly adjacent to one another (no
+    // gap) to fill the drawn span from start to finish.
+    function renderTurnstileBank(c, lengthAxis, coord, bottom, top) {
+      const width = c.u1 - c.u0;
+      const count = Math.max(1, Math.floor(width / TURNSTILE_UNIT_WIDTH));
+      const totalWidth = count * TURNSTILE_UNIT_WIDTH;
+      const startCenter = c.u0 + (width - totalWidth) / 2 + TURNSTILE_UNIT_WIDTH / 2;
+      for (let i = 0; i < count; i++) {
+        addTurnstileAssembly(lengthAxis, coord, startCenter + i * TURNSTILE_UNIT_WIDTH, bottom, top);
+      }
+    }
+
+    // a barred jail-cell panel spanning the full drawn doorway width, used
+    // as a door style rather than a floor-tapped prop.
+    function addJailWallDoor(c, lengthAxis, coord, bottom, top) {
+      const width = c.u1 - c.u0;
+      const uMid = (c.u0 + c.u1) / 2;
+      const d = state.thickness * 0.6;
+      const h = Math.max(0.1, top - bottom);
+      const barR = 0.02;
+      const barGap = Math.max(0.12, barR * 5);
+      const barCount = Math.max(2, Math.floor(width / barGap) + 1);
+      const group = new THREE.Group();
+      for (let i = 0; i < barCount; i++) {
+        const bx = -width / 2 + (barCount === 1 ? width / 2 : (i * width) / (barCount - 1));
+        const bar = new THREE.Mesh(new THREE.CylinderGeometry(barR, barR, h * 0.98, 8), doorMetalMat);
+        bar.position.set(bx, bottom + h / 2, 0);
+        bar.castShadow = true;
+        group.add(bar);
+      }
+      [bottom + 0.03, top - 0.03].forEach((ry) => {
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(width, 0.06, d), doorMetalMat);
+        rail.position.set(0, ry, 0);
+        group.add(rail);
+      });
+      sceneGroup.add(placeOnWall(group, lengthAxis, coord, uMid));
+    }
+
+    // 5 evenly-spaced wall columns (square or round), floor to ceiling,
+    // spanning a drawn wall span -- purely decorative, doesn't cut the
+    // wall the way a window/door opening does.
+    const COLUMN_BANK_COUNT = 5;
+    const COLUMN_SIZE = 1 * FT;
+    function renderColumnBank(c, lengthAxis, coord, H, thickAxis, normal, T) {
+      const width = c.u1 - c.u0;
+      const spacing = width / COLUMN_BANK_COUNT;
+      // sit proud on the room-interior face of the wall rather than buried
+      // inside its thickness, where a floor-to-ceiling column of about the
+      // same depth as the wall would otherwise be visually indistinguishable
+      // from the wall itself.
+      const normalComp = thickAxis === "z" ? normal.z : normal.x;
+      const adjCoord = coord - normalComp * (T / 2 + COLUMN_SIZE / 2);
+      for (let i = 0; i < COLUMN_BANK_COUNT; i++) {
+        const uCenter = c.u0 + spacing * (i + 0.5);
+        const geo = c.shape === "round"
+          ? new THREE.CylinderGeometry(COLUMN_SIZE / 2, COLUMN_SIZE / 2, H, 20)
+          : new THREE.BoxGeometry(COLUMN_SIZE, H, COLUMN_SIZE);
+        const mesh = new THREE.Mesh(geo, wallMat);
+        mesh.position.y = H / 2;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        sceneGroup.add(placeOnWall(mesh, lengthAxis, adjCoord, uCenter));
+      }
     }
 
     function renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion) {
@@ -2557,14 +2679,28 @@ export default function RoomBuilder() {
         if (doorTop < H - 0.02) addSeg(c.u0, c.u1, doorTop, H);
         addOpeningHotspotAndHighlight(c, lengthAxis, coord, doorBottom, doorTop);
         if (c.style === "arched") addArchedDoorHead(c, lengthAxis, coord, doorBottom, doorTop);
-        if (c.style === "revolving") { addRevolvingDoorAssembly(c, lengthAxis, coord, doorBottom, doorTop); return; }
-        if (c.style === "turnstile") { addTurnstileAssembly(c, lengthAxis, coord, doorBottom, doorTop); return; }
+        if (c.style === "revolving") { renderRevolvingDoorBank(c, lengthAxis, coord, doorBottom, doorTop, addSeg); return; }
+        if (c.style === "turnstile") { renderTurnstileBank(c, lengthAxis, coord, doorBottom, doorTop); return; }
+        if (c.style === "jailWall") { addJailWallDoor(c, lengthAxis, coord, doorBottom, doorTop); return; }
         // "split door in two" -- a single center mullion, like a French
         // door, rather than the window system's full column/row grid.
         if (Math.round(c.dividers || 0) >= 1) {
           const mid = (c.u0 + c.u1) / 2;
           addMullion(mid - 0.021, mid + 0.021, doorBottom, doorTop);
         }
+        return;
+      }
+      // round windows anchor their bottom edge at a fixed 5ft off the
+      // floor (roughly mid-wall) instead of the generic vertical centering
+      // every other window style uses below.
+      if (c.style === "round") {
+        const diameter = Math.max(0.3, Math.min(c.u1 - c.u0, c.height ?? DEFAULT_OPENING_HEIGHT));
+        const roundBottom = Math.min(5 * FT, Math.max(0, H - diameter - 0.05));
+        const roundTop = Math.min(H, roundBottom + diameter);
+        addSeg(c.u0, c.u1, 0, roundBottom);
+        addSeg(c.u0, c.u1, roundTop, H);
+        addOpeningHotspotAndHighlight(c, lengthAxis, coord, roundBottom, roundTop);
+        addRoundWindow(c, lengthAxis, coord, roundBottom, roundTop);
         return;
       }
       const bottomOverride = c.bottomOverride;
@@ -2577,7 +2713,6 @@ export default function RoomBuilder() {
       addSeg(c.u0, c.u1, topY, H);
       addOpeningHotspotAndHighlight(c, lengthAxis, coord, bottomY, topY);
 
-      if (c.style === "round") { addRoundWindow(c, lengthAxis, coord, bottomY, topY); return; }
       if (c.style === "louver") { addLouverWindow(c, lengthAxis, coord, bottomY, topY); return; }
 
       const n = Math.max(0, Math.round(c.dividers || 0));
@@ -2707,6 +2842,7 @@ export default function RoomBuilder() {
     let pickList = [];
     let previewSelection = null;
     let previewOpening = null;
+    let previewColumnBank = null; // {panel, shape, u0, u1} while dragging out a new run of wall columns
     let previewStair = null; // {x0,x1,z0,z1} while dragging out a new staircase footprint
     let previewRoom = null; // {x0,x1,z0,z1} while dragging out a new room's footprint
     let measureAnchors = []; // {point: Vector3, text} for the length overlay
@@ -2720,6 +2856,12 @@ export default function RoomBuilder() {
 
     function defaultStairSteps(height) {
       return Math.max(2, Math.round((height / FT) * 2));
+    }
+
+    function columnBanksFor(panelKey) {
+      const list = (state.columnBanks || []).filter((c) => c.panel === panelKey).map((c) => ({ ...c }));
+      if (previewColumnBank && previewColumnBank.panel === panelKey) list.push({ ...previewColumnBank, id: "__preview__" });
+      return list;
     }
 
     function openingsFor(panelKey) {
@@ -2884,6 +3026,7 @@ export default function RoomBuilder() {
         cursor = c.u1;
       });
       if (cursor < wallU1 - 0.001) addSeg(cursor, wallU1, 0, H);
+      columnBanksFor(panelKey).forEach((cb) => renderColumnBank(cb, lengthAxis, coord, H, thickAxis, normal, T));
       addWallHeightHandle(panelKey, lengthAxis, coord, (wallU0 + wallU1) / 2, H);
 
       selectionsFor(panelKey).forEach((sel) => {
@@ -3720,6 +3863,15 @@ export default function RoomBuilder() {
         state.openings.push({ id: idSeq++, panel: bal.panel, u0: rightWinU0, u1: bal.u1, height: winHeight, dividers: dividersForSpan(rightSpan), dividerAxis: bal.dividerAxis, bottomOverride: bal.platformHeight, fromBalcony: bal.id });
       }
       state.openings.push({ id: idSeq++, panel: bal.panel, u0: doorU0, u1: doorU1, height: doorHeightRef.current, isDoor: true, bottomOverride: bal.platformHeight, fromBalcony: bal.id });
+      // each 90° wraparound wing gets its own door cut into the wall it
+      // wraps onto, centered along that wing's own short span.
+      (bal.wraps || []).forEach((w) => {
+        const wMid = (w.u0 + w.u1) / 2;
+        const wDoorW = Math.min(doorW, (w.u1 - w.u0) - 0.6);
+        if (wDoorW > 0.5) {
+          state.openings.push({ id: idSeq++, panel: w.panel, u0: wMid - wDoorW / 2, u1: wMid + wDoorW / 2, height: doorHeightRef.current, isDoor: true, bottomOverride: bal.platformHeight, fromBalcony: bal.id });
+        }
+      });
     }
 
     // the staircase-balcony assembly: a low 3-step stair leading up to a
@@ -3810,7 +3962,7 @@ export default function RoomBuilder() {
           return mesh;
         }
         const u0 = bal.u0, u1 = bal.u1;
-        const platformHeight = bal.platformHeight || 3 * FT;
+        const platformHeight = bal.platformHeight || 5 * FT;
         const PLATFORM_D = bal.platformWidth || DEFAULT_PLATFORM_D;
         // platform, right against the wall
         addBox(u0, u1, 0, PLATFORM_D, 0, platformHeight, floorLikeMat);
@@ -3890,6 +4042,77 @@ export default function RoomBuilder() {
         if (!bal.ceilingRemoved) {
           addBox(u0, u1, 0, PLATFORM_D, ceilingAttachY, state.height - CEILING_DROP, ceilingMat, "balcony-ceiling");
         }
+        // 90° wraparound wing(s) -- when the drawn span reached one of this
+        // wall's own corners, a short perpendicular platform continues onto
+        // the adjacent wall, with its own railing/pillars and (via
+        // regenerateBalconyOpenings) its own door cut into that wall.
+        (bal.wraps || []).forEach((w) => {
+          const wInfo = getPanelInfo(w.panel);
+          if (!wInfo) return;
+          const wAxis = wInfo.lengthAxis;
+          function wToWorld(u, d) {
+            if (wAxis === "x") return { x: u, z: wInfo.coord + wInfo.normal.z * d };
+            return { x: wInfo.coord + wInfo.normal.x * d, z: u };
+          }
+          const wu0 = w.u0, wu1 = w.u1;
+          const wUlen = Math.max(0.02, wu1 - wu0);
+          const wGeo = wAxis === "x" ? new THREE.BoxGeometry(wUlen, platformHeight, PLATFORM_D) : new THREE.BoxGeometry(PLATFORM_D, platformHeight, wUlen);
+          const wMesh = new THREE.Mesh(wGeo, floorLikeMat);
+          const wc = wToWorld((wu0 + wu1) / 2, PLATFORM_D / 2);
+          wMesh.position.set(wc.x, platformHeight / 2, wc.z);
+          wMesh.castShadow = true;
+          wMesh.receiveShadow = true;
+          addEdges(wMesh);
+          wMesh.userData = { kind: "balcony", id: bal.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(wMesh);
+          if (isPickableTarget) pickList.push(wMesh);
+          if (!bal.pillarsRemoved) {
+            // the near end (at the corner) butts against the main platform
+            // and needs no rail; only the outer edge and the free far end do.
+            const nearU = w.corner === "min" ? wu0 : wu1;
+            const farU = w.corner === "min" ? wu1 : wu0;
+            const half = PILLAR_SIZE / 2;
+            const outerLen = Math.abs(farU - nearU) - half;
+            const totalLen = Math.max(0.01, outerLen + (PLATFORM_D - half));
+            const count = Math.max(1, Math.round(totalLen / DEFAULT_PILLAR_SPACING));
+            const dir = farU >= nearU ? 1 : -1;
+            const nearEdgeU = nearU + dir * half;
+            const points = [];
+            for (let i = 0; i <= count; i++) {
+              const t = (i / count) * totalLen;
+              if (t <= outerLen) points.push([nearEdgeU + dir * t, PLATFORM_D - half]);
+              else points.push([farU - dir * half, PLATFORM_D - half - (t - outerLen)]);
+            }
+            points.forEach(([cu, cd]) => {
+              const wp = wToWorld(cu, cd);
+              const geo = new THREE.BoxGeometry(PILLAR_SIZE, pillarTop - platformHeight, PILLAR_SIZE);
+              const mesh = new THREE.Mesh(geo, pillarMatActive);
+              mesh.position.set(wp.x, (platformHeight + pillarTop) / 2, wp.z);
+              mesh.castShadow = true;
+              mesh.receiveShadow = true;
+              addEdges(mesh);
+              mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+              sceneGroup.add(mesh);
+              if (isPickableTarget) pickList.push(mesh);
+            });
+            for (let i = 0; i < points.length - 1; i++) {
+              const wa = wToWorld(points[i][0], points[i][1]), wb = wToWorld(points[i + 1][0], points[i + 1][1]);
+              const dx = wb.x - wa.x, dz = wb.z - wa.z;
+              const len = Math.hypot(dx, dz);
+              if (len < 0.02) continue;
+              const geo = new THREE.BoxGeometry(len, RAIL_H, PILLAR_SIZE);
+              const mesh = new THREE.Mesh(geo, pillarMatActive);
+              mesh.position.set((wa.x + wb.x) / 2, pillarTop + RAIL_H / 2, (wa.z + wb.z) / 2);
+              mesh.rotation.y = Math.atan2(-dz, dx);
+              mesh.castShadow = true;
+              mesh.receiveShadow = true;
+              addEdges(mesh);
+              mesh.userData = { kind: "balcony-pillar", id: bal.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+              sceneGroup.add(mesh);
+              if (isPickableTarget) pickList.push(mesh);
+            }
+          }
+        });
         // draggable edge bars at the platform's two side edges (u0/u1) --
         // only while the whole assembly (not just a pillar or the ceiling)
         // is selected, spanning corner-post-style from the ground to the
@@ -4545,6 +4768,12 @@ export default function RoomBuilder() {
     // immediately without needing a rebuild.
     function applyPropColors(colors) {
       Object.keys(propMats).forEach((kind) => {
+        // columns and the jail wall alias wallMat itself (see propMats)
+        // rather than owning a color of their own, so they always match
+        // the walls automatically -- recoloring them here would mutate
+        // wallMat and repaint every actual wall to whatever their "prop"
+        // tone happened to be.
+        if (kind === "colSquare" || kind === "colRound" || kind === "jailWall") return;
         propMats[kind].color.set(colors ? colors[kind] : PROP_DEFAULT_COLORS[kind]);
       });
     }
@@ -4836,6 +5065,7 @@ export default function RoomBuilder() {
       pinchState = null;
       previewSelection = null;
       previewOpening = null;
+      previewColumnBank = null;
       previewStair = null;
       savedView = { viewMode, target: target.clone(), radius, theta, phi, fov: camera.fov };
       walkFloorId = entry.id;
@@ -5582,7 +5812,7 @@ export default function RoomBuilder() {
         setSelectedBalconyId(obj.userData.id);
         setSelectedBalconyPart(kind === "balcony-pillar" ? "pillars" : kind === "balcony-ceiling" ? "ceiling" : null);
         if (bal) {
-          const ph = bal.platformHeight || 3 * FT;
+          const ph = bal.platformHeight || 5 * FT;
           setBalconyStairHeight(ph);
           setBalconyPlatformWidth(bal.platformWidth || 10 * FT);
           setBalconyPillarHeight(bal.pillarHeight != null ? bal.pillarHeight : 3 * FT);
@@ -5774,6 +6004,11 @@ export default function RoomBuilder() {
         const normalComponent2 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
         const side2 = Math.sign((thickCoord2 - info.coord) * normalComponent2) || 1;
         dragState = { type: "pending-terrace", panelKey, info, hitPoint: hp, side: side2, startScreen: { x: e.clientX, y: e.clientY } };
+      } else if (toolRef.current === "move" && columnShapeRef.current !== "none") {
+        // a run of columns is drawn along a wall exactly like a window --
+        // tap and drag to mark its span -- rather than the Wall tool's
+        // usual perpendicular push/pull-the-wall-thickness gesture.
+        dragState = { type: "pending-column", panelKey, info, hitPoint: hp, startScreen: { x: e.clientX, y: e.clientY } };
       } else {
         dragState = {
           type: "pending", panelKey, info, hitPoint: hp,
@@ -6021,6 +6256,21 @@ export default function RoomBuilder() {
         return;
       }
 
+      if (dragState.type === "pending-column") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "column-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
+          previewColumnBank = { panel: dragState.panelKey, shape: columnShapeRef.current, u0: u, u1: u };
+          rebuild();
+        }
+        return;
+      }
+
       const ray = rayFromEvent(e);
 
       if (dragState.type === "panel-extrude") {
@@ -6130,6 +6380,15 @@ export default function RoomBuilder() {
         const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
         dragState.u1 = u;
         previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
+        rebuild();
+      } else if (dragState.type === "column-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewColumnBank = { panel: dragState.panelKey, shape: columnShapeRef.current, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u) };
         rebuild();
       } else if (dragState.type === "resize-opening") {
         const pt = new THREE.Vector3();
@@ -6353,14 +6612,17 @@ export default function RoomBuilder() {
         // door centered on the tap point, same as the old tap-only behavior.
         pushUndo();
         const info = dragState.info;
-        const doorWidth = 6 * FT;
+        // turnstiles are much narrower than a standard door -- a tap
+        // should place exactly one, not a standard-width span that the
+        // turnstile bank then subdivides into several.
+        const doorWidth = doorStyleRef.current === "turnstile" ? TURNSTILE_UNIT_WIDTH : 6 * FT;
         const u = panelU(info, dragState.hitPoint);
         let u0 = u - doorWidth / 2, u1 = u + doorWidth / 2;
         if (u0 < info.u0) { u0 = info.u0; u1 = u0 + doorWidth; }
         if (u1 > info.u1) { u1 = info.u1; u0 = u1 - doorWidth; }
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
-          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0 });
+          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current });
         }
       } else if (dragState.type === "pending-room-tool") {
         // a tap with no meaningful drag on an undivided floor -- select the
@@ -6440,12 +6702,13 @@ export default function RoomBuilder() {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
           const bid = idSeq++;
           const dividerAxis = openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical";
-          const platformHeight = 3 * FT;
+          const platformHeight = 5 * FT;
           const style = balconyStyleRef.current;
           const bal = {
             id: bid, panel: dragState.panelKey, u0, u1, dividerAxis, side: dragState.side || 1, platformHeight,
             pillarsRemoved: style !== "supported",
             ceilingRemoved: style !== "recessed",
+            wraps: computeBalconyWraps(dragState.panelKey, u0, u1),
           };
           if (!state.balconies) state.balconies = [];
           state.balconies.push(bal);
@@ -6467,6 +6730,15 @@ export default function RoomBuilder() {
           state.terraces.push(terrace);
         }
         previewOpening = null;
+      } else if (dragState.type === "column-draw") {
+        const u0 = Math.min(dragState.u0, dragState.u1);
+        const u1 = Math.max(dragState.u0, dragState.u1);
+        const MIN_COLUMN_BANK = 2 * FT;
+        if (u1 - u0 >= MIN_COLUMN_BANK) {
+          if (!state.columnBanks) state.columnBanks = [];
+          state.columnBanks.push({ id: idSeq++, panel: dragState.panelKey, shape: columnShapeRef.current, u0, u1 });
+        }
+        previewColumnBank = null;
       } else if (dragState.type === "stair-draw") {
         const dx = dragState.x1 - dragState.x0;
         const dz = dragState.z1 - dragState.z0;
@@ -6591,6 +6863,7 @@ export default function RoomBuilder() {
       restackFloors();
       previewSelection = null;
       previewOpening = null;
+      previewColumnBank = null;
       dragState = null;
       dragCrossFloorRestore = null;
       rebuild();
@@ -8908,6 +9181,26 @@ export default function RoomBuilder() {
           filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.4))",
         }}
       >
+        {tool === "move" && selectedPanel == null && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Column</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[
+                { key: "none", label: "None" },
+                { key: "square", label: "Square" },
+                { key: "round", label: "Round" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${columnShape === s ? "active" : ""}`}
+                  onClick={() => setColumnShape(s)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {tool === "move" && selectedRoomId != null && selectedPanel == null && (
           <>
             <div className="ribbon-group" style={{ minWidth: 340 }}>
@@ -9117,6 +9410,7 @@ export default function RoomBuilder() {
                 { key: "arched", label: "Arched" },
                 { key: "revolving", label: "Revolving" },
                 { key: "turnstile", label: "Turnstile" },
+                { key: "jailWall", label: "Jail wall" },
               ].map(({ key: s, label }) => (
                 <button
                   key={s}
@@ -9169,9 +9463,6 @@ export default function RoomBuilder() {
               {[
                 { key: "balcony", label: "Balcony" },
                 { key: "terrace", label: "Terrace" },
-                { key: "jailWall", label: "Jail wall" },
-                { key: "colSquare", label: "Square column" },
-                { key: "colRound", label: "Round column" },
               ].map(({ key: s, label }) => (
                 <button
                   key={s}
