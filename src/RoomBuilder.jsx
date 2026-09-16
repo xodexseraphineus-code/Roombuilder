@@ -867,6 +867,14 @@ export default function RoomBuilder() {
   const selectedTerraceIdRef = useRef(selectedTerraceId);
   useEffect(() => { selectedTerraceIdRef.current = selectedTerraceId; rebuildModelRef.current(); }, [selectedTerraceId]);
   const deleteTerraceRef = useRef(() => {});
+  const [selectedSuppBalconyId, setSelectedSuppBalconyId] = useState(null);
+  const selectedSuppBalconyIdRef = useRef(selectedSuppBalconyId);
+  useEffect(() => { selectedSuppBalconyIdRef.current = selectedSuppBalconyId; rebuildModelRef.current(); }, [selectedSuppBalconyId]);
+  const deleteSuppBalconyRef = useRef(() => {});
+  const [suppBalconyHeight, setSuppBalconyHeight] = useState(6 * FT);
+  const suppBalconyHeightApiRef = useRef({ setHeight: () => {} });
+  const [suppBalconyRailingCount, setSuppBalconyRailingCount] = useState(6);
+  const suppBalconyRailingCountApiRef = useRef({ setCount: () => {} });
   const [selectedOpeningId, setSelectedOpeningId] = useState(null); // a window or door cutout in a wall
   const selectedOpeningIdRef = useRef(selectedOpeningId);
   useEffect(() => { selectedOpeningIdRef.current = selectedOpeningId; rebuildModelRef.current(); }, [selectedOpeningId]);
@@ -1816,6 +1824,7 @@ export default function RoomBuilder() {
         balconies: [], // {id, panel, u0, u1, dividerAxis} -- a staircase+platform+pillars assembly with a window/door cutout in the wall behind it
         terraces: [], // {id, panel, u0, u1, side, depth} -- a flat roof-height deck with a perimeter railing, drawn along a wall like a balcony but with no stairs down to the ground
         columnBanks: [], // {id, panel, shape, u0, u1} -- a run of 5 evenly-spaced wall columns (square/round), drawn along a wall with the Wall tool
+        suppBalconies: [], // {id, panel, u0, u1, side, platformHeight, railingCount} -- a thin floating platform on 2 corner pillars reaching the floor, a glass door, and a roof canopy, no stairs
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
@@ -2659,6 +2668,31 @@ export default function RoomBuilder() {
       }
     }
 
+    // a plain glass-paned door -- a flat glass pane filling the doorway
+    // with a thin frame border, used for the supported balcony's entrance.
+    function addGlassDoor(c, lengthAxis, coord, bottom, top) {
+      const width = c.u1 - c.u0;
+      const uMid = (c.u0 + c.u1) / 2;
+      const h = Math.max(0.1, top - bottom);
+      const frameT = 0.1 * FT;
+      const d = state.thickness * 0.5;
+      const group = new THREE.Group();
+      const pane = new THREE.Mesh(new THREE.PlaneGeometry(Math.max(0.1, width - frameT * 2), Math.max(0.1, h - frameT * 2)), glassMat);
+      pane.position.set(0, bottom + h / 2, 0);
+      group.add(pane);
+      [bottom + frameT / 2, top - frameT / 2].forEach((ry) => {
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(width, frameT, d), doorMetalMat);
+        rail.position.set(0, ry, 0);
+        group.add(rail);
+      });
+      [-width / 2 + frameT / 2, width / 2 - frameT / 2].forEach((bx) => {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(frameT, h, d), doorMetalMat);
+        post.position.set(bx, bottom + h / 2, 0);
+        group.add(post);
+      });
+      sceneGroup.add(placeOnWall(group, lengthAxis, coord, uMid));
+    }
+
     // a barred jail-cell door, a fixed ~10ft-wide unit with a border frame
     // around it -- renderJailWallBank below tiles as many of these, with a
     // 2ft wall gap between each, as fit the drawn span.
@@ -2761,6 +2795,7 @@ export default function RoomBuilder() {
         if (c.style === "revolving") { renderRevolvingDoorBank(c, lengthAxis, coord, doorBottom, doorTop, addSeg); return; }
         if (c.style === "turnstile") { renderTurnstileBank(c, lengthAxis, coord, doorBottom, doorTop); return; }
         if (c.style === "jailWall") { renderJailWallBank(c, lengthAxis, coord, doorBottom, doorTop, addSeg); return; }
+        if (c.style === "glass") { addGlassDoor(c, lengthAxis, coord, doorBottom, doorTop); return; }
         // "split door in two" -- a single center mullion, like a French
         // door, rather than the window system's full column/row grid.
         if (Math.round(c.dividers || 0) >= 1) {
@@ -3685,6 +3720,7 @@ export default function RoomBuilder() {
       renderProps();
       renderBalconies();
       renderTerraces();
+      renderSuppBalconies();
       renderCeiling(floorMeshesForCeiling);
     }
 
@@ -3962,6 +3998,18 @@ export default function RoomBuilder() {
       if (doorW > 1 * FT) {
         const mid = (t.u0 + t.u1) / 2;
         state.openings.push({ id: idSeq++, panel: t.panel, u0: mid - doorW / 2, u1: mid + doorW / 2, height: doorHeightRef.current, isDoor: true, bottomOverride: 0, fromTerrace: t.id });
+      }
+    }
+
+    // cuts a single glass door into the wall directly behind a supported
+    // balcony, centered on its span, sitting on the platform's current
+    // height -- rebuilt from scratch whenever the height slider changes.
+    function regenerateSuppBalconyOpening(sb) {
+      state.openings = state.openings.filter((o) => o.fromSuppBalcony !== sb.id);
+      const doorW = Math.min(6 * FT, (sb.u1 - sb.u0) - 0.6);
+      if (doorW > 1 * FT) {
+        const mid = (sb.u0 + sb.u1) / 2;
+        state.openings.push({ id: idSeq++, panel: sb.panel, u0: mid - doorW / 2, u1: mid + doorW / 2, height: doorHeightRef.current, isDoor: true, bottomOverride: sb.platformHeight, style: "glass", fromSuppBalcony: sb.id });
       }
     }
 
@@ -4297,6 +4345,100 @@ export default function RoomBuilder() {
           const len = Math.hypot(dx, dz);
           if (len < 0.02) continue;
           addPiece(new THREE.BoxGeometry(len, 0.08, POST_SIZE), postMat, (wa.x + wb.x) / 2, terraceY + RAIL_TOP_H, (wa.z + wb.z) / 2, Math.atan2(-dz, dx));
+        }
+      });
+    }
+
+    // a thin floating platform supported by 2 corner pillars that always
+    // reach the floor (however high the platform slider is set), with a
+    // perimeter railing on the 3 open sides, a glass door cut into the
+    // wall behind it (handled by the ordinary opening system), and a
+    // rectangular roof canopy a foot above the door -- no stairs.
+    function renderSuppBalconies() {
+      const DEPTH = 6 * FT;
+      const PLATFORM_THICKNESS = 0.25;
+      const ROOF_THICKNESS = 0.25;
+      const ROOF_GAP = 1 * FT;
+      const PILLAR_SIZE = 0.5 * FT;
+      const RAIL_TOP_H = 3 * FT;
+      const POST_SIZE = 0.09;
+      (state.suppBalconies || []).forEach((sb) => {
+        const info = getPanelInfo(sb.panel);
+        if (!info) return;
+        const side = sb.side || 1;
+        const nx = info.normal.x * side, nz = info.normal.z * side;
+        const axis = info.lengthAxis;
+        const isSelected = isPickableTarget && selectedSuppBalconyIdRef.current === sb.id;
+        const platMat = isSelected ? floorMatSelected : balconyPlatformMat;
+        const railMat = isSelected ? wallMatSelected : wallMat;
+        const platformTop = sb.platformHeight;
+        function toWorld(u, d) {
+          if (axis === "x") return { x: u, z: info.coord + nz * d };
+          return { x: info.coord + nx * d, z: u };
+        }
+        function addPiece(geo, mat, wx, wy, wz, rotY) {
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set(wx, wy, wz);
+          if (rotY) mesh.rotation.y = rotY;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: "suppbalcony", id: sb.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(mesh);
+          if (isPickableTarget) pickList.push(mesh);
+        }
+        // platform slab, its top surface at the current height slider
+        {
+          const uLen = Math.max(0.02, sb.u1 - sb.u0);
+          const geo = axis === "x" ? new THREE.BoxGeometry(uLen, PLATFORM_THICKNESS, DEPTH) : new THREE.BoxGeometry(DEPTH, PLATFORM_THICKNESS, uLen);
+          const w = toWorld((sb.u0 + sb.u1) / 2, DEPTH / 2);
+          addPiece(geo, platMat, w.x, platformTop - PLATFORM_THICKNESS / 2, w.z);
+        }
+        // 2 support pillars at the platform's outer front corners, always
+        // reaching from the floor (y=0) up to the platform's underside.
+        const half = PILLAR_SIZE / 2;
+        [sb.u0 + half, sb.u1 - half].forEach((pu) => {
+          const w = toWorld(pu, DEPTH - half);
+          const pillarH = Math.max(0.05, platformTop - PLATFORM_THICKNESS);
+          addPiece(new THREE.BoxGeometry(PILLAR_SIZE, pillarH, PILLAR_SIZE), railMat, w.x, pillarH / 2, w.z);
+        });
+        // perimeter railing on the 3 open sides (the wall side is skipped),
+        // walked by even arc-length spacing like a balcony/terrace fence.
+        const rhalf = POST_SIZE / 2;
+        const pu0 = sb.u0 + rhalf, pu1 = sb.u1 - rhalf, pd0 = rhalf, pd1 = DEPTH - rhalf;
+        const sideLen = pd1 - pd0, outerLen = pu1 - pu0;
+        const totalLen = Math.max(0.01, sideLen * 2 + outerLen);
+        const n = Math.max(2, sb.railingCount || 6);
+        const points = [];
+        for (let i = 0; i <= n; i++) {
+          const tt = (i / n) * totalLen;
+          let u, d;
+          if (tt <= sideLen) { u = pu0; d = pd0 + tt; }
+          else if (tt <= sideLen + outerLen) { u = pu0 + (tt - sideLen); d = pd1; }
+          else { u = pu1; d = pd1 - (tt - sideLen - outerLen); }
+          points.push([u, d]);
+        }
+        points.forEach(([cu, cd]) => {
+          const w = toWorld(cu, cd);
+          addPiece(new THREE.BoxGeometry(POST_SIZE, RAIL_TOP_H, POST_SIZE), railMat, w.x, platformTop + RAIL_TOP_H / 2, w.z);
+        });
+        for (let i = 0; i < points.length - 1; i++) {
+          const wa = toWorld(points[i][0], points[i][1]);
+          const wb = toWorld(points[i + 1][0], points[i + 1][1]);
+          const dx = wb.x - wa.x, dz = wb.z - wa.z;
+          const len = Math.hypot(dx, dz);
+          if (len < 0.02) continue;
+          addPiece(new THREE.BoxGeometry(len, 0.08, POST_SIZE), railMat, (wa.x + wb.x) / 2, platformTop + RAIL_TOP_H, (wa.z + wb.z) / 2, Math.atan2(-dz, dx));
+        }
+        // roof canopy, a foot above the glass door's own top edge
+        const doorOpening = (state.openings || []).find((o) => o.fromSuppBalcony === sb.id);
+        const doorTop = platformTop + (doorOpening ? doorOpening.height : DEFAULT_OPENING_HEIGHT);
+        const roofBottom = doorTop + ROOF_GAP;
+        {
+          const uLen = Math.max(0.02, sb.u1 - sb.u0);
+          const geo = axis === "x" ? new THREE.BoxGeometry(uLen, ROOF_THICKNESS, DEPTH) : new THREE.BoxGeometry(DEPTH, ROOF_THICKNESS, uLen);
+          const w = toWorld((sb.u0 + sb.u1) / 2, DEPTH / 2);
+          addPiece(geo, platMat, w.x, roofBottom + ROOF_THICKNESS / 2, w.z);
         }
       });
     }
@@ -5929,6 +6071,26 @@ export default function RoomBuilder() {
         return;
       }
 
+      // the supported-balcony assembly -- tapping the platform, a support
+      // pillar, the railing, or the roof canopy all select the whole thing.
+      if (kind === "suppbalcony") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        const sb = (state.suppBalconies || []).find((s) => s.id === obj.userData.id);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedPropId(null);
+        setSelectedOpeningId(null);
+        setSelectedBalconyId(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(obj.userData.id);
+        if (sb) {
+          setSuppBalconyHeight(sb.platformHeight || 6 * FT);
+          setSuppBalconyRailingCount(sb.railingCount || 6);
+        }
+        return;
+      }
+
       // A window or door cutout in a wall -- selectable from any tool (not
       // just Window/Door), same as stairs and balconies. There's more
       // parametric control planned for doors specifically down the line;
@@ -5999,11 +6161,12 @@ export default function RoomBuilder() {
         return;
       }
       // Props tool: tapping the floor drops the currently-selected shape
-      // right there. Not a drag gesture -- one tap, one prop placed. Balcony
-      // and terrace are the exceptions -- both are drawn along a wall (see
-      // the pending-balcony/pending-terrace branches below), so a floor tap
-      // does nothing for either.
-      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace") {
+      // right there. Not a drag gesture -- one tap, one prop placed. Balcony,
+      // terrace, and the supported balcony are the exceptions -- all three
+      // are drawn along a wall (see the pending-balcony/pending-terrace/
+      // pending-suppbalcony branches below), so a floor tap does nothing
+      // for any of them.
+      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony") {
         if (kind === "floor") {
           const ownerRoomId = obj.userData.ownerRoomId ?? null;
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
@@ -6095,6 +6258,14 @@ export default function RoomBuilder() {
         const normalComponent2 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
         const side2 = Math.sign((thickCoord2 - info.coord) * normalComponent2) || 1;
         dragState = { type: "pending-terrace", panelKey, info, hitPoint: hp, side: side2, startScreen: { x: e.clientX, y: e.clientY } };
+      } else if (toolRef.current === "props" && propsShapeRef.current === "suppBalcony") {
+        // same wall-drag entry point as balcony/terrace above, just its
+        // own dragState type -- see the suppbalcony-draw handling in
+        // onPointerMove/onPointerUp.
+        const thickCoord3 = info.thickAxis === "x" ? hit.point.x : hit.point.z;
+        const normalComponent3 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
+        const side3 = Math.sign((thickCoord3 - info.coord) * normalComponent3) || 1;
+        dragState = { type: "pending-suppbalcony", panelKey, info, hitPoint: hp, side: side3, startScreen: { x: e.clientX, y: e.clientY } };
       } else if (toolRef.current === "move" && columnShapeRef.current !== "none") {
         // a run of columns is drawn along a wall exactly like a window --
         // tap and drag to mark its span -- rather than the Wall tool's
@@ -6347,6 +6518,21 @@ export default function RoomBuilder() {
         return;
       }
 
+      if (dragState.type === "pending-suppbalcony") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "suppbalcony-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u, side: dragState.side };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: 7 * FT };
+          rebuild();
+        }
+        return;
+      }
+
       if (dragState.type === "pending-column") {
         const dx = e.clientX - dragState.startScreen.x;
         const dy = e.clientY - dragState.startScreen.y;
@@ -6464,6 +6650,15 @@ export default function RoomBuilder() {
         previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
         rebuild();
       } else if (dragState.type === "terrace-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
+        rebuild();
+      } else if (dragState.type === "suppbalcony-draw") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
         const info = getPanelInfo(dragState.panelKey);
@@ -6822,6 +7017,19 @@ export default function RoomBuilder() {
           if (!state.terraces) state.terraces = [];
           state.terraces.push(terrace);
           regenerateTerraceOpenings(terrace);
+        }
+        previewOpening = null;
+      } else if (dragState.type === "suppbalcony-draw") {
+        const u0s = Math.min(dragState.u0, dragState.u1);
+        const u1s = Math.max(dragState.u0, dragState.u1);
+        const MIN_SUPPBAL = 6 * FT;
+        if (u1s - u0s >= MIN_SUPPBAL) {
+          const supp = { id: idSeq++, panel: dragState.panelKey, u0: u0s, u1: u1s, side: dragState.side || 1, platformHeight: 6 * FT, railingCount: 6 };
+          if (!state.suppBalconies) state.suppBalconies = [];
+          state.suppBalconies.push(supp);
+          regenerateSuppBalconyOpening(supp);
+          setSuppBalconyHeight(supp.platformHeight);
+          setSuppBalconyRailingCount(supp.railingCount);
         }
         previewOpening = null;
       } else if (dragState.type === "column-draw") {
@@ -7303,6 +7511,38 @@ export default function RoomBuilder() {
       rebuild();
     }
     deleteTerraceRef.current = deleteActiveTerrace;
+
+    function setActiveSuppBalconyHeight(h) {
+      const id = selectedSuppBalconyIdRef.current;
+      if (id == null) return;
+      const sb = (state.suppBalconies || []).find((s) => s.id === id);
+      if (!sb) return;
+      sb.platformHeight = Math.max(2 * FT, Math.min(state.height - 2 * FT, h));
+      regenerateSuppBalconyOpening(sb);
+      rebuild();
+    }
+    suppBalconyHeightApiRef.current = { setHeight: setActiveSuppBalconyHeight };
+
+    function setActiveSuppBalconyRailingCount(n) {
+      const id = selectedSuppBalconyIdRef.current;
+      if (id == null) return;
+      const sb = (state.suppBalconies || []).find((s) => s.id === id);
+      if (!sb) return;
+      sb.railingCount = Math.max(2, Math.min(40, Math.round(n)));
+      rebuild();
+    }
+    suppBalconyRailingCountApiRef.current = { setCount: setActiveSuppBalconyRailingCount };
+
+    function deleteActiveSuppBalcony() {
+      const id = selectedSuppBalconyIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.suppBalconies = (state.suppBalconies || []).filter((s) => s.id !== id);
+      state.openings = state.openings.filter((o) => o.fromSuppBalcony !== id);
+      setSelectedSuppBalconyId(null);
+      rebuild();
+    }
+    deleteSuppBalconyRef.current = deleteActiveSuppBalcony;
 
     function deleteActiveOpening() {
       const id = selectedOpeningIdRef.current;
@@ -9558,6 +9798,7 @@ export default function RoomBuilder() {
               {[
                 { key: "balcony", label: "Balcony" },
                 { key: "terrace", label: "Terrace" },
+                { key: "suppBalcony", label: "Supported Balcony" },
               ].map(({ key: s, label }) => (
                 <button
                   key={s}
@@ -9739,6 +9980,48 @@ export default function RoomBuilder() {
               <button className="rb-btn" onClick={() => deleteTerraceRef.current()}>Delete</button>
               <button className="rb-btn" onClick={() => setSelectedTerraceId(null)}>Done</button>
             </div>
+          </div>
+        )}
+        {selectedSuppBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 260 }}>
+            <span className="ribbon-label">Platform height &middot; {(suppBalconyHeight / FT).toFixed(2)} ft</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-bare-range"
+                type="range"
+                min={2}
+                max={Math.max(2.5, (floorHeight - 2 * FT) / FT)}
+                step={0.1}
+                value={suppBalconyHeight / FT}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setSuppBalconyHeight(ft * FT);
+                  suppBalconyHeightApiRef.current.setHeight(ft * FT);
+                }}
+              />
+              <button className="rb-btn" onClick={() => deleteSuppBalconyRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedSuppBalconyId(null)}>Done</button>
+            </div>
+          </div>
+        )}
+        {selectedSuppBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Railings &middot; {suppBalconyRailingCount}</span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={2}
+              max={40}
+              step={1}
+              value={suppBalconyRailingCount}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                setSuppBalconyRailingCount(n);
+                suppBalconyRailingCountApiRef.current.setCount(n);
+              }}
+            />
           </div>
         )}
         {selectedOpeningId != null && (
