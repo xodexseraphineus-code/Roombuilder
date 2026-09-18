@@ -935,6 +935,10 @@ export default function RoomBuilder() {
   const curvedCornersRadiusRef = useRef(curvedCornersRadius);
   useEffect(() => { curvedCornersRadiusRef.current = curvedCornersRadius; }, [curvedCornersRadius]);
   const curvedCornersApiRef = useRef({ setEnabled: () => {}, setRadius: () => {} });
+  // how far the slider can go for the currently selected room -- half its
+  // shorter footprint dimension, so dragging all the way to the end always
+  // reaches a true full circle/cylinder rather than stopping at a fixed cap.
+  const curvedCornersMaxRadiusRef = useRef(2.5);
   const resetEverythingRef = useRef(() => {});
   const [gridSizeFt, setGridSizeFt] = useState(10);
   const gridSizeRef = useRef(gridSizeFt * FT);
@@ -5686,6 +5690,8 @@ export default function RoomBuilder() {
       } else {
         roomData = makeFloorData();
         roomData.footprint = { ...found.bbox };
+        roomData.height = state.height;
+        roomData.thickness = state.thickness;
       }
       const room = { id, data: roomData, offsetX: 0, offsetZ: 0 };
       if (!floorEntry.rooms) floorEntry.rooms = [];
@@ -5794,8 +5800,8 @@ export default function RoomBuilder() {
         aPanel = "south"; bPanel = "north";
         openLo = fp.xMin; openHi = fp.xMax;
       }
-      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height;
-      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height;
+      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height; dataA.thickness = state.thickness;
+      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height; dataB.thickness = state.thickness;
       const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
       const roomB = { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 };
       if (wallMode !== 1) {
@@ -5866,8 +5872,8 @@ export default function RoomBuilder() {
       const sizeA = parent.thickAxis === "z" ? rectA.xMax - rectA.xMin : rectA.zMax - rectA.zMin;
       const sizeB = parent.thickAxis === "z" ? rectB.xMax - rectB.xMin : rectB.zMax - rectB.zMin;
       if (sizeA < MIN_SIZE || sizeB < MIN_SIZE) return; // the notch landed too close to a corner to leave two real rooms
-      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height;
-      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height;
+      const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height; dataA.thickness = state.thickness;
+      const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height; dataB.thickness = state.thickness;
       const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
       const roomB = { id: idSeq++, data: dataB, offsetX: 0, offsetZ: 0 };
       // the two new rooms sit on opposite sides of a real gap (unlike the
@@ -7495,8 +7501,10 @@ export default function RoomBuilder() {
         if (room) {
           setRoomHeight(room.data.height);
           const cc = room.data.curvedCorners || { enabled: false, radius: 0 };
+          const rf = room.data.footprint;
+          curvedCornersMaxRadiusRef.current = Math.max(0.1, Math.min((rf.xMax - rf.xMin) / 2, (rf.zMax - rf.zMin) / 2) - 0.15);
           setCurvedCornersOn(cc.enabled);
-          setCurvedCornersRadius(cc.radius || 0.6);
+          setCurvedCornersRadius(Math.min(cc.radius || 0.6, curvedCornersMaxRadiusRef.current));
         }
       }
       setSelectedPanel(null);
@@ -7898,6 +7906,10 @@ export default function RoomBuilder() {
       // if the floor directly below has any staircases, automatically cut a
       // matching headroom opening in this new floor above them
       const belowEntry = idx !== -1 ? floors[idx] : null;
+      // wall thickness is a whole-building spec (see setActiveFloorThickness)
+      // -- a freshly added story should match it rather than silently
+      // reverting to makeFloorData()'s hardcoded default.
+      if (belowEntry) newData.thickness = belowEntry.data.thickness;
       if (belowEntry && belowEntry.data.stairs && belowEntry.data.stairs.length) {
         newData.floorHoles = belowEntry.data.stairs.map((st) => {
           const cut = computeStairHoleCut(st);
@@ -9764,7 +9776,7 @@ export default function RoomBuilder() {
                 className="rb-bare-range"
                 type="range"
                 min={0.1}
-                max={2.5}
+                max={curvedCornersMaxRadiusRef.current}
                 step={0.05}
                 value={curvedCornersRadius}
                 onPointerDown={() => pushUndoRef.current()}
