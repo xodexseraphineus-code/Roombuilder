@@ -764,13 +764,17 @@ export default function RoomBuilder() {
   const [columnShape, setColumnShape] = useState("none");
   const columnShapeRef = useRef(columnShape);
   useEffect(() => { columnShapeRef.current = columnShape; }, [columnShape]);
-  const [pillarShape, setPillarShape] = useState("none");
+  // "Pillars" door style -- round/square, freestanding, floor-to-header --
+  // shape/size/count are per-opening params, same pattern as door height.
+  const [pillarShape, setPillarShape] = useState("round");
   const pillarShapeRef = useRef(pillarShape);
   useEffect(() => { pillarShapeRef.current = pillarShape; }, [pillarShape]);
-  const [selectedFloorPillarsId, setSelectedFloorPillarsId] = useState(null);
-  const selectedFloorPillarsIdRef = useRef(selectedFloorPillarsId);
-  useEffect(() => { selectedFloorPillarsIdRef.current = selectedFloorPillarsId; rebuildModelRef.current(); }, [selectedFloorPillarsId]);
-  const deleteFloorPillarsRef = useRef(() => {});
+  const [pillarSize, setPillarSize] = useState(2 * FT);
+  const pillarSizeRef = useRef(pillarSize);
+  useEffect(() => { pillarSizeRef.current = pillarSize; }, [pillarSize]);
+  const [pillarCount, setPillarCount] = useState(5);
+  const pillarCountRef = useRef(pillarCount);
+  useEffect(() => { pillarCountRef.current = pillarCount; }, [pillarCount]);
   const [wallThickness, setWallThickness] = useState(0.35);
   const [ceilingOn, setCeilingOn] = useState(false);
   // mirrors ceilingEnabled across every floor (not just the active one) so
@@ -1845,7 +1849,6 @@ export default function RoomBuilder() {
         terraces: [], // {id, panel, u0, u1, side, depth} -- a flat roof-height deck with a perimeter railing, drawn along a wall like a balcony but with no stairs down to the ground
         columnBanks: [], // {id, panel, shape, u0, u1} -- a run of 5 evenly-spaced wall columns (square/round), drawn along a wall with the Wall tool
         suppBalconies: [], // {id, panel, u0, u1, side, platformHeight, railingCount} -- a thin floating platform on 2 corner pillars reaching the floor, a glass door, and a roof canopy, no stairs
-        floorPillars: [], // {id, x0, x1, z0, z1, shape} -- a floor-area rectangle filled with a grid of floor-to-(ceiling-1ft) pillars (round/square), drawn with the Wall tool's Pillar mode
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
@@ -2793,6 +2796,37 @@ export default function RoomBuilder() {
       }
     }
 
+    // "Pillars" door style -- replaces the whole drawn wall span with a row
+    // of free-standing round/square pillars (no wall behind or between
+    // them at all, just open air), centered exactly on the wall's own
+    // plane rather than sitting proud of it like a column. Pillars run
+    // floor-to-(ceiling minus a short header), and renderOpeningCutout
+    // leaves that header as a full-width solid wall segment above them --
+    // the only wall material left anywhere in the drawn span.
+    const PILLAR_MIN_SIZE = 0.5 * FT;
+    const PILLAR_MAX_SIZE = 5 * FT;
+    const PILLAR_MIN_COUNT = 2;
+    const PILLAR_MAX_COUNT = 12;
+    function renderPillarBank(c, lengthAxis, coord, bottom, top) {
+      const width = c.u1 - c.u0;
+      const count = Math.max(PILLAR_MIN_COUNT, Math.min(PILLAR_MAX_COUNT, Math.round(c.pillarCount || 5)));
+      const size = Math.max(PILLAR_MIN_SIZE, Math.min(PILLAR_MAX_SIZE, c.pillarSize || 2 * FT));
+      const h = Math.max(0.1, top - bottom);
+      const spacing = width / count;
+      for (let i = 0; i < count; i++) {
+        const uCenter = c.u0 + spacing * (i + 0.5);
+        const geo = c.pillarShape === "square"
+          ? new THREE.BoxGeometry(size, h, size)
+          : new THREE.CylinderGeometry(size / 2, size / 2, h, 24);
+        const mesh = new THREE.Mesh(geo, wallMat);
+        mesh.position.y = bottom + h / 2;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        addEdges(mesh);
+        sceneGroup.add(placeOnWall(mesh, lengthAxis, coord, uCenter));
+      }
+    }
+
     function renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion) {
       // bottomOverride lets an opening start above floor level (e.g. a
       // balcony door/window off a raised platform instead of the ground).
@@ -2806,6 +2840,18 @@ export default function RoomBuilder() {
         if (bal) c = { ...c, bottomOverride: bal.platformHeight || c.bottomOverride };
       }
       if (c.isDoor) {
+        // pillars always run floor-to-(ceiling minus a short header),
+        // ignoring bottomOverride/height entirely -- there's no "door" in
+        // the usual sense, just the drawn span replaced by free-standing
+        // pillars with a full-width header above them.
+        if (c.style === "pillars") {
+          const doorBottom = 0;
+          const doorTop = Math.max(0.1, H - PILLAR_TOP_GAP);
+          if (doorTop < H - 0.02) addSeg(c.u0, c.u1, doorTop, H);
+          addOpeningHotspotAndHighlight(c, lengthAxis, coord, doorBottom, doorTop);
+          renderPillarBank(c, lengthAxis, coord, doorBottom, doorTop);
+          return;
+        }
         const doorBottom = Math.max(0, Math.min(H - 0.1, c.bottomOverride || 0));
         const h = Math.min(c.height ?? DEFAULT_OPENING_HEIGHT, H - doorBottom);
         const doorTop = doorBottom + h;
@@ -2994,7 +3040,6 @@ export default function RoomBuilder() {
     let previewColumnBank = null; // {panel, shape, u0, u1} while dragging out a new run of wall columns
     let previewStair = null; // {x0,x1,z0,z1} while dragging out a new staircase footprint
     let previewRoom = null; // {x0,x1,z0,z1} while dragging out a new room's footprint
-    let previewPillarArea = null; // {x0,x1,z0,z1} while dragging out a new pillar-grid area
     let measureAnchors = []; // {point: Vector3, text} for the length overlay
     // synthetic door openings for whichever room is currently being built --
     // set by rebuildRoomEntry from computeRoomConnections() just before it,
@@ -3866,18 +3911,6 @@ export default function RoomBuilder() {
           sceneGroup.add(mesh);
         }
       }
-      // live rectangle preview while dragging out a new pillar-grid area
-      // with the Wall tool's Pillar mode.
-      if (previewPillarArea && buildingRoomId == null) {
-        const x0 = Math.min(previewPillarArea.x0, previewPillarArea.x1), x1 = Math.max(previewPillarArea.x0, previewPillarArea.x1);
-        const z0 = Math.min(previewPillarArea.z0, previewPillarArea.z1), z1 = Math.max(previewPillarArea.z0, previewPillarArea.z1);
-        const w = x1 - x0, d = z1 - z0;
-        if (w > 0.02 && d > 0.02) {
-          const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), selMatPreview);
-          mesh.position.set((x0 + x1) / 2, 0.03, (z0 + z1) / 2);
-          sceneGroup.add(mesh);
-        }
-      }
     }
 
     // sphere/cube/cone/cylinder props, placed by tapping the floor with the
@@ -4492,16 +4525,16 @@ export default function RoomBuilder() {
       });
     }
 
-    // a grid of floor-to-(ceiling-1ft) pillars filling a drawn floor area,
-    // evenly spaced roughly 3ft apart in both directions so the grid always
-    // reaches every edge of the dragged rectangle exactly, round or square.
+    // legacy renderer for `floorPillars` -- a floor-area rectangle filled
+    // with a grid of pillars, superseded by the Door tool's wall-embedded
+    // "Pillars" style (see renderPillarBank) but kept so scenes saved
+    // before that change (including one of the bundled starting-point
+    // presets) still render correctly. No longer creatable from the UI.
     const PILLAR_DIAMETER = 2 * FT;
     const PILLAR_SPACING = 3 * FT;
     const PILLAR_TOP_GAP = 1 * FT;
     function renderFloorPillars() {
       (state.floorPillars || []).forEach((p) => {
-        const isSelected = isPickableTarget && selectedFloorPillarsIdRef.current === p.id;
-        const mat = isSelected ? wallMatSelected : wallMat;
         const pillarH = Math.max(0.1, state.height - PILLAR_TOP_GAP);
         const w = Math.max(0.02, p.x1 - p.x0), d = Math.max(0.02, p.z1 - p.z0);
         const countX = Math.max(1, Math.round(w / PILLAR_SPACING) + 1);
@@ -4513,14 +4546,12 @@ export default function RoomBuilder() {
             const geo = p.shape === "square"
               ? new THREE.BoxGeometry(PILLAR_DIAMETER, pillarH, PILLAR_DIAMETER)
               : new THREE.CylinderGeometry(PILLAR_DIAMETER / 2, PILLAR_DIAMETER / 2, pillarH, 24);
-            const mesh = new THREE.Mesh(geo, mat);
+            const mesh = new THREE.Mesh(geo, wallMat);
             mesh.position.set(x, pillarH / 2, z);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
             addEdges(mesh);
-            mesh.userData = { kind: "floorPillar", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
             sceneGroup.add(mesh);
-            if (isPickableTarget) pickList.push(mesh);
           }
         }
       });
@@ -6176,22 +6207,6 @@ export default function RoomBuilder() {
         return;
       }
 
-      // a floor-pillar grid -- tapping any pillar in it selects the whole
-      // area (delete-only, like a terrace).
-      if (kind === "floorPillar") {
-        const ownerRoomId = obj.userData.ownerRoomId ?? null;
-        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
-        setSelectedPanel(null);
-        setSelectedStairId(null);
-        setSelectedPropId(null);
-        setSelectedOpeningId(null);
-        setSelectedBalconyId(null);
-        setSelectedTerraceId(null);
-        setSelectedSuppBalconyId(null);
-        setSelectedFloorPillarsId(obj.userData.id);
-        return;
-      }
-
       // A window or door cutout in a wall -- selectable from any tool (not
       // just Window/Door), same as stairs and balconies. There's more
       // parametric control planned for doors specifically down the line;
@@ -6220,6 +6235,11 @@ export default function RoomBuilder() {
           setDoorHeight(o.height ?? DEFAULT_OPENING_HEIGHT);
           setDoorSplit(!!o.dividers);
           setDoorStyle(o.style || "standard");
+          if (o.style === "pillars") {
+            setPillarShape(o.pillarShape || "round");
+            setPillarSize(o.pillarSize || 2 * FT);
+            setPillarCount(o.pillarCount || 5);
+          }
         }
         return;
       }
@@ -6257,20 +6277,6 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
           const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
           dragState = { type: "stair-draw", plane, x0: hit.point.x, z0: hit.point.z, x1: hit.point.x, z1: hit.point.z };
-          capture(e);
-        }
-        return;
-      }
-      // Wall tool's Pillar mode: tapping the plain floor and dragging fills
-      // that rectangle with a grid of pillars (see renderFloorPillars).
-      if (toolRef.current === "move" && pillarShapeRef.current !== "none") {
-        if (kind === "floor") {
-          const ownerRoomId = obj.userData.ownerRoomId ?? null;
-          if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
-          pushUndo();
-          setSelectedFloorPillarsId(null);
-          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
-          dragState = { type: "pillar-area-draw", plane, x0: hit.point.x, z0: hit.point.z, x1: hit.point.x, z1: hit.point.z };
           capture(e);
         }
         return;
@@ -6968,17 +6974,6 @@ export default function RoomBuilder() {
         dragState.z1 = snapped.z;
         previewRoom = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
         rebuild();
-      } else if (dragState.type === "pillar-area-draw") {
-        const pt = new THREE.Vector3();
-        if (!ray.intersectPlane(dragState.plane, pt)) return;
-        const fp = state.footprint;
-        const margin = (state.thickness || 0.35) / 2 + 0.02;
-        const clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, pt.x));
-        const clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, pt.z));
-        dragState.x1 = snapValue(clampedX);
-        dragState.z1 = snapValue(clampedZ);
-        previewPillarArea = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
-        rebuild();
       }
     }
 
@@ -7037,7 +7032,10 @@ export default function RoomBuilder() {
         [u0, u1] = applyEdgeMargin(u0, u1, dragState.panelKey);
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
-          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current });
+          state.openings.push({
+            id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current,
+            pillarShape: pillarShapeRef.current, pillarSize: pillarSizeRef.current, pillarCount: pillarCountRef.current,
+          });
         }
       } else if (dragState.type === "pending-room-tool") {
         // a tap with no meaningful drag on an undivided floor -- select the
@@ -7106,7 +7104,10 @@ export default function RoomBuilder() {
         [u0, u1] = applyEdgeMargin(u0, u1, dragState.panelKey);
         if (u1 - u0 >= MIN_OPENING && !wouldOverlapBumpout(dragState.panelKey, u0, u1)) {
           state.openings = state.openings.filter((o) => !(o.panel === dragState.panelKey && rangesOverlap(u0, u1, o.u0, o.u1)));
-          state.openings.push({ id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current });
+          state.openings.push({
+            id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current,
+            pillarShape: pillarShapeRef.current, pillarSize: pillarSizeRef.current, pillarCount: pillarCountRef.current,
+          });
         }
         previewOpening = null;
       } else if (dragState.type === "balcony-draw") {
@@ -7219,14 +7220,6 @@ export default function RoomBuilder() {
           switchActiveRoom(id);
         }
         previewRoom = null;
-      } else if (dragState.type === "pillar-area-draw") {
-        const x0 = Math.min(dragState.x0, dragState.x1), x1 = Math.max(dragState.x0, dragState.x1);
-        const z0 = Math.min(dragState.z0, dragState.z1), z1 = Math.max(dragState.z0, dragState.z1);
-        if (x1 - x0 >= MIN_STAIR_SIZE && z1 - z0 >= MIN_STAIR_SIZE) {
-          if (!state.floorPillars) state.floorPillars = [];
-          state.floorPillars.push({ id: idSeq++, x0, x1, z0, z1, shape: pillarShapeRef.current });
-        }
-        previewPillarArea = null;
       }
 
       dragState = null;
@@ -7649,16 +7642,6 @@ export default function RoomBuilder() {
     }
     deleteTerraceRef.current = deleteActiveTerrace;
 
-    function deleteActiveFloorPillars() {
-      const id = selectedFloorPillarsIdRef.current;
-      if (id == null) return;
-      pushUndo();
-      state.floorPillars = (state.floorPillars || []).filter((p) => p.id !== id);
-      setSelectedFloorPillarsId(null);
-      rebuild();
-    }
-    deleteFloorPillarsRef.current = deleteActiveFloorPillars;
-
     function setActiveSuppBalconyHeight(h) {
       const id = selectedSuppBalconyIdRef.current;
       if (id == null) return;
@@ -7748,7 +7731,34 @@ export default function RoomBuilder() {
       o.style = style;
       rebuild();
     }
-    openingEditApiRef.current = { setHeight: setActiveOpeningHeight, setDividers: setActiveOpeningDividers, setAxis: setActiveOpeningAxis, setStyle: setActiveOpeningStyle };
+    function setActiveOpeningPillarShape(shape) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o) return;
+      o.pillarShape = shape;
+      rebuild();
+    }
+    function setActiveOpeningPillarSize(size) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o) return;
+      o.pillarSize = Math.max(PILLAR_MIN_SIZE, Math.min(PILLAR_MAX_SIZE, size));
+      rebuild();
+    }
+    function setActiveOpeningPillarCount(n) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o) return;
+      o.pillarCount = Math.max(PILLAR_MIN_COUNT, Math.min(PILLAR_MAX_COUNT, Math.round(n)));
+      rebuild();
+    }
+    openingEditApiRef.current = {
+      setHeight: setActiveOpeningHeight, setDividers: setActiveOpeningDividers, setAxis: setActiveOpeningAxis, setStyle: setActiveOpeningStyle,
+      setPillarShape: setActiveOpeningPillarShape, setPillarSize: setActiveOpeningPillarSize, setPillarCount: setActiveOpeningPillarCount,
+    };
 
     // ---------- voice command actions ----------
     // A small, deliberately isolated set of actions a voice command can
@@ -8771,7 +8781,7 @@ export default function RoomBuilder() {
   const showToolPanel =
     // "move" (Wall) always shows something -- the Room group when a room
     // is selected, wall-height controls when a panel is selected, and the
-    // Column/Pillar mode selectors the rest of the time (nothing selected).
+    // Column mode selector the rest of the time (nothing selected).
     tool === "move" ||
     ((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) ||
     ((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) ||
@@ -9692,33 +9702,7 @@ export default function RoomBuilder() {
                 <button
                   key={s}
                   className={`rb-btn ${columnShape === s ? "active" : ""}`}
-                  onClick={() => {
-                    setColumnShape(s);
-                    if (s !== "none") setPillarShape("none");
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {tool === "move" && selectedPanel == null && (
-          <div className="ribbon-group" style={{ minWidth: 220 }}>
-            <span className="ribbon-label">Pillar</span>
-            <div style={{ display: "flex", gap: 6 }}>
-              {[
-                { key: "none", label: "None" },
-                { key: "round", label: "Round" },
-                { key: "square", label: "Square" },
-              ].map(({ key: s, label }) => (
-                <button
-                  key={s}
-                  className={`rb-btn ${pillarShape === s ? "active" : ""}`}
-                  onClick={() => {
-                    setPillarShape(s);
-                    if (s !== "none") setColumnShape("none");
-                  }}
+                  onClick={() => setColumnShape(s)}
                 >
                   {label}
                 </button>
@@ -9905,7 +9889,7 @@ export default function RoomBuilder() {
             </div>
           </div>
         )}
-        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && (
+        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && doorStyle !== "pillars" && (
           <div className="ribbon-group">
             <span className="ribbon-label">
               {selectedOpeningId != null ? "Selected door height" : "Door height"} &middot; {(doorHeight / FT).toFixed(2)} ft
@@ -9936,6 +9920,7 @@ export default function RoomBuilder() {
                 { key: "revolving", label: "Revolving" },
                 { key: "turnstile", label: "Turnstile" },
                 { key: "jailWall", label: "Jail wall" },
+                { key: "pillars", label: "Pillars" },
               ].map(({ key: s, label }) => (
                 <button
                   key={s}
@@ -9962,7 +9947,69 @@ export default function RoomBuilder() {
                   Split door
                 </button>
               )}
+              {doorStyle === "pillars" && (
+                <>
+                  {[
+                    { key: "round", label: "Round" },
+                    { key: "square", label: "Square" },
+                  ].map(({ key: s, label }) => (
+                    <button
+                      key={s}
+                      className={`rb-btn ${pillarShape === s ? "active" : ""}`}
+                      onClick={() => {
+                        pushUndoRef.current();
+                        setPillarShape(s);
+                        if (selectedOpeningId != null) openingEditApiRef.current.setPillarShape(s);
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </>
+              )}
             </div>
+          </div>
+        )}
+        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && doorStyle === "pillars" && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">
+              {selectedOpeningId != null ? "Selected pillar size" : "Pillar size"} &middot; {(pillarSize / FT).toFixed(2)} ft
+            </span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={0.5}
+              max={5}
+              step={0.05}
+              value={pillarSize / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const s = Math.max(0.5, parseFloat(e.target.value)) * FT;
+                setPillarSize(s);
+                if (selectedOpeningId != null) openingEditApiRef.current.setPillarSize(s);
+              }}
+            />
+          </div>
+        )}
+        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && doorStyle === "pillars" && (
+          <div className="ribbon-group">
+            <span className="ribbon-label">
+              {selectedOpeningId != null ? "Selected pillar count" : "Pillar count"} &middot; {pillarCount}
+            </span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={2}
+              max={12}
+              step={1}
+              value={pillarCount}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const n = Math.round(parseFloat(e.target.value));
+                setPillarCount(n);
+                if (selectedOpeningId != null) openingEditApiRef.current.setPillarCount(n);
+              }}
+            />
           </div>
         )}
         {tool === "props" && (
@@ -10169,15 +10216,6 @@ export default function RoomBuilder() {
             <div style={{ display: "flex", gap: 8 }}>
               <button className="rb-btn" onClick={() => deleteTerraceRef.current()}>Delete</button>
               <button className="rb-btn" onClick={() => setSelectedTerraceId(null)}>Done</button>
-            </div>
-          </div>
-        )}
-        {selectedFloorPillarsId != null && (
-          <div className="ribbon-group" style={{ minWidth: 160 }}>
-            <span className="ribbon-label">Pillars selected</span>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="rb-btn" onClick={() => deleteFloorPillarsRef.current()}>Delete</button>
-              <button className="rb-btn" onClick={() => setSelectedFloorPillarsId(null)}>Done</button>
             </div>
           </div>
         )}
