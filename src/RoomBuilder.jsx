@@ -30,6 +30,8 @@ const MIN_ROOM_DRAW_SIZE = 3 * FT; // smallest footprint that commits as a new d
 const ROOM_SNAP_DIST = 3;          // meters -- generous snap radius for the Room tool's corner/edge snapping
 const WALL_CYCLE_HOLD_MS = 2000;   // once a dragged partition snaps flush to an opposing wall, this long a hold advances solid -> door -> fully-open
 const WALL_DELETE_HOLD_MS = 1000;  // once a pushed selection's bump-out snaps flush to an opposing wall, this long a hold arms deleting it
+const DRAW_TOOL_HOLD_MS = 1000;    // Room/Props tools: how long a stationary press on empty space must be held before it arms drawing -- a quick drag before that orbits the camera instead
+const MIN_PROP_DRAW_SIZE = 0.5 * FT; // smallest footprint a dragged-out prop commits at
 const WALL_CYCLE_DOOR_WIDTH = 6 * FT; // matches the automatic room-to-room connecting door width
 const VIEW_SHIFT = 1.28;          // widen the virtual frame this much to push the model right, clear of the side panel
 const BALCONY_CEILING_DROP = 2 * FT;   // the balcony ceiling/roof sits this far below the room's own default height
@@ -2982,7 +2984,30 @@ export default function RoomBuilder() {
     function wouldOverlapBumpout(panelKey, u0, u1) {
       return state.bumpouts.some((b) => b.panel === panelKey && rangesOverlap(u0, u1, b.u0, b.u1));
     }
-    function panelU(info, p) { return info.lengthAxis === "x" ? p.x : p.z; }
+    // a room drawn/pulled out via the Room tool renders inside its own
+    // group, offset from the floor's origin by offsetX/offsetZ (see
+    // rebuildRoomEntry) -- so a raycaster hit against its walls/floor comes
+    // back in WORLD space, but every u0/u1/footprint/coord value the room's
+    // own data stores is in that room's LOCAL, un-offset space. Every place
+    // that turns a world hit point into a local coordinate (or vice versa)
+    // needs to account for this, or a room that isn't sitting at (0,0) --
+    // any duplicated or dragged-away room -- silently breaks any tool that
+    // draws by dragging (doors, windows, stairs, ...): the drag lands
+    // outside the room's own local bounds and gets clamped/rejected.
+    function currentRoomOffset() {
+      if (activeRoomId == null) return { x: 0, z: 0 };
+      const floorEntry = floors.find((f) => f.id === activeFloorId);
+      const room = floorEntry && (floorEntry.rooms || []).find((r) => r.id === activeRoomId);
+      return room ? { x: room.offsetX || 0, z: room.offsetZ || 0 } : { x: 0, z: 0 };
+    }
+    function toLocalXZ(pt) {
+      const off = currentRoomOffset();
+      return { x: pt.x - off.x, z: pt.z - off.z };
+    }
+    function panelU(info, p) {
+      const off = currentRoomOffset();
+      return info.lengthAxis === "x" ? p.x - off.x : p.z - off.z;
+    }
     // when a window/door is dragged (or a tap-door's default width is
     // clamped) all the way out to a wall's own end -- a corner -- leave a
     // small strip of solid wall there instead of running the opening flush
@@ -3028,8 +3053,9 @@ export default function RoomBuilder() {
       return Math.max(-OUTWARD_PARTITION_MAX, Math.min(OUTWARD_PARTITION_MAX, ext));
     }
     function snapToPanelPlane(info, pt) {
+      const off = currentRoomOffset();
       const p = pt.clone();
-      if (info.thickAxis === "z") p.z = info.coord; else p.x = info.coord;
+      if (info.thickAxis === "z") p.z = info.coord + off.z; else p.x = info.coord + off.x;
       return p;
     }
 
@@ -3040,6 +3066,7 @@ export default function RoomBuilder() {
     let previewColumnBank = null; // {panel, shape, u0, u1} while dragging out a new run of wall columns
     let previewStair = null; // {x0,x1,z0,z1} while dragging out a new staircase footprint
     let previewRoom = null; // {x0,x1,z0,z1} while dragging out a new room's footprint
+    let previewProp = null; // {kind,x0,x1,z0,z1} while dragging out a new prop's footprint (LOCAL to the active room)
     let measureAnchors = []; // {point: Vector3, text} for the length overlay
     // synthetic door openings for whichever room is currently being built --
     // set by rebuildRoomEntry from computeRoomConnections() just before it,
@@ -3911,6 +3938,19 @@ export default function RoomBuilder() {
           sceneGroup.add(mesh);
         }
       }
+      // live footprint preview while dragging out a new prop's size --
+      // rendered in whichever room/floor context is currently being built,
+      // matching where the prop itself will land (LOCAL coordinates).
+      if (previewProp && buildingRoomId === activeRoomId) {
+        const x0 = Math.min(previewProp.x0, previewProp.x1), x1 = Math.max(previewProp.x0, previewProp.x1);
+        const z0 = Math.min(previewProp.z0, previewProp.z1), z1 = Math.max(previewProp.z0, previewProp.z1);
+        const w = x1 - x0, d = z1 - z0;
+        if (w > 0.02 && d > 0.02) {
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), selMatPreview);
+          mesh.position.set((x0 + x1) / 2, 0.03, (z0 + z1) / 2);
+          sceneGroup.add(mesh);
+        }
+      }
     }
 
     // sphere/cube/cone/cylinder props, placed by tapping the floor with the
@@ -4616,14 +4656,32 @@ export default function RoomBuilder() {
     function floorFullyClaimedByRooms(entry) {
       const fp = entry.data.footprint;
       const totalArea = (fp.xMax - fp.xMin) * (fp.zMax - fp.zMin);
-      const rooms = entry.rooms || [];
+      // a room's own footprint is stored in its LOCAL, un-offset space (see
+      // currentRoomOffset) -- its actual position on this floor also needs
+      // offsetX/offsetZ folded in, or a duplicated/dragged-away room (which
+      // keeps the exact same local footprint as whatever it was copied
+      // from) looks like it still overlaps the original in world space.
+      const worldFp = (r) => {
+        const ox = r.offsetX || 0, oz = r.offsetZ || 0;
+        const f = r.data.footprint;
+        return { xMin: f.xMin + ox, xMax: f.xMax + ox, zMin: f.zMin + oz, zMax: f.zMax + oz };
+      };
+      // only rooms actually sitting within the floor's own original
+      // footprint count toward "claiming" it -- a duplicated or
+      // dragged-away room living entirely outside those bounds is an
+      // independent extension, not a tile of the original area, and
+      // shouldn't stop the floor's own base content here from hiding.
+      const rooms = (entry.rooms || []).filter((r) => {
+        const rfp = worldFp(r);
+        return rfp.xMax > fp.xMin + 0.05 && rfp.xMin < fp.xMax - 0.05 && rfp.zMax > fp.zMin + 0.05 && rfp.zMin < fp.zMax - 0.05;
+      });
       if (totalArea <= 0 || rooms.length === 0) return false;
       let coveredArea = 0;
       for (let i = 0; i < rooms.length; i++) {
-        const rfp = rooms[i].data.footprint;
+        const rfp = worldFp(rooms[i]);
         if (rfp.xMin < fp.xMin - 0.05 || rfp.xMax > fp.xMax + 0.05 || rfp.zMin < fp.zMin - 0.05 || rfp.zMax > fp.zMax + 0.05) return false;
         for (let j = 0; j < i; j++) {
-          const ofp = rooms[j].data.footprint;
+          const ofp = worldFp(rooms[j]);
           const ox = Math.min(rfp.xMax, ofp.xMax) - Math.max(rfp.xMin, ofp.xMin);
           const oz = Math.min(rfp.zMax, ofp.zMax) - Math.max(rfp.zMin, ofp.zMin);
           if (ox > 0.05 && oz > 0.05) return false; // overlapping rooms -- not a clean tiling
@@ -4829,7 +4887,17 @@ export default function RoomBuilder() {
       // a wall already promotes its owner to the active room (see the
       // ownerRoomId check in onPointerDown), so this only widens which
       // walls are reachable, not what happens once one is.
-      isPickableTarget = isActiveRoom || (floorIsActive && !!floorEntry.allowMultiRoomPick);
+      // Likewise, once this floor's own base content is fully represented
+      // by its room(s) (see floorFullyClaimedByRooms -- the floor's own
+      // top-level geometry is cleared in that case, see rebuildFloorEntry),
+      // those rooms need to stay clickable even with none of them "active":
+      // otherwise tapping "Done" on a room that fully covers its floor (or
+      // a duplicate of one, sitting right beside it) leaves nothing
+      // pickable there at all -- no wall/window/door tool can ever reach it
+      // again, since there's no separate floor-level geometry underneath
+      // for a click to fall back to.
+      isPickableTarget = isActiveRoom || (floorIsActive && !!floorEntry.allowMultiRoomPick)
+        || (floorIsActive && activeRoomId == null && floorFullyClaimedByRooms(floorEntry));
       const isSelectedRoom = isActiveRoom && !activeRoomSilent;
       buildingRoomId = room.id;
       buildingFloorEntry = floorEntry;
@@ -5982,15 +6050,17 @@ export default function RoomBuilder() {
           if (roomHitKind === "floor" && roomHitOwner == null) {
             const fEntry = floorEntry.data;
             if (!fEntry.partitions || fEntry.partitions.length === 0) {
-              // undivided floor -- a plain tap still selects the whole thing
-              // as a room (Cut/Copy/Paste/Duplicate/Curved corners); an
-              // actual drag draws a brand new room instead, exactly like the
-              // window/door tools' own pending-then-draw states decide which
-              // gesture this turns out to be.
+              // undivided floor -- a quick tap-and-release still selects the
+              // whole thing as a room (Cut/Copy/Paste/Duplicate/Curved
+              // corners); holding for a second instead arms drawing a brand
+              // new room, so a quick drag with no hold is free to orbit the
+              // camera the way it does everywhere else (see the tick()
+              // hold-check and the "pending-room-tool" cases in
+              // onPointerMove/onPointerUp).
               const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -roomHit.point.y);
               dragState = {
                 type: "pending-room-tool", plane, start: roomHit.point.clone(), hitPoint: roomHit.point.clone(),
-                startScreen: { x: e.clientX, y: e.clientY },
+                startScreen: { x: e.clientX, y: e.clientY }, holdStart: performance.now(), selectOnTap: true, snapOnArm: false,
               };
               capture(e);
               return;
@@ -6006,20 +6076,19 @@ export default function RoomBuilder() {
               return;
             }
           }
-          // blank ground, a wall, or anything else -- draw a brand new room
-          // from scratch, on the active floor's own ground plane, regardless
-          // of what's actually under the cursor there.
+          // blank ground, a wall, or anything else -- same hold-then-draw
+          // gesture as above, anchored on the active floor's own ground
+          // plane regardless of what's actually under the cursor there.
           const g = floorGroups.get(activeFloorId);
           if (g) {
             const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -g.position.y);
             const ray = rayFromEvent(e);
             const pt = new THREE.Vector3();
             if (ray.intersectPlane(plane, pt)) {
-              pushUndo();
-              const snapped = snapRoomPoint(floorEntry, pt.x, pt.z);
-              dragState = { type: "room-draw", plane, x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
-              previewRoom = { x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
-              rebuild();
+              dragState = {
+                type: "pending-room-tool", plane, start: pt.clone(), hitPoint: pt.clone(),
+                startScreen: { x: e.clientX, y: e.clientY }, holdStart: performance.now(), selectOnTap: false, snapOnArm: true,
+              };
               capture(e);
               return;
             }
@@ -6276,25 +6345,51 @@ export default function RoomBuilder() {
           setSelectedStairId(null);
         setSelectedPropId(null);
           const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
-          dragState = { type: "stair-draw", plane, x0: hit.point.x, z0: hit.point.z, x1: hit.point.x, z1: hit.point.z };
+          const localStart = toLocalXZ(hit.point);
+          dragState = { type: "stair-draw", plane, x0: localStart.x, z0: localStart.z, x1: localStart.x, z1: localStart.z };
           capture(e);
         }
         return;
       }
-      // Props tool: tapping the floor drops the currently-selected shape
-      // right there. Not a drag gesture -- one tap, one prop placed. Balcony,
-      // terrace, and the supported balcony are the exceptions -- all three
-      // are drawn along a wall (see the pending-balcony/pending-terrace/
-      // pending-suppbalcony branches below), so a floor tap does nothing
-      // for any of them.
+      // Props tool: holding on the floor -- or anywhere outside the room,
+      // on open ground -- for a full second arms drawing, then dragging out
+      // a footprint sizes the prop from that drag (a roughly 5x5ft diagonal
+      // makes a 5x5x5ft cube, and likewise for sphere/cone/cylinder); a
+      // quick drag with no hold instead orbits the camera, same as the Room
+      // tool. Balcony, terrace, and the supported balcony are the
+      // exceptions -- all three are drawn along a wall (see the
+      // pending-balcony/pending-terrace/pending-suppbalcony branches
+      // below), so this doesn't apply to any of them.
       if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony") {
         if (kind === "floor") {
           const ownerRoomId = obj.userData.ownerRoomId ?? null;
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
-          pushUndo();
-          if (!state.props) state.props = [];
-          state.props.push({ id: idSeq++, kind: propsShapeRef.current, x: hit.point.x, z: hit.point.z });
-          rebuild();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = {
+            type: "pending-props-draw", plane, start: hit.point.clone(), kind: propsShapeRef.current,
+            startScreen: { x: e.clientX, y: e.clientY }, holdStart: performance.now(),
+          };
+          capture(e);
+          return;
+        }
+        // outside any room -- draw on the active floor's own ground plane.
+        // Leaves activeRoomId alone for now (see the arming check in
+        // tick()) rather than switching away from whatever room was
+        // focused just because the pointer happened to come down on open
+        // ground -- a quick drag that turns out to be an orbit shouldn't
+        // have that side effect.
+        const g = floorGroups.get(activeFloorId);
+        if (g) {
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -g.position.y);
+          const ray = rayFromEvent(e);
+          const pt = new THREE.Vector3();
+          if (ray.intersectPlane(plane, pt)) {
+            dragState = {
+              type: "pending-props-draw", plane, start: pt.clone(), kind: propsShapeRef.current, groundLevel: true,
+              startScreen: { x: e.clientX, y: e.clientY }, holdStart: performance.now(),
+            };
+            capture(e);
+          }
         }
         return;
       }
@@ -6586,25 +6681,28 @@ export default function RoomBuilder() {
       }
 
       if (dragState.type === "pending-room-tool") {
+        // still waiting on the hold (see tick()) -- a real drag before it
+        // fires means the user meant to orbit/pan the camera, not draw, so
+        // hand off to the ordinary empty-space drag instead of drawing.
         const dx = e.clientX - dragState.startScreen.x;
         const dy = e.clientY - dragState.startScreen.y;
         const dist = Math.hypot(dx, dy);
         if (dist > MOVE_PX) {
-          // a real drag past the undivided floor's own edge turns this into
-          // drawing a brand new room instead of just selecting the whole
-          // floor -- the tap point becomes the rectangle's first corner.
-          // (uses its own ray, not the shared one below -- that one isn't
-          // declared yet this early in the function.)
-          const pt = new THREE.Vector3();
-          if (!rayFromEvent(e).intersectPlane(dragState.plane, pt)) return;
-          const floorEntry = floors.find((f) => f.id === activeFloorId);
-          const snappedEnd = floorEntry ? snapRoomPoint(floorEntry, pt.x, pt.z) : { x: pt.x, z: pt.z };
-          dragState = {
-            type: "room-draw", plane: dragState.plane,
-            x0: dragState.start.x, z0: dragState.start.z, x1: snappedEnd.x, z1: snappedEnd.z,
-          };
-          previewRoom = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
-          rebuild();
+          dragState = null;
+          orbiting = { x: e.clientX, y: e.clientY, moved: 0 };
+        }
+        return;
+      }
+
+      if (dragState.type === "pending-props-draw") {
+        // same idea as "pending-room-tool" above -- a real drag before the
+        // hold arms it orbits the camera instead of drawing.
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          dragState = null;
+          orbiting = { x: e.clientX, y: e.clientY, moved: 0 };
         }
         return;
       }
@@ -6933,6 +7031,7 @@ export default function RoomBuilder() {
       } else if (dragState.type === "stair-draw") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const local = toLocalXZ(pt);
         // clamp to the room's actual interior so a drag toward a wall can
         // never record an endpoint beyond it -- previously the plane the
         // drag raycasts against is infinite, so the value kept extending
@@ -6940,8 +7039,8 @@ export default function RoomBuilder() {
         // and the built staircase would poke out through it.
         const fp = state.footprint;
         const margin = (state.thickness || 0.35) / 2 + 0.02;
-        const clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, pt.x));
-        const clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, pt.z));
+        const clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, local.x));
+        const clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, local.z));
         dragState.x1 = snapValue(clampedX);
         dragState.z1 = snapValue(clampedZ);
         // compute the same dominant-axis choice the final commit uses, live,
@@ -6973,6 +7072,14 @@ export default function RoomBuilder() {
         dragState.x1 = snapped.x;
         dragState.z1 = snapped.z;
         previewRoom = { x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
+        rebuild();
+      } else if (dragState.type === "props-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const local = toLocalXZ(pt);
+        dragState.x1 = snapValue(local.x);
+        dragState.z1 = snapValue(local.z);
+        previewProp = { kind: dragState.kind, x0: dragState.x0, z0: dragState.z0, x1: dragState.x1, z1: dragState.z1 };
         rebuild();
       }
     }
@@ -7038,11 +7145,15 @@ export default function RoomBuilder() {
           });
         }
       } else if (dragState.type === "pending-room-tool") {
-        // a tap with no meaningful drag on an undivided floor -- select the
-        // whole floor as a room (Cut/Copy/Paste/Duplicate/Delete/Curved
-        // corners), same as tapping an already-partitioned sub-room does.
-        const floorEntry = floors.find((f) => f.id === activeFloorId);
-        if (floorEntry) commitRoomFromFound({ bbox: floorEntry.data.footprint }, dragState.hitPoint);
+        // released before the hold armed drawing, with no meaningful drag
+        // either -- a plain tap. On the undivided floor's own tap, select
+        // the whole floor as a room (Cut/Copy/Paste/Duplicate/Delete/Curved
+        // corners), same as tapping an already-partitioned sub-room does; a
+        // tap out on blank ground has nothing to select, so it's a no-op.
+        if (dragState.selectOnTap) {
+          const floorEntry = floors.find((f) => f.id === activeFloorId);
+          if (floorEntry) commitRoomFromFound({ bbox: floorEntry.data.footprint }, dragState.hitPoint);
+        }
       } else if (dragState.type === "select-drag") {
         const u0 = Math.min(dragState.u0, dragState.u1);
         const u1 = Math.max(dragState.u0, dragState.u1);
@@ -7220,6 +7331,26 @@ export default function RoomBuilder() {
           switchActiveRoom(id);
         }
         previewRoom = null;
+      } else if (dragState.type === "props-draw") {
+        const dx = Math.abs(dragState.x1 - dragState.x0);
+        const dz = Math.abs(dragState.z1 - dragState.z0);
+        if (dx >= MIN_PROP_DRAW_SIZE && dz >= MIN_PROP_DRAW_SIZE) {
+          const id = idSeq++;
+          // a cube keeps the drag's two footprint dimensions independent
+          // (a true box); sphere/cone/cylinder stay round, so both average
+          // into one uniform size. Height tracks that same horizontal size
+          // either way -- a roughly square 5x5ft drag makes a 5x5x5ft cube.
+          const w = dragState.kind === "cube" ? Math.max(MIN_PROP_DRAW_SIZE, dx) : Math.max(MIN_PROP_DRAW_SIZE, (dx + dz) / 2);
+          const d = dragState.kind === "cube" ? Math.max(MIN_PROP_DRAW_SIZE, dz) : w;
+          const h = (w + d) / 2;
+          if (!state.props) state.props = [];
+          state.props.push({
+            id, kind: dragState.kind,
+            x: (dragState.x0 + dragState.x1) / 2, z: (dragState.z0 + dragState.z1) / 2,
+            w, d, h,
+          });
+        }
+        previewProp = null;
       }
 
       dragState = null;
@@ -8134,6 +8265,11 @@ export default function RoomBuilder() {
       };
       if (!floorEntry.rooms) floorEntry.rooms = [];
       floorEntry.rooms.push(room);
+      // a pasted room never touches the one it came from (see the 2m gap
+      // above), so there's no ambiguity in letting both stay independently
+      // clickable regardless of which is currently active -- same as a
+      // gap-split floor's two rooms.
+      floorEntry.allowMultiRoomPick = true;
       switchActiveRoom(id);
       ensureActiveContentInFrame();
     }
@@ -8157,6 +8293,11 @@ export default function RoomBuilder() {
         offsetZ: room.offsetZ || 0,
       };
       floorEntry.rooms.push(newRoom);
+      // a duplicate never touches the room it came from (see the 2m gap
+      // above), so there's no ambiguity in letting both stay independently
+      // clickable regardless of which is currently active -- same as a
+      // gap-split floor's two rooms (see allowMultiRoomPick).
+      floorEntry.allowMultiRoomPick = true;
       switchActiveRoom(newId);
       ensureActiveContentInFrame();
     }
@@ -8490,6 +8631,32 @@ export default function RoomBuilder() {
           dragState.holdCycleStart = null;
           dragState.wallMode = 0;
         }
+      }
+
+      // Room tool and Props tool: a press on empty space only starts
+      // drawing once it's been held still for a full second (see
+      // DRAW_TOOL_HOLD_MS) -- a quick drag before that is treated as an
+      // ordinary camera orbit/pan instead (handled in onPointerMove). Once
+      // armed, promote straight into the real drawing dragState so the
+      // existing room-draw/props-draw move/up handlers take it from here.
+      if (dragState && dragState.type === "pending-room-tool" && now - dragState.holdStart >= DRAW_TOOL_HOLD_MS) {
+        pushUndo();
+        const floorEntry = floors.find((f) => f.id === activeFloorId);
+        const snapped = dragState.snapOnArm && floorEntry ? snapRoomPoint(floorEntry, dragState.start.x, dragState.start.z) : { x: dragState.start.x, z: dragState.start.z };
+        const plane = dragState.plane;
+        dragState = { type: "room-draw", plane, x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
+        previewRoom = { x0: snapped.x, z0: snapped.z, x1: snapped.x, z1: snapped.z };
+        playClickSound();
+        rebuild();
+      }
+      if (dragState && dragState.type === "pending-props-draw" && now - dragState.holdStart >= DRAW_TOOL_HOLD_MS) {
+        if (dragState.groundLevel && activeRoomId != null) switchActiveRoom(null);
+        pushUndo();
+        const local = toLocalXZ(dragState.start);
+        dragState = { type: "props-draw", plane: dragState.plane, kind: dragState.kind, x0: local.x, z0: local.z, x1: local.x, z1: local.z };
+        previewProp = { kind: dragState.kind, x0: local.x, z0: local.z, x1: local.x, z1: local.z };
+        playClickSound();
+        rebuild();
       }
 
       if (walkModeRef.current) {
