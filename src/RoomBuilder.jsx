@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, DoorOpen, AppWindow, RectangleVertical, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -269,6 +269,71 @@ function QuadViewIcon() {
       <line x1="8" y1="1.5" x2="8" y2="14.5" stroke="currentColor" strokeWidth="1.4" />
       <line x1="1.5" y1="8" x2="14.5" y2="8" stroke="currentColor" strokeWidth="1.4" />
     </svg>
+  );
+}
+// no direct lucide equivalent for a staircase -- a small ascending-steps
+// glyph in the same stroke-based style as lucide's own icon set, so it
+// drops into the ribbon's tool row without looking out of place.
+function StairsIcon({ size = 16, strokeWidth = 2 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20v-4h4v-4h4V8h4V4" />
+      <path d="M4 20h16" />
+    </svg>
+  );
+}
+// a small square icon-only toggle -- the Levels panel's per-card
+// eye/isolate/ceiling buttons, styled after the reference mockup's plain
+// icon chrome (no visible button shape until active/hovered).
+function LevelToggleBtn({ active, onClick, title, children }) {
+  return (
+    <button
+      className="rb-btn"
+      onClick={onClick}
+      title={title}
+      style={{
+        width: 20, height: 20, minWidth: 20, padding: 0, borderRadius: 5,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: active ? "var(--bg-selected)" : "transparent",
+        color: active ? "var(--text-primary)" : "var(--text-tertiary)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+// the ribbon's BUILD row -- icon-on-top, label-below square buttons for
+// the Wall/Opening/Door/Room/Stair/Prop tool row, matching the reference
+// mockup's own tool-button treatment (icon-only tool switches previously).
+function RibbonToolButton({ Icon, label, active, onClick, title }) {
+  return (
+    <button
+      className={`rb-btn ${active ? "active" : ""}`}
+      onClick={onClick}
+      title={title || label}
+      style={{
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4,
+        width: 52, height: 46, padding: 0, borderRadius: 8, flexShrink: 0,
+      }}
+    >
+      <Icon size={17} strokeWidth={1.8} />
+      <span style={{ fontSize: 8.5, fontWeight: 500 }}>{label}</span>
+    </button>
+  );
+}
+// the ribbon's right-hand utility strip (Snap/Measure/render-mode
+// toggles) -- a plain icon button, no label, same active/inactive
+// language as RibbonToolButton but compact enough to sit in a row.
+function RibbonIconToggle({ Icon, active, onClick, title }) {
+  return (
+    <button
+      className={`rb-btn ${active ? "active" : ""}`}
+      onClick={onClick}
+      title={title}
+      style={{ width: 30, height: 30, minWidth: 30, padding: 0, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+    >
+      <Icon size={15} strokeWidth={1.8} />
+    </button>
   );
 }
 
@@ -1045,6 +1110,10 @@ export default function RoomBuilder() {
   const toggleHideRef = useRef(() => {});
   const [isolatedFloorIdsState, setIsolatedFloorIdsState] = useState([]);
   const [hiddenIds, setHiddenIds] = useState([]);
+  // each floor's cumulative base elevation (sum of every floor below it's
+  // height) -- purely for the Levels panel's "+ 8.8 m" readout, kept in
+  // sync alongside the other per-floor React mirrors in syncFloorsToReact.
+  const [floorElevations, setFloorElevations] = useState({});
   const pushUndoRef = useRef(() => {});
   const undoRef = useRef(() => {});
   const redoRef = useRef(() => {});
@@ -7484,6 +7553,10 @@ export default function RoomBuilder() {
       setFloorIds(floors.map((f) => f.id));
       setActiveFloorIdState(activeFloorId);
       setCeilingFloorIds(floors.filter((f) => f.data.ceilingEnabled).map((f) => f.id));
+      let cumY = 0;
+      const elevations = {};
+      floors.forEach((f) => { elevations[f.id] = cumY; cumY += f.data.height; });
+      setFloorElevations(elevations);
       const entry = floors.find((f) => f.id === activeFloorId);
       if (entry) {
         setFloorHeight(entry.data.height);
@@ -8792,11 +8865,15 @@ export default function RoomBuilder() {
     };
   }, []);
 
-  const RIBBON_HEIGHT = 48;
+  const RIBBON_HEIGHT = 64;
   const TOPBAR_HEIGHT = 44;
-  const RECENT_HEIGHT = 150;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
   const panelResizeRef = useRef(null);
+  // right-docked panel -- presets/Recent live here now (see the mockup's
+  // own right-hand INTENT slot), resizable the same way as the Layers
+  // panel on the left, just dragged from its own (left) edge instead.
+  const [rightPanelWidth, setRightPanelWidth] = useState(220);
+  const rightPanelResizeRef = useRef(null);
   const layersScrollRef = useRef(null);
   const scrollStripDragRef = useRef(null);
   const recentScrollInnerRef = useRef(null);
@@ -9148,7 +9225,7 @@ export default function RoomBuilder() {
           Text box: type an instruction and hit Enter or the send button --
           same Claude pipeline either way, useful wherever speech input
           isn't available (e.g. this sandbox). */}
-      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 14, right: 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 14, right: rightPanelWidth + 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <input
             type="text"
@@ -9230,7 +9307,7 @@ export default function RoomBuilder() {
       )}
 
       {walkMode && (
-        <div style={{ position: "absolute", right: 24, bottom: RIBBON_HEIGHT + 20, width: 168, height: 168 }}>
+        <div style={{ position: "absolute", right: rightPanelWidth + 24, bottom: RIBBON_HEIGHT + 20, width: 168, height: 168 }}>
           {[
             { dir: "fwd", Icon: ArrowUp, style: { left: 56, top: 0 } },
             { dir: "left", Icon: ArrowLeft, style: { left: 0, top: 56 } },
@@ -9262,30 +9339,44 @@ export default function RoomBuilder() {
         }}
       />
 
-      {/* LEFT, below the Layers panel and just above the ribbon: Recent --
-          a browser-local autosave history (every ~15s, no server to
-          persist to), thumbnails you can click to reload that scene. A
-          draggable strip along the bottom scrolls sideways through them
-          as the list grows, same idea as the Layers panel's own vertical
-          scroll strip. */}
+      {/* RIGHT: docked panel, same chrome/proportions as the reference
+          mockup's right-hand INTENT slot -- parked here for now hosting
+          Presets (this app's own "start from a scene" feature, formerly
+          docked as "Recent" below the Layers panel) until a real per-
+          project intent feature exists to put in that slot instead. */}
       <div
         style={{
-          position: "absolute", bottom: RIBBON_HEIGHT, left: 0, height: RECENT_HEIGHT, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT, right: 0, bottom: RIBBON_HEIGHT, width: rightPanelWidth,
           background: "var(--bg-panel)", display: "flex", flexDirection: "column", overflow: "hidden",
-          borderRight: "1px solid var(--divider-strong)",
+          borderLeft: "1px solid var(--divider-strong)",
         }}
       >
-        {/* a clearly-visible splitter with real breathing room on both
-            sides, matching the reference's own gap between its object-type
-            list and its "recent" section header. */}
-        <div style={{ margin: "10px 12px 0", borderTop: "1px solid var(--divider-strong)" }} />
-        <div style={{ padding: "10px 9px 4px" }}>
-          <span className="panel-title">Recent</span>
+        <div
+          title="Drag to resize"
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            rightPanelResizeRef.current = { startX: e.clientX, startWidth: rightPanelWidth };
+          }}
+          onPointerMove={(e) => {
+            const rs = rightPanelResizeRef.current;
+            if (!rs) return;
+            const w = Math.min(480, Math.max(160, rs.startWidth - (e.clientX - rs.startX)));
+            setRightPanelWidth(w);
+          }}
+          onPointerUp={() => { rightPanelResizeRef.current = null; }}
+          style={{
+            position: "absolute", top: 0, left: -12, width: 24, height: "100%",
+            cursor: "ew-resize", touchAction: "none", zIndex: 1,
+          }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 14px 10px" }}>
+          <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--text-secondary)" }}>Presets</span>
+          <MoreHorizontal size={15} strokeWidth={2} color="var(--text-tertiary)" />
         </div>
         <div
           className="recent-scroll layers-scroll"
           ref={recentScrollInnerRef}
-          style={{ position: "static", flex: 1, minHeight: 0, display: "flex", flexWrap: "wrap", gap: 6, alignContent: "flex-start", padding: "0 34px 10px 9px" }}
+          style={{ position: "static", flex: 1, minHeight: 0, display: "flex", flexWrap: "wrap", gap: 8, alignContent: "flex-start", padding: "0 14px 14px" }}
         >
           {DEFAULT_PRESET_SCENES.map((preset) => (
             <button
@@ -9324,11 +9415,10 @@ export default function RoomBuilder() {
 
       {/* LEFT: Layers panel -- docked flush to the left edge, directly
           under the top band (not floating), PowerPoint-style slide list,
-          resizable via the handle on its right edge; Recent sits below it,
-          just above the ribbon. */}
+          resizable via the handle on its right edge. */}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT + RECENT_HEIGHT, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
@@ -9352,48 +9442,52 @@ export default function RoomBuilder() {
             cursor: "ew-resize", touchAction: "none", zIndex: 1,
           }}
         />
-        <div style={{ padding: "12px 12px 9px" }}>
+        <div style={{ padding: "14px 14px 10px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span className="panel-title">Layers</span>
+            <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--text-secondary)" }}>Levels</span>
             {/* drag a layer row down onto Dup or Del to duplicate/delete
                 *that* layer, or just click either button to act on
                 whichever layer is selected; + always creates a fresh
                 default layer. */}
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <button
-                className="rb-btn"
-                style={{ padding: "2px 4px", fontSize: 13, flex: "0 0 auto", background: "transparent", border: "none" }}
-                onClick={() => addFloorRef.current()}
-                title="Add a new layer with a default room"
-              >
-                +
-              </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <button
                 ref={dupBtnRef}
                 className="rb-btn"
+                title="Duplicate the selected layer -- or drag a layer row down onto this button"
                 style={{
-                  padding: "2px 7px", fontSize: 9, flex: "0 0 auto",
-                  background: dragOverAction === "dup" ? "rgba(255,255,255,0.18)" : "transparent",
-                  border: dragOverAction === "dup" ? "1px solid #fff" : "1px solid var(--splitter)",
+                  width: 22, height: 22, minWidth: 22, padding: 0, borderRadius: "50%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: dragOverAction === "dup" ? "var(--accent)" : "var(--bg-control)",
+                  color: dragOverAction === "dup" ? "var(--accent-contrast)" : "var(--text-secondary)",
                 }}
                 onClick={() => duplicateFloorRef.current()}
-                title="Duplicate the selected layer -- or drag a layer row down onto this button"
               >
-                Dup
+                <Copy size={11} strokeWidth={2} />
               </button>
               <button
                 ref={delBtnRef}
                 className="rb-btn"
+                title="Delete the selected layer -- or drag a layer row down onto this button"
                 style={{
-                  padding: "2px 6px", fontSize: 9, flex: "0 0 auto",
-                  display: "flex", alignItems: "center",
-                  background: dragOverAction === "del" ? "rgba(255,255,255,0.18)" : "transparent",
-                  border: dragOverAction === "del" ? "1px solid #fff" : "1px solid var(--splitter)",
+                  width: 22, height: 22, minWidth: 22, padding: 0, borderRadius: "50%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: dragOverAction === "del" ? "var(--accent)" : "var(--bg-control)",
+                  color: dragOverAction === "del" ? "var(--accent-contrast)" : "var(--text-secondary)",
                 }}
                 onClick={() => deleteFloorRef.current()}
-                title="Delete the selected layer -- or drag a layer row down onto this button"
               >
-                <Trash2 size={12} />
+                <Trash2 size={11} strokeWidth={2} />
+              </button>
+              <button
+                className="rb-btn"
+                title="Add a new layer with a default room"
+                style={{
+                  width: 22, height: 22, minWidth: 22, padding: 0, borderRadius: "50%",
+                  display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-control)",
+                }}
+                onClick={() => addFloorRef.current()}
+              >
+                <Plus size={13} strokeWidth={2.2} />
               </button>
             </div>
           </div>
@@ -9401,11 +9495,14 @@ export default function RoomBuilder() {
 
         <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
           <div className="layers-scroll" ref={layersScrollRef}>
-            {[...floorIds].reverse().map((id, i) => (
+            {[...floorIds].reverse().map((id, i) => {
+              const isLast = i === floorIds.length - 1;
+              const elevM = floorElevations[id] || 0;
+              return (
               <div key={id} style={{ display: "flex", flexDirection: "column" }}>
                 <div
                   style={{
-                  height: 3, margin: "1px 4px", borderRadius: 1,
+                  height: 3, margin: "0 4px 1px", borderRadius: 1,
                   background: dropInfo && dropInfo.targetId === id && dropInfo.edge === "above" ? "#FF6B1A" : "transparent",
                 }}
               />
@@ -9472,23 +9569,49 @@ export default function RoomBuilder() {
                   setDragOverAction(null);
                 }}
                 style={{
-                  display: "flex", flexDirection: "row", alignItems: "center", gap: 7, cursor: "grab",
+                  display: "flex", flexDirection: "row", alignItems: "flex-start", gap: 10, cursor: "grab",
                   // bleeds out past .layers-scroll's own 8px/34px side
-                  // padding so the selected-row highlight reaches the
-                  // panel's true left edge and as far right as the
-                  // scrollbar strip allows, rather than stopping short.
-                  padding: "5px 34px 5px 8px", margin: "0 -34px 0 -8px", touchAction: "none",
+                  // padding so the card still has even breathing room on
+                  // both sides against the panel's true edges.
+                  margin: "0 -26px 10px 0", padding: "10px", touchAction: "none",
                   opacity: dragFloorId === id ? 0.4 : 1,
-                  background: id === activeFloorIdState ? "var(--bg-selected)" : "transparent",
+                  borderRadius: 10,
+                  background: "var(--bg-control)",
+                  boxShadow: id === activeFloorIdState ? "inset 0 0 0 1.5px var(--accent)" : "inset 0 0 0 1px var(--border-separator)",
                 }}
               >
-                <canvas
-                  ref={(el) => { if (el) thumbCanvasMapRef.current.set(id, el); }}
-                  width={480}
-                  height={480}
-                  style={{ borderRadius: 6, display: "block", width: 56, height: 56, flexShrink: 0, background: "var(--bg-thumb)" }}
-                />
-                <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, height: 64, flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                  <canvas
+                    ref={(el) => { if (el) thumbCanvasMapRef.current.set(id, el); }}
+                    width={480}
+                    height={480}
+                    style={{ borderRadius: 8, display: "block", width: 60, height: 60, flexShrink: 0, background: "var(--bg-thumb)" }}
+                  />
+                  <div style={{ display: "flex", gap: 4 }} onPointerDown={(e) => e.stopPropagation()}>
+                    <LevelToggleBtn
+                      active={!hiddenIds.includes(id)}
+                      onClick={() => toggleHideRef.current(id)}
+                      title={hiddenIds.includes(id) ? "Hidden -- click to show" : "Visible -- click to hide"}
+                    >
+                      {hiddenIds.includes(id) ? <EyeOff size={12} strokeWidth={2} /> : <Eye size={12} strokeWidth={2} />}
+                    </LevelToggleBtn>
+                    <LevelToggleBtn
+                      active={isolatedFloorIdsState.includes(id)}
+                      onClick={() => toggleIsolateRef.current(id)}
+                      title="Isolate this layer (multiple can be isolated together)"
+                    >
+                      <Crosshair size={12} strokeWidth={2} />
+                    </LevelToggleBtn>
+                    <LevelToggleBtn
+                      active={ceilingFloorIds.includes(id)}
+                      onClick={() => toggleFloorCeilingRef.current(id)}
+                      title="Toggle this layer's ceiling"
+                    >
+                      <PanelTop size={12} strokeWidth={2} />
+                    </LevelToggleBtn>
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 5, minHeight: 60, flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex" }}>
                     {renamingFloorId === id ? (
                       <input
@@ -9506,14 +9629,14 @@ export default function RoomBuilder() {
                         onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => e.stopPropagation()}
                         style={{
-                          fontSize: 9.5, background: "var(--bg-control)", color: "var(--text-primary)",
+                          fontSize: 11, background: "var(--bg-control-hover)", color: "var(--text-primary)",
                           border: "1px solid var(--accent)", borderRadius: 4, width: "100%", padding: "1px 3px",
                         }}
                       />
                     ) : (
                       <span
                         style={{
-                          color: "var(--text-primary)", fontSize: 9.5, cursor: "text",
+                          color: "var(--text-primary)", fontSize: 11, fontWeight: 600, cursor: "text",
                           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                           // the wrapping div is a row-direction flex container
                           // sized to content (not stretched full-width), so
@@ -9535,51 +9658,58 @@ export default function RoomBuilder() {
                       </span>
                     )}
                   </div>
-                  <div
-                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}
-                    onPointerDown={(e) => e.stopPropagation()}
-                  >
-                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
-                      Ceil
-                      <input
-                        type="checkbox"
-                        className="rb-radio"
-                        checked={ceilingFloorIds.includes(id)}
-                        onChange={() => toggleFloorCeilingRef.current(id)}
-                        title="Toggle this layer's ceiling"
-                      />
-                    </label>
-                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
-                      Iso
-                      <input
-                        type="checkbox"
-                        className="rb-radio"
-                        checked={isolatedFloorIdsState.includes(id)}
-                        onChange={() => toggleIsolateRef.current(id)}
-                        title="Isolate this layer (multiple can be isolated together)"
-                      />
-                    </label>
-                    <label style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--text-secondary)", fontSize: 8.5, cursor: "pointer" }}>
-                      Hide
-                      <input
-                        type="checkbox"
-                        className="rb-radio"
-                        checked={hiddenIds.includes(id)}
-                        onChange={() => toggleHideRef.current(id)}
-                        title="Hide this layer"
-                      />
-                    </label>
-                  </div>
+                  <span style={{ color: "var(--text-secondary)", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }}>
+                    + {elevM.toFixed(1)} m
+                  </span>
                 </div>
               </div>
               <div
+                style={!isLast ? {
+                  height: 12, margin: "0 4px", paddingLeft: 10 + 30 - 4,
+                } : { height: 3 }}
+              >
+                {!isLast && <div style={{ width: 0, height: "100%", borderLeft: "2px dashed var(--divider-strong)" }} />}
+              </div>
+              <div
                 style={{
-                  height: 3, margin: "1px 4px", borderRadius: 1,
+                  height: 3, margin: "0 4px", borderRadius: 1,
                   background: dropInfo && dropInfo.targetId === id && dropInfo.edge === "below" ? "#FF6B1A" : "transparent",
                 }}
               />
             </div>
-              ))}
+              );
+            })}
+            {/* the ground plane isn't a real layer (no rooms/openings of its
+                own -- see groundApiRef), just a visual terrain toggle, so it
+                renders as a plain non-draggable card pinned after the real
+                layers rather than joining floorIds/the drag-reorder list. */}
+            <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-start", gap: 10, margin: "0 -26px 4px 0", padding: 10, borderRadius: 10, background: "var(--bg-control)", boxShadow: "inset 0 0 0 1px var(--border-separator)" }}>
+              <button
+                className="rb-btn"
+                onClick={() => setGroundTheme((i) => (i + 1) % GROUND_THEMES.length)}
+                title={`World: ${GROUND_THEME_LABELS[groundTheme]} (tap to cycle: ${GROUND_THEME_LABELS.join(", ")})`}
+                style={{
+                  padding: 0, width: 60, height: 60, minWidth: 60, borderRadius: 8, overflow: "hidden", flexShrink: 0,
+                  background: "conic-gradient(from 0deg, #6fae55 0turn 0.25turn, #9a9a9a 0.25turn 0.5turn, #f5f5f2 0.5turn 0.75turn, #232323 0.75turn 1turn)",
+                  border: "none",
+                }}
+              />
+              <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 5, minHeight: 60, flex: 1, minWidth: 0 }}>
+                <span style={{ color: "var(--text-primary)", fontSize: 11, fontWeight: 600 }}>Ground</span>
+                <span style={{ color: "var(--text-secondary)", fontSize: 9.5 }}>Landscape &middot; {GROUND_THEME_LABELS[groundTheme]}</span>
+                <span style={{ color: "var(--text-secondary)", fontSize: 9.5, fontVariantNumeric: "tabular-nums" }}>&plusmn; 0.0 m</span>
+              </div>
+              <LevelToggleBtn
+                active={groundOn}
+                onClick={() => {
+                  setGroundOn(!groundOn);
+                  groundApiRef.current.setEnabled(!groundOn);
+                }}
+                title={groundOn ? "Ground plane on -- click to hide" : "Ground plane off -- click to show"}
+              >
+                {groundOn ? <Eye size={12} strokeWidth={2} /> : <EyeOff size={12} strokeWidth={2} />}
+              </LevelToggleBtn>
+            </div>
           </div>
           <div
             title="Drag to scroll"
@@ -9601,32 +9731,6 @@ export default function RoomBuilder() {
         </div>
 
         <div style={{ padding: "12px 12px", display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, color: "var(--text-secondary)", cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                className="rb-radio"
-                checked={groundOn}
-                onChange={(e) => {
-                  setGroundOn(e.target.checked);
-                  groundApiRef.current.setEnabled(e.target.checked);
-                }}
-              />
-              Ground
-            </label>
-            {groundOn && (
-              <button
-                className="rb-btn"
-                onClick={() => setGroundTheme((i) => (i + 1) % GROUND_THEMES.length)}
-                title={`World: ${GROUND_THEME_LABELS[groundTheme]} (tap to cycle: ${GROUND_THEME_LABELS.join(", ")})`}
-                style={{
-                  padding: 0, width: 18, height: 18, minWidth: 18, borderRadius: "50%", overflow: "hidden",
-                  background: "conic-gradient(from 0deg, #6fae55 0turn 0.25turn, #9a9a9a 0.25turn 0.5turn, #f5f5f2 0.5turn 0.75turn, #232323 0.75turn 1turn)",
-                  border: "1px solid var(--border-control)", flexShrink: 0,
-                }}
-              />
-            )}
-          </div>
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9.5, marginBottom: 4 }}>
               <span>Layer height</span>
@@ -9833,7 +9937,7 @@ export default function RoomBuilder() {
           would go dark-on-dark and vanish in light mode). The room
           dimensions readout itself now lives in the Layers panel instead
           of floating here. */}
-      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: 16, color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 8.5, textAlign: "right" }}>
+      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: rightPanelWidth + 16, color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 8.5, textAlign: "right" }}>
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
 
@@ -9846,7 +9950,7 @@ export default function RoomBuilder() {
         style={{
           position: "absolute", left: layersPanelWidth + 20, bottom: RIBBON_HEIGHT + 20, zIndex: 5,
           display: "flex", alignItems: "flex-end", gap: 22, flexWrap: "wrap",
-          maxWidth: `calc(100% - ${layersPanelWidth + 40}px)`,
+          maxWidth: `calc(100% - ${layersPanelWidth + rightPanelWidth + 60}px)`,
           // no panel chrome -- text and thin sliders float directly over
           // the 3D view, same treatment as the color wheel's own
           // hue/saturation/lightness sliders.
@@ -10442,7 +10546,10 @@ export default function RoomBuilder() {
       {/* BOTTOM: ribbon -- tools, then snapping/measurements, then viewport controls */}
       <div className="ribbon">
         <div className="ribbon-section">
-          <span className="panel-title" style={{ marginRight: 4 }}>Exodex</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 1, marginRight: 6, flexShrink: 0 }}>
+            <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>Build</span>
+            <span style={{ fontSize: 8, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>Create and edit elements</span>
+          </div>
           <button
             className="rb-btn"
             onClick={() => setThemeWheelOpen((v) => !v)}
@@ -10463,19 +10570,21 @@ export default function RoomBuilder() {
               border: "1px solid var(--border-control)",
             }}
           />
-          <button className={`rb-btn ${tool === "move" ? "active" : ""}`} onClick={() => setTool("move")}>Wall</button>
-          <button className={`rb-btn ${tool === "cut" ? "active" : ""}`} onClick={() => setTool("cut")}>Window</button>
-          <button className={`rb-btn ${tool === "door" ? "active" : ""}`} onClick={() => setTool("door")}>Door</button>
-          <button className={`rb-btn ${tool === "room" ? "active" : ""}`} onClick={() => setTool("room")} title="Tap and drag to draw a new room -- on the floor, or on open ground beside it">Room</button>
-          <button className={`rb-btn ${tool === "stairs" ? "active" : ""}`} onClick={() => setTool("stairs")}>Stairs</button>
-          <button className={`rb-btn ${tool === "props" ? "active" : ""}`} onClick={() => setTool("props")}>Props</button>
+          <RibbonToolButton Icon={RectangleVertical} label="Wall" active={tool === "move"} onClick={() => setTool("move")} />
+          <RibbonToolButton Icon={AppWindow} label="Opening" active={tool === "cut"} onClick={() => setTool("cut")} />
+          <RibbonToolButton Icon={DoorOpen} label="Door" active={tool === "door"} onClick={() => setTool("door")} />
+          <RibbonToolButton Icon={Box} label="Room" active={tool === "room"} onClick={() => setTool("room")} title="Tap and drag to draw a new room -- on the floor, or on open ground beside it" />
+          <RibbonToolButton Icon={StairsIcon} label="Stair" active={tool === "stairs"} onClick={() => setTool("stairs")} />
+          <RibbonToolButton Icon={Shapes} label="Prop" active={tool === "props"} onClick={() => setTool("props")} />
         </div>
 
         <div className="ribbon-divider" />
 
         <div className="ribbon-section">
           <div className="ribbon-group">
-            <span className="ribbon-label">Grid &middot; {gridSizeFt.toFixed(2)} ft</span>
+            <span className="ribbon-label" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <Grid3x3 size={11} strokeWidth={1.8} /> Grid &middot; {gridSizeFt.toFixed(2)} ft
+            </span>
             <input
               className="rb-range"
               type="range"
@@ -10486,20 +10595,20 @@ export default function RoomBuilder() {
               onChange={(e) => setGridSizeFt(parseFloat(e.target.value))}
             />
           </div>
-          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            <button className={`rb-btn ${snapEnabled ? "active" : ""}`} onClick={() => setSnapEnabled((v) => !v)}>Snap</button>
-            <button className={`rb-btn ${showMeasurements ? "active" : ""}`} onClick={() => setShowMeasurements((v) => !v)}>Measure</button>
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <RibbonIconToggle Icon={Magnet} active={snapEnabled} onClick={() => setSnapEnabled((v) => !v)} title="Snap" />
+            <RibbonIconToggle Icon={Ruler} active={showMeasurements} onClick={() => setShowMeasurements((v) => !v)} title="Measure" />
           </div>
         </div>
 
         <div className="ribbon-divider" />
 
         <div className="ribbon-section">
-          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            <button className={`rb-btn ${hiddenLineMode ? "active" : ""}`} onClick={() => setHiddenLineMode((v) => !v)}>Hidden line</button>
-            <button className={`rb-btn ${wireframeMode ? "active" : ""}`} onClick={() => setWireframeMode((v) => !v)}>Wireframe</button>
-            <button className={`rb-btn ${transparentInactive ? "active" : ""}`} onClick={() => setTransparentInactive((v) => !v)}>Fade inactive</button>
-            <button className={`rb-btn ${ultraRealistic ? "active" : ""}`} onClick={() => setUltraRealistic((v) => !v)}>Realistic</button>
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <RibbonIconToggle Icon={SquareDashed} active={hiddenLineMode} onClick={() => setHiddenLineMode((v) => !v)} title="Hidden line" />
+            <RibbonIconToggle Icon={Cuboid} active={wireframeMode} onClick={() => setWireframeMode((v) => !v)} title="Wireframe" />
+            <RibbonIconToggle Icon={Contrast} active={transparentInactive} onClick={() => setTransparentInactive((v) => !v)} title="Fade inactive" />
+            <RibbonIconToggle Icon={Sparkles} active={ultraRealistic} onClick={() => setUltraRealistic((v) => !v)} title="Realistic" />
           </div>
           <div className="ribbon-group" style={{ minWidth: 110 }}>
             <span className="ribbon-label">Light</span>
