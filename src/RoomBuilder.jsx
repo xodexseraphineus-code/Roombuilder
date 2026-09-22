@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, DoorOpen, AppWindow, RectangleVertical, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, Pencil } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -31,6 +31,8 @@ const ROOM_SNAP_DIST = 3;          // meters -- generous snap radius for the Roo
 const WALL_CYCLE_HOLD_MS = 2000;   // once a dragged partition snaps flush to an opposing wall, this long a hold advances solid -> door -> fully-open
 const WALL_DELETE_HOLD_MS = 1000;  // once a pushed selection's bump-out snaps flush to an opposing wall, this long a hold arms deleting it
 const DRAW_TOOL_HOLD_MS = 1000;    // Room/Props tools: how long a stationary press on empty space must be held before it arms drawing -- a quick drag before that orbits the camera instead
+const VIEWCUBE_SIZE = 88;          // the ViewCube widget's on-screen size (both the WebGL mini-viewport and its DOM hit-test overlay use this same value)
+const VIEWCUBE_PAD = 16;           // gap from the viewport's own top/right edges
 const MIN_PROP_DRAW_SIZE = 0.5 * FT; // smallest footprint a dragged-out prop commits at
 const WALL_CYCLE_DOOR_WIDTH = 6 * FT; // matches the automatic room-to-room connecting door width
 const VIEW_SHIFT = 1.28;          // widen the virtual frame this much to push the model right, clear of the side panel
@@ -279,6 +281,43 @@ function StairsIcon({ size = 16, strokeWidth = 2 }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 20v-4h4v-4h4V8h4V4" />
       <path d="M4 20h16" />
+    </svg>
+  );
+}
+// literal architectural glyphs for the ribbon's Wall/Opening/Door tool
+// buttons -- the generic lucide substitutes (a plain rectangle, a browser-
+// style window, a generic door) didn't read as building elements the way
+// the reference mockup's own icons did, so these are drawn to match the
+// standard plan-symbol convention for each instead.
+function WallIcon({ size = 16, strokeWidth = 2 }) {
+  // an L-shaped wall corner in plan, the standard way to symbolize "wall"
+  // distinct from a window or door opening.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 3v13a3 3 0 0 0 3 3h13" />
+      <path d="M9 3v9a3 3 0 0 0 3 3h9" />
+    </svg>
+  );
+}
+function WindowIcon({ size = 16, strokeWidth = 2 }) {
+  // a mullioned window pane -- a plain frame with a cross, the standard
+  // plan/elevation symbol for a window opening.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="1" />
+      <path d="M12 3.5v17M3.5 12h17" />
+    </svg>
+  );
+}
+function DoorSwingIcon({ size = 16, strokeWidth = 2 }) {
+  // a door leaf plus its swing arc, hinged at bottom-left -- the standard
+  // architectural plan symbol for a door, rather than a generic "open
+  // door" pictogram.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 21V3" />
+      <path d="M5 21L17.5 8.5" />
+      <path d="M5 3A18 18 0 0 1 23 21" />
     </svg>
   );
 }
@@ -783,6 +822,8 @@ export default function RoomBuilder() {
   const rebuildGridRef = useRef(() => {});
   const rebuildModelRef = useRef(() => {});
   const setViewModeApiRef = useRef(() => {});
+  const viewCubeApiRef = useRef(null);
+  const viewCubeDragRef = useRef(null);
   // UI chrome theme (ribbon, panels, buttons) -- mostly just the
   // surrounding app frame (CSS), but also drives the 3D viewport's empty-
   // space background/fog color via viewportThemeApiRef below, since a
@@ -792,6 +833,17 @@ export default function RoomBuilder() {
   const uiThemeRef = useRef(uiTheme);
   useEffect(() => { uiThemeRef.current = uiTheme; }, [uiTheme]);
   const viewportThemeApiRef = useRef(() => {});
+  // prototyping-only nav/lens tabs -- plain local UI state, nothing wired
+  // behind either of these yet.
+  const [topNavTab, setTopNavTab] = useState("Build");
+  const [lensTab, setLensTab] = useState("Space");
+  // dummy Intent panel state -- a free-text prompt plus a handful of
+  // sliders, none of it wired to anything real yet (see the right panel).
+  const [intentText, setIntentText] = useState("A house for solitude, making things, books, friends and the forest.");
+  const [editingIntentText, setEditingIntentText] = useState(false);
+  const [intentSliders, setIntentSliders] = useState({
+    Solitude: 80, Creation: 80, Nature: 80, Social: 50, Daylight: 80, Privacy: 80, Formality: 20,
+  });
   useEffect(() => { viewportThemeApiRef.current(uiTheme); }, [uiTheme]);
   const [tool, setTool] = useState("move");
   const toolRef = useRef(tool);
@@ -870,6 +922,41 @@ export default function RoomBuilder() {
   const MAX_RECENT_SCENES = 14;
   const [recentScenes, setRecentScenes] = useState([]);
   const currentSceneIdRef = useRef(`scene_${Date.now()}`);
+  // the currently open project's display name (top-bar, click to rename) --
+  // separate from each Recent entry's own stored name so a brand new,
+  // not-yet-autosaved scene still has something to show immediately.
+  const [sceneName, setSceneName] = useState("Untitled Building");
+  const sceneNameRef = useRef(sceneName);
+  useEffect(() => { sceneNameRef.current = sceneName; }, [sceneName]);
+  const [sceneDropdownOpen, setSceneDropdownOpen] = useState(false);
+  const [renamingSceneNameId, setRenamingSceneNameId] = useState(null);
+  const [sceneRenameValue, setSceneRenameValue] = useState("");
+  const [editingProjectName, setEditingProjectName] = useState(false);
+  function renameCurrentScene(newName) {
+    const name = newName.trim() || "Untitled Building";
+    setSceneName(name);
+    setRecentScenes((prev) => {
+      const idx = prev.findIndex((s) => s.id === currentSceneIdRef.current);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], name };
+      try { localStorage.setItem(RECENT_SCENES_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }
+  function renameSavedScene(id, newName) {
+    const name = newName.trim();
+    if (!name) return;
+    setRecentScenes((prev) => {
+      const idx = prev.findIndex((s) => s.id === id);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], name };
+      try { localStorage.setItem(RECENT_SCENES_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+    if (id === currentSceneIdRef.current) setSceneName(name);
+  }
   useEffect(() => {
     try {
       const raw = localStorage.getItem(RECENT_SCENES_KEY);
@@ -895,7 +982,7 @@ export default function RoomBuilder() {
       const idx = prev.findIndex((s) => s.id === id);
       const entry = {
         id,
-        name: idx >= 0 ? prev[idx].name : `Scene ${prev.length + 1}`,
+        name: idx >= 0 ? prev[idx].name : sceneNameRef.current,
         savedAt: Date.now(),
         snapshot: snap,
         thumb: thumb || (idx >= 0 ? prev[idx].thumb : null),
@@ -915,7 +1002,9 @@ export default function RoomBuilder() {
   }, []);
   function loadRecentScene(entry) {
     currentSceneIdRef.current = entry.id;
+    setSceneName(entry.name || "Untitled Building");
     sceneIoApiRef.current.load(entry.snapshot);
+    setSceneDropdownOpen(false);
   }
   // the 5 built-in starting-point presets are read-only, so loading one
   // starts a fresh scene id (like "New scene" does) rather than reusing the
@@ -923,6 +1012,7 @@ export default function RoomBuilder() {
   // of ever overwriting the preset.
   function loadPresetScene(preset) {
     currentSceneIdRef.current = `scene_${Date.now()}`;
+    setSceneName(preset.name || "Untitled Building");
     sceneIoApiRef.current.load(preset.snapshot);
   }
   const [lightAzimuth, setLightAzimuth] = useState(45);
@@ -1163,6 +1253,89 @@ export default function RoomBuilder() {
     const orthoFrontCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
     const orthoLeftCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
     let activeCamera = camera;
+
+    // ---------- ViewCube widget: its own tiny scene, camera, and labeled
+    // cube mesh, rendered into a small corner viewport each frame (see
+    // tick()) and orbited to always mirror the main camera's orientation.
+    const viewCubeScene = new THREE.Scene();
+    const viewCubeCamera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
+    function makeCubeFaceTexture(label) {
+      const size = 128;
+      const c = document.createElement("canvas");
+      c.width = size; c.height = size;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#4a4a4e";
+      ctx.fillRect(0, 0, size, size);
+      ctx.strokeStyle = "rgba(255,255,255,0.4)";
+      ctx.lineWidth = 5;
+      ctx.strokeRect(3, 3, size - 6, size - 6);
+      ctx.fillStyle = "#f0f0f2";
+      ctx.font = "bold 20px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, size / 2, size / 2);
+      return new THREE.CanvasTexture(c);
+    }
+    // BoxGeometry's own material-index order: +x, -x, +y, -y, +z, -z.
+    const viewCubeFaceDirs = [
+      { key: "right", label: "RIGHT" }, { key: "left", label: "LEFT" },
+      { key: "top", label: "TOP" }, { key: "bottom", label: "BOTTOM" },
+      { key: "front", label: "FRONT" }, { key: "back", label: "BACK" },
+    ];
+    const viewCubeMaterials = viewCubeFaceDirs.map((f) => new THREE.MeshBasicMaterial({ map: makeCubeFaceTexture(f.label) }));
+    const viewCubeMesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), viewCubeMaterials);
+    viewCubeScene.add(viewCubeMesh);
+    viewCubeMesh.add(new THREE.LineSegments(
+      new THREE.EdgesGeometry(viewCubeMesh.geometry),
+      new THREE.LineBasicMaterial({ color: 0x1a1a1a, transparent: true, opacity: 0.5 })
+    ));
+    const viewCubeRaycaster = new THREE.Raycaster();
+    // classifies a raycast hit on the cube into a direction vector: one
+    // axis is always at the true extreme (whichever face was struck); the
+    // other two register too if the hit landed near that face's own edge,
+    // giving exactly the face/edge/corner distinction a real ViewCube has.
+    function classifyCubeHit(localPoint) {
+      const threshold = 0.6;
+      const dir = [0, 0, 0];
+      ["x", "y", "z"].forEach((k, i) => {
+        if (Math.abs(localPoint[k]) > threshold) dir[i] = Math.sign(localPoint[k]);
+      });
+      return dir;
+    }
+    function pickViewCube(ndcX, ndcY) {
+      viewCubeRaycaster.setFromCamera({ x: ndcX, y: ndcY }, viewCubeCamera);
+      const hits = viewCubeRaycaster.intersectObject(viewCubeMesh);
+      if (!hits.length) return null;
+      const local = viewCubeMesh.worldToLocal(hits[0].point.clone());
+      return classifyCubeHit(local);
+    }
+    function updateViewCubeOrientation() {
+      const dir = getCurrentViewDirection();
+      const up = viewMode === "orbit" ? new THREE.Vector3(0, 1, 0) : ORTHO_DIRS[viewMode].up;
+      viewCubeCamera.position.copy(dir).multiplyScalar(4.5);
+      viewCubeCamera.up.copy(up);
+      viewCubeCamera.lookAt(0, 0, 0);
+      viewCubeCamera.updateProjectionMatrix();
+    }
+    function renderViewCube(canvasWidth, canvasHeight) {
+      updateViewCubeOrientation();
+      const size = VIEWCUBE_SIZE;
+      const x = canvasWidth - rightPanelWidthRef.current - VIEWCUBE_PAD - size;
+      const y = canvasHeight - TOPBAR_HEIGHT - VIEWCUBE_PAD - size; // WebGL viewport Y is bottom-up
+      renderer.setScissorTest(true);
+      renderer.setScissor(x, y, size, size);
+      renderer.setViewport(x, y, size, size);
+      renderer.clearDepth();
+      renderer.render(viewCubeScene, viewCubeCamera);
+      renderer.setScissorTest(false);
+      renderer.setViewport(0, 0, canvasWidth, canvasHeight);
+    }
+    viewCubeApiRef.current = {
+      pick: pickViewCube,
+      setFaceView: (key) => setViewMode(key),
+      setOrbitDirection,
+      orbitByPixelDelta,
+    };
     // quad-view state: splitX/splitY are the divider's fractional position
     // (0-1) across the canvas; interactionCamera/interactionRect are locked
     // in at the start of each pointer gesture so a drag stays mapped to
@@ -5331,11 +5504,13 @@ export default function RoomBuilder() {
     const target = new THREE.Vector3(0, state.height * 0.32, 0);
     const ORTHO_DIRS = {
       top: { dir: new THREE.Vector3(0, 1, 0), up: new THREE.Vector3(0, 0, -1) },
+      bottom: { dir: new THREE.Vector3(0, -1, 0), up: new THREE.Vector3(0, 0, 1) },
       front: { dir: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(0, 1, 0) },
+      back: { dir: new THREE.Vector3(0, 0, -1), up: new THREE.Vector3(0, 1, 0) },
       left: { dir: new THREE.Vector3(-1, 0, 0), up: new THREE.Vector3(0, 1, 0) },
       right: { dir: new THREE.Vector3(1, 0, 0), up: new THREE.Vector3(0, 1, 0) },
     };
-    function computeOrthoFit(dirKey) {
+    function computeSceneBBox() {
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
       floors.forEach((f) => {
         const g = floorGroups.get(f.id);
@@ -5352,10 +5527,14 @@ export default function RoomBuilder() {
         });
       });
       if (minX === Infinity) { minX = -3; maxX = 3; minZ = -3; maxZ = 3; minY = 0; maxY = 3; }
+      return { minX, maxX, minY, maxY, minZ, maxZ };
+    }
+    function computeOrthoFit(dirKey) {
+      const { minX, maxX, minY, maxY, minZ, maxZ } = computeSceneBBox();
       const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
       let halfW, halfH;
-      if (dirKey === "top") { halfW = (maxX - minX) / 2; halfH = (maxZ - minZ) / 2; }
-      else if (dirKey === "front") { halfW = (maxX - minX) / 2; halfH = (maxY - minY) / 2; }
+      if (dirKey === "top" || dirKey === "bottom") { halfW = (maxX - minX) / 2; halfH = (maxZ - minZ) / 2; }
+      else if (dirKey === "front" || dirKey === "back") { halfW = (maxX - minX) / 2; halfH = (maxY - minY) / 2; }
       else { halfW = (maxZ - minZ) / 2; halfH = (maxY - minY) / 2; } // left / right
       const margin = 3.3; // room occupies roughly 30% of the frame, not a snug fit
       halfW = Math.max(0.4, halfW * margin);
@@ -5365,6 +5544,16 @@ export default function RoomBuilder() {
       // whichever dimension needs more room to stay uncropped wins.
       const fitH = Math.max(halfH, halfW / aspect);
       return { cx, cy, cz, fitH };
+    }
+    // a looser, direction-agnostic fit for the ViewCube's diagonal (edge/
+    // corner) presets -- those don't line up cleanly with any single pair
+    // of axes, so this just centers on the model and backs off enough to
+    // clear its bounding sphere, rather than a tight contain-fit.
+    function computeDiagonalFit() {
+      const { minX, maxX, minY, maxY, minZ, maxZ } = computeSceneBBox();
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+      const diag = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+      return { cx, cy, cz, radius: Math.max(6, diag * 0.85) };
     }
 
     function updateCamera() {
@@ -5415,6 +5604,42 @@ export default function RoomBuilder() {
       updateCamera();
     }
     setViewModeApiRef.current = setViewMode;
+
+    // ---------- ViewCube: diagonal (edge/corner) presets + drag-to-orbit ----------
+    // face clicks reuse setViewMode/ORTHO_DIRS above (true orthographic
+    // projection, matching CAD convention); an edge or corner click instead
+    // drops into the existing perspective "orbit" camera pointed at that
+    // diagonal direction, which is what gives the 3/4 perspective look.
+    function setOrbitDirection(dx, dy, dz) {
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const ndy = dy / len;
+      dragState = null;
+      dragCrossFloorRestore = null;
+      orbiting = null;
+      pinchState = null;
+      const fit = computeDiagonalFit();
+      target.set(fit.cx, fit.cy, fit.cz);
+      radius = fit.radius;
+      phi = Math.acos(Math.min(1, Math.max(-1, ndy)));
+      theta = Math.atan2(dx / len, dz / len);
+      viewMode = "orbit";
+      updateCamera();
+    }
+    function orbitByPixelDelta(dxPix, dyPix) {
+      dragState = null;
+      orbiting = null;
+      viewMode = "orbit";
+      theta -= dxPix * 0.006;
+      phi = Math.min(1.45, Math.max(0.25, phi - dyPix * 0.006));
+      updateCamera();
+    }
+    function getCurrentViewDirection() {
+      if (viewMode === "orbit") {
+        return camera.position.clone().sub(target).normalize();
+      }
+      const cfg = ORTHO_DIRS[viewMode];
+      return cfg ? cfg.dir.clone() : new THREE.Vector3(0, 0, 1);
+    }
 
     // ---------- quad-view layout (top-left: top, top-right: orbit, bottom-left: front, bottom-right: left) ----------
     function ensureQuadPaneState() {
@@ -8550,17 +8775,21 @@ export default function RoomBuilder() {
           el = document.createElement("div");
           el.style.position = "absolute";
           el.style.transform = "translate(-50%, -50%)";
-          el.style.color = "#FF6B1A";
-          el.style.fontSize = "10.5px";
-          el.style.fontWeight = "700";
-          el.style.fontFamily = "'Roboto', system-ui, sans-serif";
+          el.style.fontSize = "8.5px";
+          el.style.fontWeight = "400";
+          el.style.fontFamily = "var(--font-system)";
           el.style.fontVariantNumeric = "tabular-nums";
           el.style.pointerEvents = "none";
-          el.style.textShadow = "0 1px 3px rgba(0,0,0,0.75)";
           el.style.whiteSpace = "nowrap";
           layer.appendChild(el);
           measureLabelPool[i] = el;
         }
+        // same theme-aware grey as the rest of the floating viewport text
+        // (the orbit/pan hint, the height-drag readout), not its own
+        // separate bright accent color.
+        const isLight = uiThemeRef.current === "light";
+        el.style.color = isLight ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)";
+        el.style.textShadow = isLight ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)";
         const inFront = a.point.clone().sub(activeCamera.position).dot(camForward) > 0;
         if (!inFront) { el.style.display = "none"; return; }
         const ndc = a.point.clone().project(activeCamera);
@@ -8622,7 +8851,7 @@ export default function RoomBuilder() {
         } else {
           el.style.color = "#" + new THREE.Color(isActive ? currentTintActiveColor : currentTintInactiveColor).getHexString();
         }
-        el.textContent = floorNamesRef.current[entry.id] || `Layer ${floors.findIndex((f) => f.id === entry.id) + 1}`;
+        el.textContent = floorNamesRef.current[entry.id] || `Level ${floors.findIndex((f) => f.id === entry.id) + 1}`;
         // Anchored in SCREEN space, not world space -- a fixed world-space
         // +X offset would swing to the front/left/behind the building as
         // the camera orbits. Instead project every corner of the floor's
@@ -8801,6 +9030,7 @@ export default function RoomBuilder() {
         renderer.shadowMap.enabled = viewMode === "orbit";
         scene.fog = viewMode === "orbit" ? sceneFog : null;
         renderActive(activeCamera);
+        renderViewCube(width, height);
         updateHeightLabel();
         updateMeasureLabels();
         updateFloorLabels();
@@ -8874,6 +9104,11 @@ export default function RoomBuilder() {
   // panel on the left, just dragged from its own (left) edge instead.
   const [rightPanelWidth, setRightPanelWidth] = useState(220);
   const rightPanelResizeRef = useRef(null);
+  // read inside the main effect's closure (mounted once), which otherwise
+  // would only ever see this state's very first value -- used to keep the
+  // ViewCube clear of the right panel.
+  const rightPanelWidthRef = useRef(rightPanelWidth);
+  useEffect(() => { rightPanelWidthRef.current = rightPanelWidth; }, [rightPanelWidth]);
   const layersScrollRef = useRef(null);
   const scrollStripDragRef = useRef(null);
   const recentScrollInnerRef = useRef(null);
@@ -9033,6 +9268,21 @@ export default function RoomBuilder() {
     selectedStairId != null ||
     selectedBalconyId != null ||
     selectedOpeningId != null;
+
+  // ViewCube: a face hit is exactly one nonzero axis (an orthogonal view,
+  // via the existing setViewMode/ORTHO_DIRS system); an edge or corner hit
+  // is two or three (a 3/4 perspective view, via setOrbitDirection).
+  function handleViewCubeDirection(dir) {
+    const nonZeroCount = dir.filter((v) => v !== 0).length;
+    if (nonZeroCount === 1) {
+      const axis = dir[0] !== 0 ? 0 : dir[1] !== 0 ? 1 : 2;
+      const key = axis === 0 ? (dir[0] > 0 ? "right" : "left") : axis === 1 ? (dir[1] > 0 ? "top" : "bottom") : (dir[2] > 0 ? "front" : "back");
+      setViewMode(key);
+    } else if (viewCubeApiRef.current) {
+      viewCubeApiRef.current.setOrbitDirection(dir[0], dir[1], dir[2]);
+      setViewMode("orbit");
+    }
+  }
 
   return (
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
@@ -9333,17 +9583,22 @@ export default function RoomBuilder() {
         ref={heightLabelRef}
         style={{
           position: "absolute", display: "none", transform: "translate(-50%, -100%)",
-          background: "rgba(232, 24, 156, 0.28)", border: "1px solid #E8189C", borderRadius: 2,
-          padding: "3px 7px", color: "#FFFFFF", fontSize: 10, fontWeight: 700,
+          // same theme-aware grey as the rest of the floating viewport text
+          // (the orbit/pan hint, the Measure tool's own labels) -- no boxed
+          // background, just text, consistent everywhere on the canvas.
+          color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)",
+          textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)",
+          padding: "3px 7px", fontSize: 8.5, fontWeight: 400,
           fontVariantNumeric: "tabular-nums", pointerEvents: "none", whiteSpace: "nowrap",
         }}
       />
 
-      {/* RIGHT: docked panel, same chrome/proportions as the reference
-          mockup's right-hand INTENT slot -- parked here for now hosting
-          Presets (this app's own "start from a scene" feature, formerly
-          docked as "Recent" below the Layers panel) until a real per-
-          project intent feature exists to put in that slot instead. */}
+      {/* RIGHT: docked panel, matching the reference mockup's INTENT slot --
+          a free-text intent prompt plus a handful of sliders (all dummy,
+          nothing behind them yet), with Presets (this app's own "start
+          from a scene" feature, formerly docked as "Recent" below the
+          Layers panel) tucked into a compact strip at the bottom rather
+          than occupying the whole panel like it used to. */}
       <div
         style={{
           position: "absolute", top: TOPBAR_HEIGHT, right: 0, bottom: RIBBON_HEIGHT, width: rightPanelWidth,
@@ -9369,47 +9624,99 @@ export default function RoomBuilder() {
             cursor: "ew-resize", touchAction: "none", zIndex: 1,
           }}
         />
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 14px 10px" }}>
-          <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--text-secondary)" }}>Presets</span>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 14px 10px", flexShrink: 0 }}>
+          <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--text-secondary)" }}>Intent</span>
           <MoreHorizontal size={15} strokeWidth={2} color="var(--text-tertiary)" />
         </div>
-        <div
-          className="recent-scroll layers-scroll"
-          ref={recentScrollInnerRef}
-          style={{ position: "static", flex: 1, minHeight: 0, display: "flex", flexWrap: "wrap", gap: 8, alignContent: "flex-start", padding: "0 14px 14px" }}
-        >
-          {DEFAULT_PRESET_SCENES.map((preset) => (
-            <button
-              key={preset.id}
-              className="rb-btn"
-              onClick={() => loadPresetScene(preset)}
-              title={preset.name}
-              style={{ padding: 2, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
-            >
-              <img src={preset.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
-            </button>
-          ))}
-          {recentScenes.length === 0 && (
-            <span style={{ fontSize: 9, color: "var(--text-tertiary)", flexBasis: "100%" }}>Autosaves every 15s</span>
-          )}
-          {recentScenes.map((entry) => (
-            <button
-              key={entry.id}
-              className="rb-btn"
-              onClick={() => loadRecentScene(entry)}
-              title={`${entry.name} · ${new Date(entry.savedAt).toLocaleTimeString()}`}
+
+        <div style={{ padding: "0 14px 14px", flexShrink: 0 }}>
+          {editingIntentText ? (
+            <textarea
+              autoFocus
+              value={intentText}
+              onChange={(e) => setIntentText(e.target.value)}
+              onBlur={() => setEditingIntentText(false)}
+              rows={3}
               style={{
-                padding: 2, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
-                boxShadow: currentSceneIdRef.current === entry.id ? "inset 0 0 0 1.5px var(--ring-selected)" : "none",
+                width: "100%", resize: "none", fontSize: 12.5, lineHeight: 1.4, fontFamily: "var(--font-system)",
+                background: "var(--bg-control)", color: "var(--text-primary)", border: "1px solid var(--accent)",
+                borderRadius: 6, padding: 8,
               }}
+            />
+          ) : (
+            <div
+              onClick={() => setEditingIntentText(true)}
+              title="Click to edit"
+              style={{ fontSize: 12.5, lineHeight: 1.4, color: "var(--text-primary)", cursor: "text" }}
             >
-              {entry.thumb ? (
-                <img src={entry.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
-              ) : (
-                <div style={{ width: 56, height: 56, borderRadius: 6, background: "var(--bg-thumb)" }} />
-              )}
-            </button>
-          ))}
+              {intentText}
+            </div>
+          )}
+        </div>
+
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 14px 10px", display: "flex", flexDirection: "column", gap: 12 }}>
+          {Object.keys(intentSliders).map((key) => {
+            const v = intentSliders[key];
+            const wordLabel = v >= 67 ? "High" : v >= 34 ? "Medium" : "Low";
+            return (
+              <div key={key}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "var(--text-secondary)", marginBottom: 4 }}>
+                  <span>{key}</span>
+                  <span style={{ color: "var(--text-primary)" }}>{wordLabel}</span>
+                </div>
+                <input
+                  className="rb-range"
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={v}
+                  onChange={(e) => setIntentSliders((prev) => ({ ...prev, [key]: parseInt(e.target.value, 10) }))}
+                />
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Presets -- compact, not a whole-panel takeover: this is the
+            mockup's own "Suggestions" slot, repurposed for now. */}
+        <div style={{ flexShrink: 0, borderTop: "1px solid var(--divider-strong)", padding: "10px 14px 12px" }}>
+          <span className="panel-title" style={{ fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-tertiary)" }}>Presets</span>
+          <div
+            className="recent-scroll"
+            ref={recentScrollInnerRef}
+            style={{ display: "flex", gap: 6, overflowX: "auto", marginTop: 8, paddingBottom: 2 }}
+          >
+            {DEFAULT_PRESET_SCENES.map((preset) => (
+              <button
+                key={preset.id}
+                className="rb-btn"
+                onClick={() => loadPresetScene(preset)}
+                title={preset.name}
+                style={{ padding: 2, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
+              >
+                <img src={preset.thumb} alt="" style={{ width: 44, height: 44, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
+              </button>
+            ))}
+            {recentScenes.map((entry) => (
+              <button
+                key={entry.id}
+                className="rb-btn"
+                onClick={() => loadRecentScene(entry)}
+                title={`${entry.name} · ${new Date(entry.savedAt).toLocaleTimeString()}`}
+                style={{
+                  padding: 2, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+                  boxShadow: currentSceneIdRef.current === entry.id ? "inset 0 0 0 1.5px var(--ring-selected)" : "none",
+                }}
+              >
+                {entry.thumb ? (
+                  <img src={entry.thumb} alt="" style={{ width: 44, height: 44, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
+                ) : (
+                  <div style={{ width: 44, height: 44, borderRadius: 6, background: "var(--bg-thumb)" }} />
+                )}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -9453,7 +9760,7 @@ export default function RoomBuilder() {
               <button
                 ref={dupBtnRef}
                 className="rb-btn"
-                title="Duplicate the selected layer -- or drag a layer row down onto this button"
+                title="Duplicate the selected level -- or drag a level row down onto this button"
                 style={{
                   width: 22, height: 22, minWidth: 22, padding: 0, borderRadius: "50%",
                   display: "flex", alignItems: "center", justifyContent: "center",
@@ -9467,7 +9774,7 @@ export default function RoomBuilder() {
               <button
                 ref={delBtnRef}
                 className="rb-btn"
-                title="Delete the selected layer -- or drag a layer row down onto this button"
+                title="Delete the selected level -- or drag a level row down onto this button"
                 style={{
                   width: 22, height: 22, minWidth: 22, padding: 0, borderRadius: "50%",
                   display: "flex", alignItems: "center", justifyContent: "center",
@@ -9480,7 +9787,7 @@ export default function RoomBuilder() {
               </button>
               <button
                 className="rb-btn"
-                title="Add a new layer with a default room"
+                title="Add a new level with a default room"
                 style={{
                   width: 22, height: 22, minWidth: 22, padding: 0, borderRadius: "50%",
                   display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-control)",
@@ -9649,12 +9956,12 @@ export default function RoomBuilder() {
                         onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation();
-                          setRenameInputValue(floorNames[id] || `Layer ${floorIds.length - i}`);
+                          setRenameInputValue(floorNames[id] || `Level ${floorIds.length - i}`);
                           setRenamingFloorId(id);
                         }}
                         title="Click to rename"
                       >
-                        {floorNames[id] || `Layer ${floorIds.length - i}`}
+                        {floorNames[id] || `Level ${floorIds.length - i}`}
                       </span>
                     )}
                   </div>
@@ -9733,7 +10040,7 @@ export default function RoomBuilder() {
         <div style={{ padding: "12px 12px", display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-secondary)", fontSize: 9.5, marginBottom: 4 }}>
-              <span>Layer height</span>
+              <span>Level height</span>
               <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)" }}>{floorHeight.toFixed(2)} m</span>
             </div>
             <input
@@ -9797,12 +10104,129 @@ export default function RoomBuilder() {
           borderBottom: "1px solid var(--splitter)",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
+        {/* prototyping nav tabs -- for playing with ideas only, not wired
+            to a real Levels/Lens/Intent/Explore mode switch yet. */}
+        <div style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)", display: "flex", gap: 2, pointerEvents: "auto" }}>
+          {["Build", "Levels", "Lens", "Intent", "Explore"].map((t) => (
+            <button
+              key={t}
+              className="rb-btn"
+              onClick={() => setTopNavTab(t)}
+              style={{
+                fontSize: 11, fontWeight: 600, letterSpacing: "0.03em", padding: "6px 10px",
+                color: topNavTab === t ? "var(--text-primary)" : "var(--text-secondary)",
+                borderBottom: topNavTab === t ? "2px solid var(--accent)" : "2px solid transparent",
+                borderRadius: 0,
+              }}
+            >
+              {t.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, pointerEvents: "auto", position: "relative" }}>
+          {editingProjectName ? (
+            <input
+              autoFocus
+              value={sceneName}
+              onChange={(e) => setSceneName(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              onBlur={() => { renameCurrentScene(sceneName); setEditingProjectName(false); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") setEditingProjectName(false);
+              }}
+              style={{
+                fontSize: 13, fontWeight: 600, background: "var(--bg-control)", color: "var(--text-primary)",
+                border: "1px solid var(--accent)", borderRadius: 5, padding: "3px 6px", width: 160,
+              }}
+            />
+          ) : (
+            <span
+              onClick={() => setEditingProjectName(true)}
+              title="Click to rename this project"
+              style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", cursor: "text", padding: "3px 6px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            >
+              {sceneName}
+            </span>
+          )}
+          <button
+            className="rb-btn"
+            title="Previously saved buildings"
+            onClick={() => setSceneDropdownOpen((v) => !v)}
+            style={{ padding: "3px 5px", display: "flex", alignItems: "center", color: "var(--text-secondary)" }}
+          >
+            <ChevronDown size={13} strokeWidth={2.2} />
+          </button>
+          {sceneDropdownOpen && (
+            <div
+              onClick={() => setSceneDropdownOpen(false)}
+              style={{ position: "fixed", inset: 0, zIndex: 55 }}
+            />
+          )}
+          {sceneDropdownOpen && (
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                position: "absolute", top: "100%", left: 0, marginTop: 6, width: 240, maxHeight: 320, overflowY: "auto",
+                background: "var(--bg-panel)", border: "0.5px solid var(--border-control)", borderRadius: 9,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.4)", zIndex: 60, padding: 6,
+              }}
+            >
+              {recentScenes.length === 0 && (
+                <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", padding: "8px 6px" }}>No saved buildings yet -- autosaves every 15s.</div>
+              )}
+              {recentScenes.map((entry) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "6px 6px", borderRadius: 6, cursor: "pointer",
+                    background: entry.id === currentSceneIdRef.current ? "var(--bg-selected)" : "transparent",
+                  }}
+                  onClick={() => { if (renamingSceneNameId !== entry.id) loadRecentScene(entry); }}
+                >
+                  {renamingSceneNameId === entry.id ? (
+                    <input
+                      autoFocus
+                      value={sceneRenameValue}
+                      onChange={(e) => setSceneRenameValue(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onBlur={() => { renameSavedScene(entry.id, sceneRenameValue); setRenamingSceneNameId(null); }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        if (e.key === "Escape") setRenamingSceneNameId(null);
+                      }}
+                      style={{ flex: 1, fontSize: 11, background: "var(--bg-control)", color: "var(--text-primary)", border: "1px solid var(--accent)", borderRadius: 4, padding: "2px 5px", minWidth: 0 }}
+                    />
+                  ) : (
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.name}</div>
+                      <div style={{ fontSize: 8.5, color: "var(--text-tertiary)" }}>{new Date(entry.savedAt).toLocaleString()}</div>
+                    </div>
+                  )}
+                  <button
+                    className="rb-btn"
+                    title="Rename"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSceneRenameValue(entry.name);
+                      setRenamingSceneNameId(entry.id);
+                    }}
+                    style={{ padding: 4, display: "flex", alignItems: "center", flexShrink: 0 }}
+                  >
+                    <Pencil size={11} strokeWidth={2} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ width: 10 }} />
           <button
             ref={newSceneBtnRef}
             className="rb-btn"
             onClick={() => {
               currentSceneIdRef.current = `scene_${Date.now()}`;
+              setSceneName("Untitled Building");
               resetEverythingRef.current();
               setTool("move");
               setSelectedStairId(null);
@@ -9900,26 +10324,6 @@ export default function RoomBuilder() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12, pointerEvents: "auto" }}>
-          <div style={{ display: "flex", gap: 5 }}>
-            <button className={`rb-btn ${viewLayout === "single" ? "active" : ""}`} title="Single view" style={{ display: "flex", alignItems: "center", padding: "6px 9px" }} onClick={() => setViewLayout("single")}>
-              <SingleViewIcon />
-            </button>
-            <button className={`rb-btn ${viewLayout === "quad" ? "active" : ""}`} title="Four views" style={{ display: "flex", alignItems: "center", padding: "6px 9px" }} onClick={() => setViewLayout("quad")}>
-              <QuadViewIcon />
-            </button>
-          </div>
-          <div style={{ display: "flex", gap: 5 }}>
-            {["orbit", "top", "front", "left", "right"].map((v) => (
-              <button
-                key={v}
-                className={`rb-btn ${viewMode === v ? "active" : ""}`}
-                style={{ padding: "6px 8px", fontSize: 9 }}
-                onClick={() => setViewMode(v)}
-              >
-                {v.charAt(0).toUpperCase() + v.slice(1)}
-              </button>
-            ))}
-          </div>
           <button
             className="rb-btn"
             title={uiTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
@@ -9929,6 +10333,26 @@ export default function RoomBuilder() {
             {uiTheme === "dark" ? <Moon size={16} strokeWidth={2} /> : <Sun size={16} strokeWidth={2} />}
           </button>
         </div>
+      </div>
+
+      {/* prototyping lens pills -- for playing with ideas only, not wired
+          to any real per-lens view yet. */}
+      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", zIndex: 4, display: "flex", gap: 2, background: "var(--bg-floating)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", border: "0.5px solid var(--border-control)", borderRadius: 999, padding: 3 }}>
+        {["Form", "Space", "Light", "Movement", "Material", "Climate"].map((t) => (
+          <button
+            key={t}
+            className="rb-btn"
+            onClick={() => setLensTab(t)}
+            style={{
+              fontSize: 10.5, padding: "5px 11px", borderRadius: 999,
+              background: lensTab === t ? "var(--bg-selected)" : "transparent",
+              color: lensTab === t ? "var(--text-primary)" : "var(--text-secondary)",
+              fontWeight: lensTab === t ? 600 : 500,
+            }}
+          >
+            {t}
+          </button>
+        ))}
       </div>
 
       {/* floats directly over the always-dark 3D canvas, not over any
@@ -9941,26 +10365,127 @@ export default function RoomBuilder() {
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
 
-      {/* floating tool-parameters panel -- fades up above the ribbon,
-          roughly aligned over the Wall/Window/Door/Stairs/Props group,
-          showing whatever's relevant to the active tool/selection instead
-          of a fixed row of controls that's always in the ribbon whether
-          or not they apply right now. */}
+      {/* ViewCube -- top-right of the viewport, Autodesk-style: tap a face
+          for a true orthogonal view, tap an edge/corner for a 3/4
+          perspective view, or drag anywhere on it to orbit freely (the
+          cube itself is rendered separately, into its own small viewport,
+          from inside the main render loop -- see renderViewCube). Hidden
+          in quad-view (4 independent panes, no single camera for it to
+          drive) and in walk mode (camera follows the character instead). */}
+      {viewLayout === "single" && !walkMode && (
+        <div
+          title="Drag to orbit -- click a face, edge, or corner for that view"
+          style={{
+            position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD, right: rightPanelWidth + VIEWCUBE_PAD,
+            width: VIEWCUBE_SIZE, height: VIEWCUBE_SIZE, zIndex: 6, cursor: "grab", touchAction: "none",
+          }}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            viewCubeDragRef.current = { startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, moved: false };
+          }}
+          onPointerMove={(e) => {
+            const ds = viewCubeDragRef.current;
+            if (!ds) return;
+            const dx = e.clientX - ds.lastX, dy = e.clientY - ds.lastY;
+            if (!ds.moved && Math.hypot(e.clientX - ds.startX, e.clientY - ds.startY) > 4) ds.moved = true;
+            if (ds.moved && viewCubeApiRef.current) {
+              viewCubeApiRef.current.orbitByPixelDelta(dx, dy);
+              setViewMode("orbit");
+            }
+            ds.lastX = e.clientX;
+            ds.lastY = e.clientY;
+          }}
+          onPointerUp={(e) => {
+            const ds = viewCubeDragRef.current;
+            viewCubeDragRef.current = null;
+            if (!ds || ds.moved || !viewCubeApiRef.current) return;
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+            const dir = viewCubeApiRef.current.pick(ndcX, ndcY);
+            if (dir) handleViewCubeDirection(dir);
+          }}
+        />
+      )}
+
+      {/* viewport buttons -- single/quad layout and the named camera
+          views, moved down into the viewport's own bottom-right corner
+          (used to live in the top bar) so they read as viewport chrome
+          rather than document-level commands. */}
       <div
         style={{
-          position: "absolute", left: layersPanelWidth + 20, bottom: RIBBON_HEIGHT + 20, zIndex: 5,
-          display: "flex", alignItems: "flex-end", gap: 22, flexWrap: "wrap",
-          maxWidth: `calc(100% - ${layersPanelWidth + rightPanelWidth + 60}px)`,
-          // no panel chrome -- text and thin sliders float directly over
-          // the 3D view, same treatment as the color wheel's own
-          // hue/saturation/lightness sliders.
-          opacity: showToolPanel ? 1 : 0,
-          transform: showToolPanel ? "translateY(0)" : "translateY(8px)",
-          pointerEvents: showToolPanel ? "auto" : "none",
-          transition: "opacity 0.18s ease, transform 0.18s ease",
-          filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.4))",
+          position: "absolute", bottom: RIBBON_HEIGHT + 34, right: rightPanelWidth + 16,
+          display: "flex", alignItems: "center", gap: 10,
+          background: "var(--bg-floating)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+          border: "0.5px solid var(--border-control)", borderRadius: 9, padding: "5px 7px",
         }}
       >
+        <div style={{ display: "flex", gap: 4 }}>
+          <button className={`rb-btn ${viewLayout === "single" ? "active" : ""}`} title="Single view" style={{ display: "flex", alignItems: "center", padding: "6px 9px" }} onClick={() => setViewLayout("single")}>
+            <SingleViewIcon />
+          </button>
+          <button className={`rb-btn ${viewLayout === "quad" ? "active" : ""}`} title="Four views" style={{ display: "flex", alignItems: "center", padding: "6px 9px" }} onClick={() => setViewLayout("quad")}>
+            <QuadViewIcon />
+          </button>
+        </div>
+        <div style={{ width: 1, alignSelf: "stretch", background: "var(--border-separator)" }} />
+        <div style={{ display: "flex", gap: 4 }}>
+          {["orbit", "top", "front", "left", "right"].map((v) => (
+            <button
+              key={v}
+              className={`rb-btn ${viewMode === v ? "active" : ""}`}
+              style={{ padding: "6px 8px", fontSize: 9 }}
+              onClick={() => setViewMode(v)}
+            >
+              {v.charAt(0).toUpperCase() + v.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* BOTTOM: ribbon -- tools, then snapping/measurements, then viewport controls */}
+      <div className="ribbon">
+        <div className="ribbon-section">
+          <div style={{ display: "flex", flexDirection: "column", gap: 1, marginRight: 6, flexShrink: 0 }}>
+            <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>Build</span>
+            <span style={{ fontSize: 8, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>Create and edit elements</span>
+          </div>
+          <button
+            className="rb-btn"
+            onClick={() => setThemeWheelOpen((v) => !v)}
+            title="Room color theme -- pick a hue or grey to tint the walls, floor, stairs, and props as one cohesive palette"
+            style={{
+              padding: 0, width: 22, height: 22, minWidth: 22, borderRadius: "50%", overflow: "hidden",
+              background: "conic-gradient(from 0deg, #e5484d, #f2c230, #4caf6d, #4a90d9, #9b5de5, #e5484d)",
+              boxShadow: themeWheelOpen ? "0 0 0 2px var(--ring-selected)" : "none",
+            }}
+          />
+          <button
+            className="rb-btn"
+            onClick={() => setBuildingMaterialIndex((i) => (i + 1) % BUILDING_MATERIAL_NAMES.length)}
+            title={`Finish: ${BUILDING_MATERIAL_NAMES[buildingMaterialIndex]} (click to cycle: ${BUILDING_MATERIAL_NAMES.join(", ")}) -- an overlay on the current theme color, except concrete which keeps its own grey`}
+            style={{
+              padding: 0, width: 28, height: 28, minWidth: 28, borderRadius: "50%", overflow: "hidden",
+              background: "conic-gradient(from 0deg, #9a9a9a 0turn 0.25turn, #232323 0.25turn 0.5turn, #f2c230 0.5turn 0.75turn, #f5f5f2 0.75turn 1turn)",
+              border: "1px solid var(--border-control)",
+            }}
+          />
+          <RibbonToolButton Icon={WallIcon} label="Wall" active={tool === "move"} onClick={() => setTool("move")} />
+          <RibbonToolButton Icon={WindowIcon} label="Opening" active={tool === "cut"} onClick={() => setTool("cut")} />
+          <RibbonToolButton Icon={DoorSwingIcon} label="Door" active={tool === "door"} onClick={() => setTool("door")} />
+          <RibbonToolButton Icon={Box} label="Room" active={tool === "room"} onClick={() => setTool("room")} title="Tap and drag to draw a new room -- on the floor, or on open ground beside it" />
+          <RibbonToolButton Icon={StairsIcon} label="Stair" active={tool === "stairs"} onClick={() => setTool("stairs")} />
+          <RibbonToolButton Icon={Shapes} label="Prop" active={tool === "props"} onClick={() => setTool("props")} />
+        </div>
+
+        {showToolPanel && (
+        <>
+        <div className="ribbon-divider" />
+        {/* tool-parameters section -- inline in the ribbon itself now
+            (used to float above it in its own row), showing whatever's
+            relevant to the active tool/selection right beside the tool
+            switches instead of a separate floating panel. */}
+        <div className="ribbon-section" style={{ flexWrap: "wrap", rowGap: 6, alignItems: "center", maxWidth: "56%" }}>
         {tool === "move" && selectedPanel == null && (
           <div className="ribbon-group" style={{ minWidth: 220 }}>
             <span className="ribbon-label">Column</span>
@@ -10541,42 +11066,9 @@ export default function RoomBuilder() {
             </div>
           </div>
         )}
-      </div>
-
-      {/* BOTTOM: ribbon -- tools, then snapping/measurements, then viewport controls */}
-      <div className="ribbon">
-        <div className="ribbon-section">
-          <div style={{ display: "flex", flexDirection: "column", gap: 1, marginRight: 6, flexShrink: 0 }}>
-            <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>Build</span>
-            <span style={{ fontSize: 8, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>Create and edit elements</span>
-          </div>
-          <button
-            className="rb-btn"
-            onClick={() => setThemeWheelOpen((v) => !v)}
-            title="Room color theme -- pick a hue or grey to tint the walls, floor, stairs, and props as one cohesive palette"
-            style={{
-              padding: 0, width: 22, height: 22, minWidth: 22, borderRadius: "50%", overflow: "hidden",
-              background: "conic-gradient(from 0deg, #e5484d, #f2c230, #4caf6d, #4a90d9, #9b5de5, #e5484d)",
-              boxShadow: themeWheelOpen ? "0 0 0 2px var(--ring-selected)" : "none",
-            }}
-          />
-          <button
-            className="rb-btn"
-            onClick={() => setBuildingMaterialIndex((i) => (i + 1) % BUILDING_MATERIAL_NAMES.length)}
-            title={`Finish: ${BUILDING_MATERIAL_NAMES[buildingMaterialIndex]} (click to cycle: ${BUILDING_MATERIAL_NAMES.join(", ")}) -- an overlay on the current theme color, except concrete which keeps its own grey`}
-            style={{
-              padding: 0, width: 28, height: 28, minWidth: 28, borderRadius: "50%", overflow: "hidden",
-              background: "conic-gradient(from 0deg, #9a9a9a 0turn 0.25turn, #232323 0.25turn 0.5turn, #f2c230 0.5turn 0.75turn, #f5f5f2 0.75turn 1turn)",
-              border: "1px solid var(--border-control)",
-            }}
-          />
-          <RibbonToolButton Icon={RectangleVertical} label="Wall" active={tool === "move"} onClick={() => setTool("move")} />
-          <RibbonToolButton Icon={AppWindow} label="Opening" active={tool === "cut"} onClick={() => setTool("cut")} />
-          <RibbonToolButton Icon={DoorOpen} label="Door" active={tool === "door"} onClick={() => setTool("door")} />
-          <RibbonToolButton Icon={Box} label="Room" active={tool === "room"} onClick={() => setTool("room")} title="Tap and drag to draw a new room -- on the floor, or on open ground beside it" />
-          <RibbonToolButton Icon={StairsIcon} label="Stair" active={tool === "stairs"} onClick={() => setTool("stairs")} />
-          <RibbonToolButton Icon={Shapes} label="Prop" active={tool === "props"} onClick={() => setTool("props")} />
         </div>
+        </>
+        )}
 
         <div className="ribbon-divider" />
 
