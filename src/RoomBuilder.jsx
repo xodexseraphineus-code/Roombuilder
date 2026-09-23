@@ -1322,11 +1322,19 @@ export default function RoomBuilder() {
       const size = VIEWCUBE_SIZE;
       const x = canvasWidth - rightPanelWidthRef.current - VIEWCUBE_PAD - size;
       const y = canvasHeight - TOPBAR_HEIGHT - VIEWCUBE_PAD - size; // WebGL viewport Y is bottom-up
+      // composite over whatever the main render already put in this corner
+      // (it always renders full-canvas first, see tick()) rather than
+      // clearing to a flat color first -- autoClear would otherwise paint
+      // a visible box behind the cube instead of it just floating over
+      // the 3D view.
       renderer.setScissorTest(true);
       renderer.setScissor(x, y, size, size);
       renderer.setViewport(x, y, size, size);
+      const prevAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
       renderer.clearDepth();
       renderer.render(viewCubeScene, viewCubeCamera);
+      renderer.autoClear = prevAutoClear;
       renderer.setScissorTest(false);
       renderer.setViewport(0, 0, canvasWidth, canvasHeight);
     }
@@ -9262,6 +9270,7 @@ export default function RoomBuilder() {
     // is selected, wall-height controls when a panel is selected, and the
     // Column mode selector the rest of the time (nothing selected).
     tool === "move" ||
+    tool === "room" ||
     ((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) ||
     ((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) ||
     tool === "props" ||
@@ -9458,6 +9467,10 @@ export default function RoomBuilder() {
         .layers-scroll::-webkit-scrollbar-thumb { background: var(--border-separator); border-radius: 3px; }
         .layers-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
         .layers-scroll::-webkit-scrollbar-track { background: transparent; }
+        .presets-scroll::-webkit-scrollbar { width: 6px; }
+        .presets-scroll::-webkit-scrollbar-thumb { background: var(--border-separator); border-radius: 3px; }
+        .presets-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+        .presets-scroll::-webkit-scrollbar-track { background: transparent; }
         .rb-walk-btn {
           width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
           background: var(--bg-floating); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -9469,13 +9482,15 @@ export default function RoomBuilder() {
 
       <div ref={mountRef} style={{ position: "absolute", inset: 0, touchAction: "none" }} />
 
-      {/* Command UI -- a typed command box plus the mic button, below the
-          top bar and inset from the right edge. Mic: tap to start (ring
+      {/* Command UI -- a typed command box plus the mic button, docked
+          below the ViewCube (not the top bar directly) so the two never
+          overlap, and still inset from the right edge, clear of the lens
+          pill row centered above the viewport. Mic: tap to start (ring
           turns orange while active), speak, tap again to stop and submit.
           Text box: type an instruction and hit Enter or the send button --
           same Claude pipeline either way, useful wherever speech input
           isn't available (e.g. this sandbox). */}
-      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 14, right: rightPanelWidth + 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 12, right: rightPanelWidth + 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <input
             type="text"
@@ -9683,9 +9698,9 @@ export default function RoomBuilder() {
         <div style={{ flexShrink: 0, borderTop: "1px solid var(--divider-strong)", padding: "10px 14px 12px" }}>
           <span className="panel-title" style={{ fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-tertiary)" }}>Presets</span>
           <div
-            className="recent-scroll"
+            className="presets-scroll"
             ref={recentScrollInnerRef}
-            style={{ display: "flex", gap: 6, overflowX: "auto", marginTop: 8, paddingBottom: 2 }}
+            style={{ position: "relative", display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 124, overflowY: "auto", overflowX: "hidden", marginTop: 8, paddingBottom: 2 }}
           >
             {DEFAULT_PRESET_SCENES.map((preset) => (
               <button
@@ -9695,7 +9710,7 @@ export default function RoomBuilder() {
                 title={preset.name}
                 style={{ padding: 2, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
               >
-                <img src={preset.thumb} alt="" style={{ width: 44, height: 44, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
+                <img src={preset.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
               </button>
             ))}
             {recentScenes.map((entry) => (
@@ -9710,9 +9725,9 @@ export default function RoomBuilder() {
                 }}
               >
                 {entry.thumb ? (
-                  <img src={entry.thumb} alt="" style={{ width: 44, height: 44, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
+                  <img src={entry.thumb} alt="" style={{ width: 56, height: 56, borderRadius: 6, display: "block", background: "var(--bg-thumb)", objectFit: "cover" }} />
                 ) : (
-                  <div style={{ width: 44, height: 44, borderRadius: 6, background: "var(--bg-thumb)" }} />
+                  <div style={{ width: 56, height: 56, borderRadius: 6, background: "var(--bg-thumb)" }} />
                 )}
               </button>
             ))}
@@ -10506,7 +10521,7 @@ export default function RoomBuilder() {
             </div>
           </div>
         )}
-        {tool === "move" && selectedRoomId != null && selectedPanel == null && (
+        {(tool === "move" || tool === "room") && selectedRoomId != null && selectedPanel == null && (
           <>
             <div className="ribbon-group" style={{ minWidth: 340 }}>
               <span className="ribbon-label">Room</span>
