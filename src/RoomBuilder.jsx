@@ -1695,6 +1695,23 @@ export default function RoomBuilder() {
         new THREE.MeshBasicMaterial({ color: new THREE.Color(0x2a271f).multiplyScalar(0.4), side: THREE.BackSide })
       );
       envScene.add(ground);
+      // a faint, low-contrast horizon silhouette -- not the reflection
+      // map's punchy dark cityscape (that would blow past "subtle ambient
+      // fill" and start directionally tinting every matte wall), just
+      // enough low-rise variation that the general IBL isn't a perfectly
+      // smooth gradient with nothing else in it.
+      const silhouetteMat = new THREE.MeshBasicMaterial({ color: horizonTone.clone().multiplyScalar(0.35) });
+      const silhouetteCount = 22;
+      for (let i = 0; i < silhouetteCount; i++) {
+        const angle = (i / silhouetteCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.2;
+        const dist = 28 + Math.random() * 8;
+        const h = 2 + Math.random() * 5;
+        const w = 3 + Math.random() * 3;
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), silhouetteMat);
+        mesh.position.set(Math.cos(angle) * dist, h / 2, Math.sin(angle) * dist);
+        mesh.rotation.y = Math.random() * Math.PI;
+        envScene.add(mesh);
+      }
       // sun disc, placed on the sky sphere exactly along keyLight's
       // direction -- bright enough to read as a distinct hotspot and cast a
       // warm highlight on glossy surfaces, but nowhere near the intensity
@@ -1736,19 +1753,54 @@ export default function RoomBuilder() {
       // from the origin and blotted out almost the entire sky, leaving no
       // bright band for a reflection to pick up. A distant, modest-height
       // ring reads as a proper skyline silhouette with open sky above it.
-      const buildingCount = 34;
+      // A second, closer/shorter ring plus a scatter of small lit-window
+      // hotspots adds the high-frequency bright/dark detail a real HDRI
+      // has and a smooth procedural gradient doesn't -- this is what
+      // actually makes a specular reflection read as "busy" and complex
+      // rather than one soft blob of color.
+      const buildingCount = 52;
       const cityMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+      const buildingXforms = [];
       for (let i = 0; i < buildingCount; i++) {
         const angle = (i / buildingCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.15;
-        const dist = 30 + Math.random() * 12;
-        const h = 3 + Math.random() * 13;
-        const w = 2.5 + Math.random() * 4;
+        const dist = 26 + Math.random() * 16;
+        const h = 3 + Math.random() * 17;
+        const w = 2.5 + Math.random() * 4.5;
         const geo = new THREE.BoxGeometry(w, h, w);
         const mesh = new THREE.Mesh(geo, cityMat);
+        const ry = Math.random() * Math.PI;
         mesh.position.set(Math.cos(angle) * dist, h / 2, Math.sin(angle) * dist);
-        mesh.rotation.y = Math.random() * Math.PI;
+        mesh.rotation.y = ry;
         envScene.add(mesh);
+        buildingXforms.push({ angle, dist, h, w, ry });
       }
+      // lit windows: small bright squares scattered low-to-mid on each
+      // building's front face, random per building so the ring reads as
+      // uneven and detailed rather than a uniform silhouette.
+      const windowGeo = new THREE.PlaneGeometry(0.35, 0.5);
+      const windowMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff2c9).multiplyScalar(6), side: THREE.DoubleSide });
+      const windowsPerBuilding = 5;
+      const windowMesh = new THREE.InstancedMesh(windowGeo, windowMat, buildingCount * windowsPerBuilding);
+      let wi = 0;
+      const dummy = new THREE.Object3D();
+      buildingXforms.forEach(({ angle, dist, h, w, ry }) => {
+        for (let j = 0; j < windowsPerBuilding; j++) {
+          if (Math.random() < 0.4) { wi++; continue; } // some windows stay dark
+          const faceOffset = (Math.random() - 0.5) * w * 0.7;
+          const y = Math.random() * h * 0.85;
+          dummy.position.set(
+            Math.cos(angle) * dist + Math.sin(ry) * faceOffset,
+            y,
+            Math.sin(angle) * dist + Math.cos(ry) * faceOffset
+          );
+          dummy.rotation.set(0, ry, 0);
+          dummy.updateMatrix();
+          windowMesh.setMatrixAt(wi, dummy.matrix);
+          wi++;
+        }
+      });
+      windowMesh.instanceMatrix.needsUpdate = true;
+      envScene.add(windowMesh);
       const ground = new THREE.Mesh(
         new THREE.SphereGeometry(skyRadius, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x050506, side: THREE.BackSide })
@@ -1768,11 +1820,12 @@ export default function RoomBuilder() {
       return envScene;
     }
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    const realisticEnvMap = pmremGenerator.fromScene(buildSoftEnvironmentScene(), 0.04).texture;
+    const realisticEnvMap = pmremGenerator.fromScene(buildSoftEnvironmentScene(), 0.03).texture;
     // a lower sigma (less blur) than the soft ambient map -- this one wants
-    // to stay crisp enough that the buildings/sun hotspot actually read as
-    // shapes in a reflection, not another smooth gradient.
-    const reflectionEnvMap = pmremGenerator.fromScene(buildReflectionEnvironmentScene(), 0.015).texture;
+    // to stay crisp enough that the buildings/sun hotspot/lit windows
+    // actually read as distinct shapes and highlights in a reflection, not
+    // another smooth gradient.
+    const reflectionEnvMap = pmremGenerator.fromScene(buildReflectionEnvironmentScene(), 0.008).texture;
     pmremGenerator.dispose();
 
     const composer = new EffectComposer(renderer);
@@ -1783,15 +1836,19 @@ export default function RoomBuilder() {
     // in the corner. A lower distanceExponent spreads the falloff out
     // further instead of concentrating it close-in, and a lower
     // blendIntensity keeps corners from crushing to near-black.
+    // widened further (radius) and pushed past a physically "correct"
+    // blend (blendIntensity > 1) -- a broader reach with deeper corner
+    // shadow gradation reads as a more grounded, game-engine-style render,
+    // per a request that the previous tuning still felt weak/shallow.
     const gtaoPass = new GTAOPass(scene, camera, width, height, undefined, {
-      radius: 3.3,
-      distanceExponent: 0.7,
+      radius: 5.5,
+      distanceExponent: 0.55,
       thickness: 1,
-      distanceFallOff: 0.5,
-      scale: 1.4,
+      distanceFallOff: 0.4,
+      scale: 1.6,
     });
     gtaoPass.output = GTAOPass.OUTPUT.Default;
-    gtaoPass.blendIntensity = 0.9;
+    gtaoPass.blendIntensity = 1.2;
     gtaoPass.enabled = false;
     composer.addPass(gtaoPass);
     // High threshold + low strength: this should only catch genuinely bright
