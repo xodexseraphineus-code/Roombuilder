@@ -2535,28 +2535,37 @@ export default function RoomBuilder() {
     // corner/edge handles" rather than windows/doors getting a solid
     // magenta fill instead.
     const whiteOutlineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, depthTest: false });
-    // window glass: a thin, mostly-transparent, faintly blue-tinted pane
-    // that's noticeably more specular (lower roughness) than the matte
-    // wall surface it sits inside. Never added to pickList -- it's purely
-    // visual and shouldn't intercept taps meant for the floor/room behind it.
-    // 20% more reflective than before (lower roughness, a bit more
-    // metalness) -- any glass surface (window panes, balcony glass infill)
-    // shares this one material, so the bump applies everywhere at once.
-    const glassMat = new THREE.MeshStandardMaterial({
-      // metalness bumped well above a physically "correct" dielectric value
-      // -- at a realistic ~0.05 the Fresnel reflectance at normal incidence
-      // is only a few percent and the cityscape map is essentially
-      // invisible head-on; a stronger, deliberately-unrealistic metalness
-      // plus a much higher envMapIntensity make the reflection actually
-      // read as reflection detail rather than just a flat tinted pane.
-      // metalness/envMapIntensity both brought down 10% from their earlier
-      // bumped values, per a request to make glass a touch less reflective
-      // without undoing the "reflection should actually be visible" fix.
-      color: 0x9ec8ee, transparent: true, opacity: 0.35, roughness: 0.08, metalness: 0.315, envMapIntensity: 2.88, side: THREE.DoubleSide,
+    // window glass: real physical transmission (see-through with correct
+    // Fresnel reflectance) rather than the old flat-alpha fake -- a plain
+    // MeshStandardMaterial can only blend a fixed opacity in screen space,
+    // so it could never actually refract/distort whatever's behind it, and
+    // needed an unrealistically boosted metalness just to look reflective
+    // at all. MeshPhysicalMaterial's transmission does this correctly, and
+    // reuses the same environment map + tone mapping already set up for
+    // the rest of the scene. Never added to pickList -- it's purely visual
+    // and shouldn't intercept taps meant for the floor/room behind it. Any
+    // glass surface (window panes, balcony glass infill) shares this one
+    // material, so any future tuning here applies everywhere at once.
+    const glassMat = new THREE.MeshPhysicalMaterial({
+      color: 0x9ec8ee,
+      roughness: 0.06,
+      metalness: 0,
+      transmission: 1,
+      thickness: 0.05,
+      ior: 1.5,
+      // a faint tint on whatever's seen through the glass, not just on its
+      // own reflection -- attenuationDistance keeps it subtle for a thin
+      // pane rather than swimming-pool blue.
+      attenuationColor: new THREE.Color(0xbfe0ff),
+      attenuationDistance: 2.5,
+      clearcoat: 0.25,
+      clearcoatRoughness: 0.1,
+      side: THREE.DoubleSide,
       // its own detailed cityscape reflection map rather than the soft
       // ambient ibl -- glass should visibly reflect *something*, not just
       // tint toward a flat gradient color.
       envMap: reflectionEnvMap,
+      envMapIntensity: 1.1,
     });
     // an invisible volume used purely to make thin/hollow things (pillars,
     // window and door cutouts) much easier to tap -- raycasting still hits
