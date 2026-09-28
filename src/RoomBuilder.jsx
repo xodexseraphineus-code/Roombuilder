@@ -837,6 +837,10 @@ export default function RoomBuilder() {
   // behind either of these yet.
   const [topNavTab, setTopNavTab] = useState("Build");
   const [lensTab, setLensTab] = useState("Space");
+  // selecting the "Material" lens forces the X-ray-style Material Editor
+  // display (see applyMaterialEditorMode) -- every other lens is still a
+  // dummy prototyping tab with nothing wired to it.
+  useEffect(() => { materialEditorApiRef.current(lensTab === "Material"); }, [lensTab]);
   // dummy Intent panel state -- a free-text prompt plus a handful of
   // sliders, none of it wired to anything real yet (see the right panel).
   const [intentText, setIntentText] = useState("A house for solitude, making things, books, friends and the forest.");
@@ -1115,6 +1119,7 @@ export default function RoomBuilder() {
   const [hiddenLineMode, setHiddenLineMode] = useState(false);
   const hiddenLineApiRef = useRef(() => {});
   useEffect(() => { hiddenLineApiRef.current(hiddenLineMode); }, [hiddenLineMode]);
+  const materialEditorApiRef = useRef(() => {});
   const [transparentInactive, setTransparentInactive] = useState(false);
   const transparentInactiveApiRef = useRef(() => {});
   useEffect(() => { transparentInactiveApiRef.current(transparentInactive); }, [transparentInactive]);
@@ -1129,6 +1134,26 @@ export default function RoomBuilder() {
   const [ultraRealistic, setUltraRealistic] = useState(true);
   const ultraRealisticApiRef = useRef(() => {});
   useEffect(() => { ultraRealisticApiRef.current(ultraRealistic); }, [ultraRealistic]);
+  // Wireframe and the Material Editor X-ray look rely on walls/props going
+  // semi-transparent, which the GTAO/bloom/bokeh postprocessing chain
+  // doesn't composite correctly (surfaces read as opaque). Both are meant
+  // to be flat schematic views anyway, so force Realistic off for their
+  // duration and restore whatever it was set to beforehand.
+  const preXrayRealisticRef = useRef(true);
+  useEffect(() => {
+    const xrayModeOn = wireframeMode || lensTab === "Material";
+    if (xrayModeOn) {
+      if (ultraRealistic) {
+        preXrayRealisticRef.current = true;
+        setUltraRealistic(false);
+      } else {
+        preXrayRealisticRef.current = false;
+      }
+    } else if (preXrayRealisticRef.current) {
+      setUltraRealistic(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wireframeMode, lensTab]);
   const [tintInactiveOn, setTintInactiveOn] = useState(true);
   const [tintInactiveColor, setTintInactiveColor] = useState(0xff6b1a);
   const tintInactiveApiRef = useRef(() => {});
@@ -2659,10 +2684,14 @@ export default function RoomBuilder() {
     const doorMetalMat = wallMat;
 
     let hiddenLineModeOn = false;
+    let materialEditorModeOn = false;
     function addEdges(mesh) {
       const eg = new THREE.EdgesGeometry(mesh.geometry, 20);
-      const color = hiddenLineModeOn ? 0x000000 : COLORS.wallEdge;
-      const opacity = hiddenLineModeOn ? 1.0 : 0.55;
+      // Material Editor mode wants bright white outlines regardless of
+      // hidden-line state -- that's the whole "blue building, white
+      // edges" look it's going for.
+      const color = materialEditorModeOn ? 0xffffff : hiddenLineModeOn ? 0x000000 : COLORS.wallEdge;
+      const opacity = materialEditorModeOn ? 0.9 : hiddenLineModeOn ? 1.0 : 0.55;
       const line = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
       mesh.add(line);
     }
@@ -5267,10 +5296,83 @@ export default function RoomBuilder() {
     }
     transparentInactiveApiRef.current = applyTransparentInactive;
 
+    // shared by Wireframe and Material Editor modes below -- "building"
+    // covers the structural shell (walls/floor/ceiling/pillars/mullions),
+    // "special" is the callout set from the Material Editor request
+    // (stairs, balconies, props) that gets its own distinct treatment.
+    const BUILDING_SHELL_MATS = [wallMat, floorMat, wallMatDim, floorMatDim, wallMatSelected, floorMatSelected, ceilingMat, mullionMat, pillarMat, pillarMatSelected];
+    const SPECIAL_ITEM_MATS = [stairMat, propMats.sphere, propMats.cone, propMats.cube, propMats.cylinder, balconyPlatformMat, balconyRoofMat];
+
+    // true wireframe (material.wireframe = true) renders every triangle in
+    // the underlying BufferGeometry, including a flat quad face's own
+    // diagonal -- there's no way to make that render quads-only, it's a
+    // WebGL-level limitation. Every mesh already carries a proper quads-
+    // only edge overlay from addEdges() (EdgesGeometry only keeps edges
+    // past a dihedral-angle threshold, which excludes a coplanar quad's
+    // diagonal), so "wireframe" here just hides the solid fill and lets
+    // that existing overlay be the wireframe -- clean box/quad edges only.
     function applyWireframe(on) {
-      [wallMat, floorMat, wallMatDim, floorMatDim, wallMatSelected, floorMatSelected].forEach((m) => { m.wireframe = on; });
+      [...BUILDING_SHELL_MATS, ...SPECIAL_ITEM_MATS].forEach((m) => {
+        m.wireframe = false;
+        m.transparent = true;
+        m.opacity = on ? 0.03 : 1;
+        m.depthWrite = !on;
+        m.needsUpdate = true;
+      });
     }
     wireframeApiRef.current = applyWireframe;
+
+    // Material Editor mode: an X-ray-style view (per a specific reference
+    // look) -- the building shell goes translucent blue with bright white
+    // edges, and "special" items (stairs, balconies, props) go a vibrant
+    // translucent orange so they read clearly through the shell. Snapshots
+    // each material's live color/opacity/transparent/emissive right before
+    // overriding it, and restores from that snapshot (not a hardcoded
+    // default) on the way out, so a user's own theme/tint color survives
+    // toggling this on and back off.
+    const materialEditorSnapshot = new Map();
+    function applyMaterialEditorMode(on) {
+      materialEditorModeOn = on;
+      if (on) {
+        materialEditorSnapshot.clear();
+        const snapshot = (m) => materialEditorSnapshot.set(m, {
+          color: m.color.clone(), opacity: m.opacity, transparent: m.transparent,
+          emissive: m.emissive.clone(), emissiveIntensity: m.emissiveIntensity,
+          depthWrite: m.depthWrite,
+        });
+        BUILDING_SHELL_MATS.forEach((m) => {
+          snapshot(m);
+          m.color.set(0x4fc3f7);
+          m.transparent = true;
+          m.opacity = 0.28;
+          m.depthWrite = false;
+          m.needsUpdate = true;
+        });
+        SPECIAL_ITEM_MATS.forEach((m) => {
+          snapshot(m);
+          m.color.set(0xff6b1a);
+          m.transparent = true;
+          m.opacity = 0.8;
+          m.emissive.set(0xff6b1a);
+          m.emissiveIntensity = 0.5;
+          m.depthWrite = false;
+          m.needsUpdate = true;
+        });
+      } else {
+        materialEditorSnapshot.forEach((snap, m) => {
+          m.color.copy(snap.color);
+          m.opacity = snap.opacity;
+          m.transparent = snap.transparent;
+          m.emissive.copy(snap.emissive);
+          m.emissiveIntensity = snap.emissiveIntensity;
+          m.depthWrite = snap.depthWrite;
+          m.needsUpdate = true;
+        });
+        materialEditorSnapshot.clear();
+      }
+      rebuildAllFloors();
+    }
+    materialEditorApiRef.current = applyMaterialEditorMode;
 
     // Six finishes -- a *material*, layered on top of whatever color is
     // currently active (the theme wheel's pick, the older tint swatches, or
