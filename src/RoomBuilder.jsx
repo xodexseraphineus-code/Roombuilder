@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, Pencil } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronLeft, ChevronRight, Pencil } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -3237,15 +3237,28 @@ export default function RoomBuilder() {
       }
       // round windows anchor their bottom edge at a fixed 5ft off the
       // floor (roughly mid-wall) instead of the generic vertical centering
-      // every other window style uses below.
+      // every other window style uses below. A round pane can't be
+      // subdivided by mullions the way a rectangular one can, so here the
+      // Dividers slider instead controls how many separate round windows
+      // get spaced evenly across the drawn span, with a thin wall strip
+      // between each one.
       if (c.style === "round") {
-        const diameter = Math.max(0.3, Math.min(c.u1 - c.u0, c.height ?? DEFAULT_OPENING_HEIGHT));
+        const n = Math.max(1, Math.round(c.dividers || 0));
+        const totalSpan = c.u1 - c.u0;
+        const gap = n > 1 ? Math.min(0.5, totalSpan * 0.08) : 0;
+        const slotWidth = (totalSpan - gap * (n - 1)) / n;
+        const diameter = Math.max(0.3, Math.min(slotWidth, c.height ?? DEFAULT_OPENING_HEIGHT));
         const roundBottom = Math.min(5 * FT, Math.max(0, H - diameter - 0.05));
         const roundTop = Math.min(H, roundBottom + diameter);
         addSeg(c.u0, c.u1, 0, roundBottom);
         addSeg(c.u0, c.u1, roundTop, H);
+        for (let i = 0; i < n; i++) {
+          const su0 = c.u0 + i * (slotWidth + gap);
+          const su1 = su0 + slotWidth;
+          addRoundWindow({ ...c, u0: su0, u1: su1 }, lengthAxis, coord, roundBottom, roundTop);
+          if (i < n - 1) addSeg(su1, su1 + gap, roundBottom, roundTop);
+        }
         addOpeningHotspotAndHighlight(c, lengthAxis, coord, roundBottom, roundTop);
-        addRoundWindow(c, lengthAxis, coord, roundBottom, roundTop);
         return;
       }
       const bottomOverride = c.bottomOverride;
@@ -3258,7 +3271,23 @@ export default function RoomBuilder() {
       addSeg(c.u0, c.u1, topY, H);
       addOpeningHotspotAndHighlight(c, lengthAxis, coord, bottomY, topY);
 
-      if (c.style === "louver") { addLouverWindow(c, lengthAxis, coord, bottomY, topY); return; }
+      if (c.style === "louver") {
+        // same reasoning as round windows above -- louver slats can't be
+        // subdivided by mullions, so Dividers instead spaces out that many
+        // separate louver units, with a wall strip between each.
+        const n = Math.max(1, Math.round(c.dividers || 0));
+        if (n <= 1) { addLouverWindow(c, lengthAxis, coord, bottomY, topY); return; }
+        const totalSpan = c.u1 - c.u0;
+        const gap = Math.min(0.5, totalSpan * 0.08);
+        const slotWidth = (totalSpan - gap * (n - 1)) / n;
+        for (let i = 0; i < n; i++) {
+          const su0 = c.u0 + i * (slotWidth + gap);
+          const su1 = su0 + slotWidth;
+          addLouverWindow({ ...c, u0: su0, u1: su1 }, lengthAxis, coord, bottomY, topY);
+          if (i < n - 1) addSeg(su1, su1 + gap, bottomY, topY);
+        }
+        return;
+      }
 
       const n = Math.max(0, Math.round(c.dividers || 0));
       const axis = c.dividerAxis || "vertical";
@@ -9320,6 +9349,8 @@ export default function RoomBuilder() {
   const RIBBON_HEIGHT = 64;
   const TOPBAR_HEIGHT = 44;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
+  const [layersPanelCollapsed, setLayersPanelCollapsed] = useState(false);
+  const LAYERS_PANEL_COLLAPSED_WIDTH = 30;
   const panelResizeRef = useRef(null);
   // right-docked panel -- presets/Recent live here now (see the mockup's
   // own right-hand INTENT slot), resizable the same way as the Layers
@@ -9952,11 +9983,27 @@ export default function RoomBuilder() {
       {/* LEFT: Layers panel -- docked flush to the left edge, directly
           under the top band (not floating), PowerPoint-style slide list,
           resizable via the handle on its right edge. */}
+      {layersPanelCollapsed && (
+        <button
+          className="rb-btn"
+          onClick={() => setLayersPanelCollapsed(false)}
+          title="Show levels panel"
+          style={{
+            position: "absolute", top: TOPBAR_HEIGHT + 10, left: 8, zIndex: 5,
+            width: 24, height: 24, minWidth: 24, padding: 0, borderRadius: "50%",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "var(--bg-control)", color: "var(--text-secondary)",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+          }}
+        >
+          <ChevronRight size={14} strokeWidth={2} />
+        </button>
+      )}
       <div
         style={{
           position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT, width: layersPanelWidth,
           background: "var(--bg-panel)",
-          display: "flex", flexDirection: "column", overflow: "hidden",
+          display: layersPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
         }}
       >
@@ -9980,7 +10027,21 @@ export default function RoomBuilder() {
         />
         <div style={{ padding: "14px 14px 10px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--text-secondary)" }}>Levels</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <button
+                className="rb-btn"
+                onClick={() => setLayersPanelCollapsed(true)}
+                title="Hide levels panel"
+                style={{
+                  width: 18, height: 18, minWidth: 18, padding: 0, borderRadius: "50%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: "var(--bg-control)", color: "var(--text-secondary)",
+                }}
+              >
+                <ChevronLeft size={12} strokeWidth={2} />
+              </button>
+              <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--text-secondary)" }}>Levels</span>
+            </div>
             {/* drag a layer row down onto Dup or Del to duplicate/delete
                 *that* layer, or just click either button to act on
                 whichever layer is selected; + always creates a fresh
@@ -10564,13 +10625,15 @@ export default function RoomBuilder() {
         </div>
       </div>
 
-      {/* prototyping lens pills -- for playing with ideas only, not wired
-          to any real per-lens view yet. */}
+      {/* prototyping lens pills -- for playing with ideas only. Only
+          "Material" is wired to a real view (the X-ray look toggled by
+          applyMaterialEditorMode); the rest are still dummy placeholders. */}
       <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, left: "50%", transform: "translateX(-50%)", zIndex: 4, display: "flex", gap: 2, background: "var(--bg-floating)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", border: "0.5px solid var(--border-control)", borderRadius: 999, padding: 3 }}>
         {["Form", "Space", "Light", "Movement", "Material", "Climate"].map((t) => (
           <button
             key={t}
             className="rb-btn"
+            title={t === "Material" ? "X-ray view: translucent blue shell + bright edges, orange stairs/balconies/props" : undefined}
             onClick={() => {
               // Wireframe and the Material Editor X-ray look share the same
               // wall/prop materials -- leaving Wireframe on would stomp the
