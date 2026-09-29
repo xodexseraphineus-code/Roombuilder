@@ -2699,13 +2699,17 @@ export default function RoomBuilder() {
     // disappears. Light mode's background is light enough that the same
     // dark line still reads fine, so only dark mode needs the swap.
     const WIREFRAME_EDGE_DARK_THEME = 0xd0d0d0;
+    // Material Editor's edge outline, dimmed 20% off pure white (0xffffff ->
+    // 0xcccccc) -- full white against the translucent blue shell read as
+    // too sharp/harsh.
+    const MATERIAL_EDITOR_EDGE_COLOR = 0xcccccc;
     function addEdges(mesh) {
       const eg = new THREE.EdgesGeometry(mesh.geometry, 20);
-      // Material Editor mode wants bright white outlines regardless of
-      // hidden-line state -- that's the whole "blue building, white
+      // Material Editor mode wants bright outlines regardless of
+      // hidden-line state -- that's the whole "blue building, white(-ish)
       // edges" look it's going for.
       const color = materialEditorModeOn
-        ? 0xffffff
+        ? MATERIAL_EDITOR_EDGE_COLOR
         : hiddenLineModeOn
         ? 0x000000
         : wireframeModeOn && uiThemeRef.current === "dark"
@@ -8524,19 +8528,16 @@ export default function RoomBuilder() {
         const prevEntry = floors.find((f) => f.id === prevActiveId);
         if (prevEntry) rebuildFloorEntry(prevEntry, false);
       }
-      ensureActiveContentInFrame();
+      // deliberately no camera reframing here -- selecting a layer (by
+      // clicking its card, its in-viewport name, or right after creating
+      // one) should only change which layer is active/highlighted, not
+      // yank the view somewhere else and lose the framing you were working
+      // in. ensureActiveContentInFrame() is still used where a genuinely
+      // new/moved piece of content needs to be brought into view (e.g.
+      // pasting or duplicating a room).
       syncFloorsToReact();
     }
     selectFloorRef.current = selectFloorById;
-
-    // a freshly created layer (new/duplicated/pasted) defaults to isolated
-    // -- it becomes the only visible one, rather than surfacing in a stack
-    // of every other layer the user wasn't necessarily looking at.
-    function isolateOnly(id) {
-      isolatedFloorIds.clear();
-      isolatedFloorIds.add(id);
-      setIsolatedFloorIdsState(Array.from(isolatedFloorIds));
-    }
 
     function duplicateActiveFloor() {
       pushUndo();
@@ -8560,7 +8561,6 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      isolateOnly(newId);
       selectFloorById(newId);
       applyVisibility();
     }
@@ -8627,7 +8627,6 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      isolateOnly(newId);
       selectFloorById(newId);
       applyVisibility();
     }
@@ -8766,7 +8765,6 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      isolateOnly(newId);
       selectFloorById(newId);
       applyVisibility();
     }
@@ -9138,7 +9136,7 @@ export default function RoomBuilder() {
           row.style.transform = "translate(0, -50%)";
           row.style.display = "flex";
           row.style.alignItems = "center";
-          row.style.gap = "5px";
+          row.style.gap = "7px"; // ~40% wider than the original 5px, easier to hit each button
           row.style.padding = "3px 6px";
           row.style.borderRadius = "999px";
           row.style.pointerEvents = "none"; // re-enabled per-child below
@@ -9181,12 +9179,24 @@ export default function RoomBuilder() {
               rec.row.style.opacity = "0.45";
             }
             if (!floorRowDrag.moved) return;
+            // The rows are positioned by projecting each floor's 3D footprint
+            // to screen space, not laid out as a plain vertical list, so
+            // pick whichever other row's own center the cursor is currently
+            // nearest to (rather than walking a sorted list looking for the
+            // first row the cursor is strictly above -- that missed the
+            // topmost/bottommost row whenever the cursor landed almost
+            // exactly on its center, which is exactly where a drop is
+            // aimed, and fell through to a neighboring row instead).
             let found = null;
+            let bestDist = Infinity;
             floorLabelPool.forEach((other, otherId) => {
               if (otherId === entry.id || other.row.style.display === "none") return;
               const r = other.row.getBoundingClientRect();
-              if (e.clientY >= r.top && e.clientY <= r.bottom) {
-                found = { targetId: otherId, edge: e.clientY < r.top + r.height / 2 ? "before" : "after", rect: r };
+              const mid = r.top + r.height / 2;
+              const dist = Math.abs(e.clientY - mid);
+              if (dist < bestDist) {
+                bestDist = dist;
+                found = { targetId: otherId, edge: e.clientY < mid ? "before" : "after", rect: r };
               }
             });
             floorDropTarget = found;
@@ -9222,7 +9232,8 @@ export default function RoomBuilder() {
         // viewport regardless of theme colors. Light mode is the inverse --
         // dark grey text normally, switching to white once a layer is
         // active, set off from the light viewport background by the same
-        // dark "collar" pill the orange selection ring sits on.
+        // dark "collar" pill the active state uses in place of a border
+        // (a boxed outline around every row read as too busy/crowded).
         const isLight = uiThemeRef.current === "light";
         const textColor = isActive ? "#ffffff" : (isLight ? "#3a3a3a" : "#9a9a9a");
         rec.nameEl.style.color = textColor;
@@ -9230,7 +9241,6 @@ export default function RoomBuilder() {
         rec.addBtn.style.color = textColor;
         rec.isoBtn.style.color = isIsolated ? "#ffffff" : textColor;
         rec.isoBtn.style.background = isIsolated ? "#FF6B1A" : "rgba(255,255,255,0.14)";
-        rec.row.style.border = isActive ? "1.5px solid #FF6B1A" : "1.5px solid transparent";
         rec.row.style.background = isActive && isLight ? "rgba(20,20,20,0.82)" : "transparent";
         rec.nameEl.textContent = floorNamesRef.current[entry.id] || `Level ${floors.findIndex((f) => f.id === entry.id) + 1}`;
         // Anchored in SCREEN space, not world space -- a fixed world-space
