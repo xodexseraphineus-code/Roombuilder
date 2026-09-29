@@ -31,7 +31,7 @@ const ROOM_SNAP_DIST = 3;          // meters -- generous snap radius for the Roo
 const WALL_CYCLE_HOLD_MS = 2000;   // once a dragged partition snaps flush to an opposing wall, this long a hold advances solid -> door -> fully-open
 const WALL_DELETE_HOLD_MS = 1000;  // once a pushed selection's bump-out snaps flush to an opposing wall, this long a hold arms deleting it
 const DRAW_TOOL_HOLD_MS = 1000;    // Room/Props tools: how long a stationary press on empty space must be held before it arms drawing -- a quick drag before that orbits the camera instead
-const VIEWCUBE_SIZE = 88;          // the ViewCube widget's on-screen size (both the WebGL mini-viewport and its DOM hit-test overlay use this same value)
+const VIEWCUBE_SIZE = 124;         // the ViewCube widget's on-screen size (both the WebGL mini-viewport and its DOM hit-test overlay use this same value) -- bigger than the original 88 so its faces are easier to tap
 const VIEWCUBE_PAD = 16;           // gap from the viewport's own top/right edges
 const MIN_PROP_DRAW_SIZE = 0.5 * FT; // smallest footprint a dragged-out prop commits at
 const WALL_CYCLE_DOOR_WIDTH = 6 * FT; // matches the automatic room-to-room connecting door width
@@ -65,7 +65,7 @@ const PROP_DEFAULT_COLORS = {
 // display names for the six building-material finishes -- kept in this
 // same order as the Three.js closure's own BUILDING_MATERIAL_PRESETS array
 // so the ribbon button (rendered outside that closure) can label/cycle them.
-const BUILDING_MATERIAL_NAMES = ["Plastic", "Concrete", "Metal", "Gloss", "Vinyl", "Wood"];
+const BUILDING_MATERIAL_NAMES = ["Lego Plastic", "Concrete", "Steel", "Glass", "Oak Wood"];
 
 // Theme color wheel: a full filled disc -- a small greyscale ring at the
 // hub (15 greys plus pure white and pure black) surrounded by a hue wheel
@@ -1300,13 +1300,13 @@ export default function RoomBuilder() {
     // transparent background -- the cube itself is just a wireframe now (no
     // opaque, colored faces), so only the face label's own text is opaque.
     function makeCubeFaceTexture(label, textColor) {
-      const size = 128;
+      const size = 192; // matches the bigger VIEWCUBE_SIZE so labels stay crisp, not upscaled/blurry
       const c = document.createElement("canvas");
       c.width = size; c.height = size;
       const ctx = c.getContext("2d");
       ctx.clearRect(0, 0, size, size);
       ctx.fillStyle = textColor;
-      ctx.font = "bold 20px Inter, sans-serif";
+      ctx.font = "bold 30px Inter, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(label, size / 2, size / 2);
@@ -1343,24 +1343,46 @@ export default function RoomBuilder() {
       viewCubeEdges.material.color.set(edgeColor);
     }
     const viewCubeRaycaster = new THREE.Raycaster();
-    // classifies a raycast hit on the cube into a direction vector: one
-    // axis is always at the true extreme (whichever face was struck); the
-    // other two register too if the hit landed near that face's own edge,
-    // giving exactly the face/edge/corner distinction a real ViewCube has.
-    function classifyCubeHit(localPoint) {
-      const threshold = 0.6;
+    // classifies a raycast hit on the cube into a direction vector: the
+    // struck face's own normal always wins the primary axis -- tapping
+    // anywhere on a face (its label included) reliably resolves to that
+    // face's own orthographic view, regardless of where on the face the tap
+    // landed. Reading the primary axis off the hit POINT's coordinates
+    // instead (as this used to) meant a tap on a face's name, which is only
+    // ever rendered dead center in the face's own local/UV space but can
+    // project well off-center on screen once the cube is viewed at an
+    // angle (which it normally is, mirroring whatever the main view is
+    // currently doing), would often land closer to one edge of that face
+    // than its middle -- tipping a second axis over the threshold below and
+    // misreading a plain face tap as an edge/corner tap into the angled 3/4
+    // view instead of the true front/top/etc. orthographic view asked for.
+    // A second (or third) axis still registers, giving the edge/corner 3/4
+    // view, but only for a tap genuinely close to that shared boundary now
+    // (a much stricter threshold than before).
+    function classifyCubeHit(localPoint, faceNormal) {
+      const threshold = 0.82;
       const dir = [0, 0, 0];
+      const primaryAxis = Math.abs(faceNormal.x) >= Math.abs(faceNormal.y) && Math.abs(faceNormal.x) >= Math.abs(faceNormal.z)
+        ? 0 : Math.abs(faceNormal.y) >= Math.abs(faceNormal.z) ? 1 : 2;
       ["x", "y", "z"].forEach((k, i) => {
-        if (Math.abs(localPoint[k]) > threshold) dir[i] = Math.sign(localPoint[k]);
+        if (i === primaryAxis) dir[i] = Math.sign(faceNormal[k]) || 1;
+        else if (Math.abs(localPoint[k]) > threshold) dir[i] = Math.sign(localPoint[k]);
       });
       return dir;
     }
     function pickViewCube(ndcX, ndcY) {
       viewCubeRaycaster.setFromCamera({ x: ndcX, y: ndcY }, viewCubeCamera);
-      const hits = viewCubeRaycaster.intersectObject(viewCubeMesh);
+      // non-recursive -- viewCubeEdges is a LineSegments CHILD of this mesh
+      // (so it inherits the box's transform for free), but intersectObject
+      // defaults to recursing into children, and a Line/LineSegments hit
+      // has no .face at all. Letting the edge lines' own generous hit
+      // threshold occasionally win over the actual box face meant
+      // classifyCubeHit's now-required faceNormal could come back null and
+      // crash the whole picker.
+      const hits = viewCubeRaycaster.intersectObject(viewCubeMesh, false);
       if (!hits.length) return null;
       const local = viewCubeMesh.worldToLocal(hits[0].point.clone());
-      return classifyCubeHit(local);
+      return classifyCubeHit(local, hits[0].face.normal);
     }
     function updateViewCubeOrientation() {
       const dir = getCurrentViewDirection();
@@ -2596,10 +2618,17 @@ export default function RoomBuilder() {
     // an *additional* light source on top of the existing lamps, so without
     // this every large flat surface (i.e. most of what's on screen) blows
     // out toward white instead of just picking up a subtle IBL tint.
-    const wallMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
-    const floorMat = new THREE.MeshStandardMaterial({ color: COLORS.floor, map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
-    const wallMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.5), map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
-    const floorMatDim = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.floor).multiplyScalar(0.5), map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
+    // MeshPhysicalMaterial (a MeshStandardMaterial superset) rather than
+    // plain MeshStandardMaterial for the wall-family materials below --
+    // needed so the "Glass" finish preset can dial in real transmission +
+    // clearcoat on walls/mullions/ceiling, and the "Lego Plastic"/"Steel"
+    // presets can add a clearcoat pop, while every other preset just leaves
+    // those extra properties at their inert defaults (transmission 0,
+    // clearcoat 0), behaving exactly like the old MeshStandardMaterial.
+    const wallMat = new THREE.MeshPhysicalMaterial({ color: COLORS.wall, map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    const floorMat = new THREE.MeshPhysicalMaterial({ color: COLORS.floor, map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
+    const wallMatDim = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(COLORS.wall).multiplyScalar(0.5), map: wallGrainTex, roughnessMap: wallRoughTex, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    const floorMatDim = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(COLORS.floor).multiplyScalar(0.5), map: floorGrainTex, roughnessMap: floorRoughTex, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
     // tinted magenta -- used on the active floor while the Move Room tool is
     // selected, so it's obvious which whole room you're about to drag
     const wallMatSelected = new THREE.MeshStandardMaterial({ color: new THREE.Color(COLORS.wall).lerp(new THREE.Color(COLORS.highlight), 0.7), roughness: 0.92, metalness: 0.02, envMapIntensity: 0.35 });
@@ -2617,16 +2646,16 @@ export default function RoomBuilder() {
     // window/door mullions get their own dark frame material -- 80% of the
     // way to black by default, distinct from the railings' metal hardware
     // (less metallic, more like a painted/anodized frame than raw metal).
-    const mullionMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.55, metalness: 0.15, envMapIntensity: 0.4 });
+    const mullionMat = new THREE.MeshPhysicalMaterial({ color: 0x333333, roughness: 0.55, metalness: 0.15, envMapIntensity: 0.4 });
     // the balcony platform gets its own material too -- a room theme colors
     // it independently from the room's own floor; by default (no theme
     // picked) it matches the wall color instead, same as the balcony's own
     // roof below.
-    const balconyPlatformMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
+    const balconyPlatformMat = new THREE.MeshPhysicalMaterial({ color: COLORS.wall, roughness: 0.88, metalness: 0.0, envMapIntensity: 0.35 });
     // a balcony's own covered ceiling gets its own material too, rather
     // than always just following the walls -- a room theme can give it a
     // deliberately contrasting (often complementary-hue) "roof" color.
-    const balconyRoofMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    const balconyRoofMat = new THREE.MeshPhysicalMaterial({ color: COLORS.wall, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
     // decorative room ceiling -- 10% transparent (90% opaque) so it doesn't
     // block editing visibility from above; never added to pickList.
     const ceilingMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.6, envMapIntensity: 0.35 });
@@ -2678,6 +2707,21 @@ export default function RoomBuilder() {
       envMap: reflectionEnvMap,
       envMapIntensity: 1.1,
     });
+    // the "Glass" building-material preset wants every actual window pane
+    // to go fully clear (barely any tint at all) instead of its usual
+    // faint blue, to match the rest of the structure turning to glass --
+    // toggled from recomputeWallFloorMaterials rather than baked into a
+    // second material, so window panes never need swapping out.
+    const GLASS_WINDOW_DEFAULT = { color: 0x9ec8ee, roughness: 0.06, attenuationColor: 0xbfe0ff, attenuationDistance: 2.5 };
+    const GLASS_WINDOW_CLEAR = { color: 0xf3fbff, roughness: 0.03, attenuationColor: 0xf7fcff, attenuationDistance: 6 };
+    function applyGlassWindowTint(clear) {
+      const cfg = clear ? GLASS_WINDOW_CLEAR : GLASS_WINDOW_DEFAULT;
+      glassMat.color.set(cfg.color);
+      glassMat.roughness = cfg.roughness;
+      glassMat.attenuationColor.set(cfg.attenuationColor);
+      glassMat.attenuationDistance = cfg.attenuationDistance;
+      glassMat.needsUpdate = true;
+    }
     // an invisible volume used purely to make thin/hollow things (pillars,
     // window and door cutouts) much easier to tap -- raycasting still hits
     // it (unlike setting mesh.visible=false, which Three.js's Raycaster
@@ -2685,7 +2729,7 @@ export default function RoomBuilder() {
     const hotspotMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
     // staircases default to matching the wall color, same as the balcony
     // platform/roof; a room theme can still give them their own distinct tone.
-    const stairMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.82, metalness: 0.02 });
+    const stairMat = new THREE.MeshPhysicalMaterial({ color: COLORS.wall, roughness: 0.82, metalness: 0.02 });
     // prop shapes, each with its own fixed color -- a flat, saturated
     // plastic finish (low roughness for a clear specular highlight and
     // crisp light/shadow falloff, a light touch of environment reflection
@@ -5482,26 +5526,42 @@ export default function RoomBuilder() {
     }
     materialEditorApiRef.current = applyMaterialEditorMode;
 
-    // Six finishes -- a *material*, layered on top of whatever color is
-    // currently active (the theme wheel's pick, the older tint swatches, or
-    // the plain default) rather than each one owning a fixed color of its
-    // own. Concrete is the one exception (forceColor): real precast
-    // concrete doesn't take a paint tint, so it keeps its own grey
-    // regardless of the room's theme. floorLighten (concrete only) blends
+    // Five realistic finishes. Lego Plastic is a *material* layered on top
+    // of whatever color is currently active (the theme wheel's pick, the
+    // older tint swatches, or the plain default), same as the old default
+    // "Plastic" finish did. Concrete, Steel, Glass, and Oak Wood are all
+    // forceColor instead -- real concrete, steel, glass, and wood aren't
+    // dyed to match an arbitrary room theme, so each keeps its own natural
+    // color regardless of the theme. floorLighten (concrete only) blends
     // that fixed color toward white for a lighter poured-slab floor shade;
-    // every other finish just gives the floor its own theme/tint color like
-    // the wall, at the same roughness/metalness/texture. Order matches the
-    // module-level BUILDING_MATERIAL_NAMES array the ribbon button reads.
+    // every forceColor finish otherwise gives the floor the same fixed
+    // color as the wall, at the same roughness/metalness/texture/clearcoat.
+    // Order matches the module-level BUILDING_MATERIAL_NAMES array the
+    // ribbon button reads.
     const BUILDING_MATERIAL_PRESETS = [
-      // default finish -- a flat, saturated plastic (no grain texture, low
-      // roughness for a crisp specular highlight) rather than a chalky
-      // matte, so the room's colors read punchy out of the box.
-      { key: "plastic", roughness: 0.34, metalness: 0.03 },
-      { key: "concrete", forceColor: true, color: 0x93999c, roughness: 0.88, metalness: 0.08, texKey: "concrete", floorLighten: 0.2 },
-      { key: "metal", roughness: 0.12, metalness: 0.92 },
-      { key: "gloss", roughness: 0.22, metalness: 0.06 },
-      { key: "vinyl", roughness: 0.55, metalness: 0.0, texKey: "tile" },
-      { key: "wood", roughness: 0.48, metalness: 0.02, texKey: "wood" },
+      // Lego Plastic -- glossy, saturated toy-brick plastic. Keeps whatever
+      // theme/tint color is currently picked (the old default "Plastic"
+      // finish did too), just adds a bright clearcoat on top for that
+      // unmistakable toy sheen.
+      { key: "lego", roughness: 0.28, metalness: 0.02, clearcoat: 1, clearcoatRoughness: 0.08, shiny: true },
+      // Concrete -- photoreal poured/precast concrete: doesn't take a paint
+      // tint (forceColor -- real concrete isn't dyed to match a theme),
+      // matte and rough, with form-tie marks and panel seams baked into
+      // its own texture.
+      { key: "concrete", forceColor: true, color: 0x9a968f, roughness: 0.92, metalness: 0.03, texKey: "concrete", floorLighten: 0.16 },
+      // Steel -- natural brushed structural steel: a fixed cool grey (real
+      // steel isn't dyed either), high metalness, with just enough
+      // roughness to read as brushed rather than a mirror-polished chrome.
+      { key: "steel", forceColor: true, color: 0xacb2b6, roughness: 0.38, metalness: 0.92, shiny: true },
+      // Glass -- the whole structure turns to glass: walls become a
+      // frosted, translucent shell (partial transmission at a moderate
+      // roughness, so light diffuses through rather than a perfectly clear
+      // pane), while every actual window pane (the shared glassMat --
+      // applyGlassWindowTint below) turns fully clear instead of its usual
+      // faint blue tint.
+      { key: "glass", forceColor: true, color: 0xeaf5fb, roughness: 0.16, metalness: 0.0, transmission: 0.6, thickness: 0.35, ior: 1.45, clearcoat: 0.5, clearcoatRoughness: 0.12, shiny: true },
+      // Oak Wood -- light, natural oak: warm tan, low sheen, real grain.
+      { key: "wood", forceColor: true, color: 0xceac7c, roughness: 0.52, metalness: 0.0, texKey: "wood" },
     ];
     function wallTexForKey(texKey) {
       if (texKey === "grain") return wallGrainTex;
@@ -5538,50 +5598,86 @@ export default function RoomBuilder() {
       const isGrain = preset.texKey === "grain";
       const map = wallTexForKey(preset.texKey);
       const roughnessMap = isGrain ? wallRoughTex : null;
-      // metal/gloss are the "shiny" finishes -- give them the detailed
-      // cityscape reflection map instead of the soft ambient one so a
-      // shiny wall/floor actually reflects something recognizable.
-      const shinyEnvMap = preset.key === "metal" || preset.key === "gloss" ? reflectionEnvMap : null;
+      // Lego Plastic/Steel/Glass are the "shiny" finishes -- give them the
+      // detailed cityscape reflection map instead of the soft ambient one
+      // so a shiny/metallic/glassy wall actually reflects something
+      // recognizable rather than just a flat ambient tint.
+      const shinyEnvMap = preset.shiny ? reflectionEnvMap : null;
+      // only the Glass preset sets these -- everywhere else they stay at
+      // their inert defaults (0 transmission, 0 clearcoat), so a plain
+      // MeshPhysicalMaterial behaves exactly like the old MeshStandardMaterial.
+      const clearcoat = preset.clearcoat || 0;
+      const clearcoatRoughness = preset.clearcoatRoughness || 0;
+      const transmission = preset.transmission || 0;
+      const thickness = preset.thickness || 0;
+      const ior = preset.ior || 1.5;
+      // a forceColor finish (Concrete/Steel/Glass/Oak Wood) keeps its own
+      // natural, untinted color -- real concrete/steel/glass/wood aren't
+      // dyed, so the active/inactive floor-highlight tint (whose default
+      // Active color is pure white at a strong 92% blend) shouldn't be
+      // allowed to wash them out toward white the way it can the one
+      // tintable finish, Lego Plastic, which is meant to follow whatever
+      // color is picked.
+      const tintable = !forceColor;
 
       const wallColor = new THREE.Color(mainColor);
-      if (currentTintActiveOn) wallColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      if (tintable && currentTintActiveOn) wallColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
       wallMat.map = map;
       wallMat.roughnessMap = roughnessMap;
       wallMat.color.copy(wallColor);
       wallMat.roughness = roughness;
       wallMat.metalness = metalness;
       wallMat.envMap = shinyEnvMap;
+      wallMat.clearcoat = clearcoat;
+      wallMat.clearcoatRoughness = clearcoatRoughness;
+      wallMat.transmission = transmission;
+      wallMat.thickness = thickness;
+      wallMat.ior = ior;
       wallMat.needsUpdate = true;
 
       // window/door mullions -- same finish as the wall itself (not their
       // own separate dark-metal material), just 20% darker so they still
       // read as a distinct frame rather than disappearing into the pane.
+      // Never transmissive even under the Glass preset -- a glass building
+      // still wants a solid, visible frame around each opening (like a real
+      // glass curtain wall), rather than every frame vanishing too.
       mullionMat.map = map;
       mullionMat.roughnessMap = roughnessMap;
       mullionMat.color.copy(wallColor).multiplyScalar(0.8);
       mullionMat.roughness = roughness;
       mullionMat.metalness = metalness;
       mullionMat.envMap = shinyEnvMap;
+      mullionMat.clearcoat = clearcoat;
+      mullionMat.clearcoatRoughness = clearcoatRoughness;
       mullionMat.needsUpdate = true;
 
       const wallDimColor = new THREE.Color(mainColor).multiplyScalar(0.5);
-      if (currentTintInactiveOn) wallDimColor.lerp(new THREE.Color(currentTintInactiveColor), 0.8);
+      if (tintable && currentTintInactiveOn) wallDimColor.lerp(new THREE.Color(currentTintInactiveColor), 0.8);
       wallMatDim.map = map;
       wallMatDim.roughnessMap = roughnessMap;
       wallMatDim.color.copy(wallDimColor);
       wallMatDim.roughness = roughness;
       wallMatDim.metalness = metalness;
       wallMatDim.envMap = shinyEnvMap;
+      wallMatDim.clearcoat = clearcoat;
+      wallMatDim.clearcoatRoughness = clearcoatRoughness;
+      wallMatDim.transmission = transmission;
+      wallMatDim.thickness = thickness;
+      wallMatDim.ior = ior;
       wallMatDim.needsUpdate = true;
 
       // the room ceiling ("roof") always matches the walls -- a balcony's
       // own covered ceiling already tracks currentWallMat directly, so it
-      // follows for free without any change here.
+      // follows for free without any change here. It keeps its own fixed
+      // 60%-opacity alpha blend (for edit visibility from above) rather
+      // than taking on real transmission under the Glass preset.
       ceilingMat.map = map;
       ceilingMat.color.copy(wallColor);
       ceilingMat.roughness = roughness;
       ceilingMat.metalness = metalness;
       ceilingMat.envMap = shinyEnvMap;
+      ceilingMat.clearcoat = clearcoat;
+      ceilingMat.clearcoatRoughness = clearcoatRoughness;
       ceilingMat.needsUpdate = true;
 
       // the balcony's own roof/platform and any staircase default to
@@ -5591,44 +5687,55 @@ export default function RoomBuilder() {
       // entirely, so toggling the tint on/off visibly changed the walls but
       // left these untouched.
       // They also pick up the wall's own finish (roughness/metalness/map/
-      // envMap) below -- previously only .color was ever touched here, so a
-      // shiny "metal" or textured "concrete"/"wood" wall left these three
-      // stuck at their flat, matte, untextured constructor defaults, making
-      // the balcony platform/roof and any staircase read as a plain
-      // mismatched white next to the wall's actual finish.
+      // envMap/clearcoat) below -- previously only .color was ever touched
+      // here, so a shiny "Steel" or textured "Concrete"/"Oak Wood" wall
+      // left these three stuck at their flat, matte, untextured constructor
+      // defaults, making the balcony platform/roof and any staircase read
+      // as a plain mismatched white next to the wall's actual finish.
       const roofColor = new THREE.Color(currentThemeRoofColor != null ? currentThemeRoofColor : mainColor);
-      if (currentTintActiveOn) roofColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      if (tintable && currentTintActiveOn) roofColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
       balconyRoofMat.map = map;
       balconyRoofMat.roughnessMap = roughnessMap;
       balconyRoofMat.color.copy(roofColor);
       balconyRoofMat.roughness = roughness;
       balconyRoofMat.metalness = metalness;
       balconyRoofMat.envMap = shinyEnvMap;
+      balconyRoofMat.clearcoat = clearcoat;
+      balconyRoofMat.clearcoatRoughness = clearcoatRoughness;
       balconyRoofMat.needsUpdate = true;
 
       const platformColor = new THREE.Color(currentThemePlatformColor != null ? currentThemePlatformColor : mainColor);
-      if (currentTintActiveOn) platformColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      if (tintable && currentTintActiveOn) platformColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
       balconyPlatformMat.map = map;
       balconyPlatformMat.roughnessMap = roughnessMap;
       balconyPlatformMat.color.copy(platformColor);
       balconyPlatformMat.roughness = roughness;
       balconyPlatformMat.metalness = metalness;
       balconyPlatformMat.envMap = shinyEnvMap;
+      balconyPlatformMat.clearcoat = clearcoat;
+      balconyPlatformMat.clearcoatRoughness = clearcoatRoughness;
       balconyPlatformMat.needsUpdate = true;
 
       const stairColor = new THREE.Color(currentThemeStairColor != null ? currentThemeStairColor : mainColor);
-      if (currentTintActiveOn) stairColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      if (tintable && currentTintActiveOn) stairColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
       stairMat.map = map;
       stairMat.roughnessMap = roughnessMap;
       stairMat.color.copy(stairColor);
       stairMat.roughness = roughness;
       stairMat.metalness = metalness;
       stairMat.envMap = shinyEnvMap;
+      stairMat.clearcoat = clearcoat;
+      stairMat.clearcoatRoughness = clearcoatRoughness;
       stairMat.needsUpdate = true;
 
       let floorBase, floorRough, floorMetal, floorMap, floorRoughnessMap;
-      if (forceColor && preset.floorLighten != null) {
-        floorBase = new THREE.Color(mainColor).lerp(new THREE.Color(0xffffff), preset.floorLighten);
+      if (forceColor) {
+        // every forceColor finish gives the floor its own fixed material
+        // color too (a steel/glass/wood structure has a steel/glass/wood
+        // floor, not the room's separate theme floor color) -- Concrete's
+        // floorLighten optionally blends that toward white for a lighter
+        // poured-slab shade instead of an exact wall-color match.
+        floorBase = preset.floorLighten != null ? new THREE.Color(mainColor).lerp(new THREE.Color(0xffffff), preset.floorLighten) : mainColor;
         floorRough = roughness; floorMetal = metalness;
         floorMap = floorTexForKey(preset.texKey);
         floorRoughnessMap = null;
@@ -5640,24 +5747,30 @@ export default function RoomBuilder() {
         floorRoughnessMap = isGrain ? floorRoughTex : null;
       }
       const floorColor = new THREE.Color(floorBase);
-      if (currentTintActiveOn) floorColor.lerp(new THREE.Color(currentTintActiveColor), 0.92).multiplyScalar(0.94);
+      if (tintable && currentTintActiveOn) floorColor.lerp(new THREE.Color(currentTintActiveColor), 0.92).multiplyScalar(0.94);
       floorMat.map = floorMap;
       floorMat.roughnessMap = floorRoughnessMap;
       floorMat.color.copy(floorColor);
       floorMat.roughness = floorRough;
       floorMat.metalness = floorMetal;
       floorMat.envMap = shinyEnvMap;
+      floorMat.clearcoat = clearcoat;
+      floorMat.clearcoatRoughness = clearcoatRoughness;
       floorMat.needsUpdate = true;
 
       const floorDimColor = new THREE.Color(floorBase).multiplyScalar(0.5);
-      if (currentTintInactiveOn) floorDimColor.lerp(new THREE.Color(currentTintInactiveColor), 0.8).multiplyScalar(0.92);
+      if (tintable && currentTintInactiveOn) floorDimColor.lerp(new THREE.Color(currentTintInactiveColor), 0.8).multiplyScalar(0.92);
       floorMatDim.map = floorMap;
       floorMatDim.roughnessMap = floorRoughnessMap;
       floorMatDim.color.copy(floorDimColor);
       floorMatDim.roughness = floorRough;
       floorMatDim.metalness = floorMetal;
       floorMatDim.envMap = shinyEnvMap;
+      floorMatDim.clearcoat = clearcoat;
+      floorMatDim.clearcoatRoughness = clearcoatRoughness;
       floorMatDim.needsUpdate = true;
+
+      applyGlassWindowTint(preset.key === "glass");
     }
     function applyBuildingMaterial(index) {
       currentBuildingMaterialIndex = index;
@@ -10987,10 +11100,10 @@ export default function RoomBuilder() {
           <button
             className="rb-btn"
             onClick={() => setBuildingMaterialIndex((i) => (i + 1) % BUILDING_MATERIAL_NAMES.length)}
-            title={`Finish: ${BUILDING_MATERIAL_NAMES[buildingMaterialIndex]} (click to cycle: ${BUILDING_MATERIAL_NAMES.join(", ")}) -- an overlay on the current theme color, except concrete which keeps its own grey`}
+            title={`Finish: ${BUILDING_MATERIAL_NAMES[buildingMaterialIndex]} (click to cycle: ${BUILDING_MATERIAL_NAMES.join(", ")}) -- Lego Plastic tints with the current theme color; Concrete, Steel, Glass, and Oak Wood each keep their own natural, untinted color`}
             style={{
               padding: 0, width: 28, height: 28, minWidth: 28, borderRadius: "50%", overflow: "hidden",
-              background: "conic-gradient(from 0deg, #9a9a9a 0turn 0.25turn, #232323 0.25turn 0.5turn, #f2c230 0.5turn 0.75turn, #f5f5f2 0.75turn 1turn)",
+              background: "conic-gradient(from 0deg, #e8483f 0turn 0.2turn, #9a968f 0.2turn 0.4turn, #acb2b6 0.4turn 0.6turn, #cfeaf7 0.6turn 0.8turn, #ceac7c 0.8turn 1turn)",
               border: "1px solid var(--border-control)",
             }}
           />
