@@ -1160,7 +1160,7 @@ export default function RoomBuilder() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wireframeMode, lensTab]);
-  const [tintInactiveOn, setTintInactiveOn] = useState(true);
+  const [tintInactiveOn, setTintInactiveOn] = useState(false);
   const [tintInactiveColor, setTintInactiveColor] = useState(0xff6b1a);
   const tintInactiveApiRef = useRef(() => {});
   useEffect(() => { tintInactiveApiRef.current(tintInactiveOn, tintInactiveColor); }, [tintInactiveOn, tintInactiveColor]);
@@ -1289,18 +1289,23 @@ export default function RoomBuilder() {
     // cube mesh, rendered into a small corner viewport each frame (see
     // tick()) and orbited to always mirror the main camera's orientation.
     const viewCubeScene = new THREE.Scene();
+    // pulled back from the box's own half-extent (1) enough that the
+    // silhouette's widest point -- the hexagonal outline you get looking
+    // straight down a body diagonal, at sqrt(2/3) of the full diagonal from
+    // center, ~1.633 units -- still fits inside the frustum with room to
+    // spare, so an edge/corner view no longer clips the cube's corners
+    // against the little viewport's own edge.
     const viewCubeCamera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
-    function makeCubeFaceTexture(label) {
+    const VIEWCUBE_CAM_DISTANCE = 7;
+    // transparent background -- the cube itself is just a wireframe now (no
+    // opaque, colored faces), so only the face label's own text is opaque.
+    function makeCubeFaceTexture(label, textColor) {
       const size = 128;
       const c = document.createElement("canvas");
       c.width = size; c.height = size;
       const ctx = c.getContext("2d");
-      ctx.fillStyle = "#4a4a4e";
-      ctx.fillRect(0, 0, size, size);
-      ctx.strokeStyle = "rgba(255,255,255,0.4)";
-      ctx.lineWidth = 5;
-      ctx.strokeRect(3, 3, size - 6, size - 6);
-      ctx.fillStyle = "#f0f0f2";
+      ctx.clearRect(0, 0, size, size);
+      ctx.fillStyle = textColor;
       ctx.font = "bold 20px Inter, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -1313,13 +1318,30 @@ export default function RoomBuilder() {
       { key: "top", label: "TOP" }, { key: "bottom", label: "BOTTOM" },
       { key: "front", label: "FRONT" }, { key: "back", label: "BACK" },
     ];
-    const viewCubeMaterials = viewCubeFaceDirs.map((f) => new THREE.MeshBasicMaterial({ map: makeCubeFaceTexture(f.label) }));
+    const viewCubeMaterials = viewCubeFaceDirs.map(() => new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
     const viewCubeMesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), viewCubeMaterials);
     viewCubeScene.add(viewCubeMesh);
-    viewCubeMesh.add(new THREE.LineSegments(
+    const viewCubeEdges = new THREE.LineSegments(
       new THREE.EdgesGeometry(viewCubeMesh.geometry),
-      new THREE.LineBasicMaterial({ color: 0x1a1a1a, transparent: true, opacity: 0.5 })
-    ));
+      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 })
+    );
+    viewCubeMesh.add(viewCubeEdges);
+    // dark UI theme: white wireframe + labels (floats clearly over the
+    // always-dark 3D canvas); light theme: dimmed to a dark grey instead of
+    // pure black so it still reads as part of the same widget family.
+    let viewCubeThemeCached = null;
+    function applyViewCubeTheme(theme) {
+      if (theme === viewCubeThemeCached) return;
+      viewCubeThemeCached = theme;
+      const textColor = theme === "light" ? "#4a4a4a" : "#ffffff";
+      const edgeColor = theme === "light" ? 0x4a4a4a : 0xffffff;
+      viewCubeMaterials.forEach((mat, i) => {
+        if (mat.map) mat.map.dispose();
+        mat.map = makeCubeFaceTexture(viewCubeFaceDirs[i].label, textColor);
+        mat.needsUpdate = true;
+      });
+      viewCubeEdges.material.color.set(edgeColor);
+    }
     const viewCubeRaycaster = new THREE.Raycaster();
     // classifies a raycast hit on the cube into a direction vector: one
     // axis is always at the true extreme (whichever face was struck); the
@@ -1343,13 +1365,14 @@ export default function RoomBuilder() {
     function updateViewCubeOrientation() {
       const dir = getCurrentViewDirection();
       const up = viewMode === "orbit" ? new THREE.Vector3(0, 1, 0) : ORTHO_DIRS[viewMode].up;
-      viewCubeCamera.position.copy(dir).multiplyScalar(4.5);
+      viewCubeCamera.position.copy(dir).multiplyScalar(VIEWCUBE_CAM_DISTANCE);
       viewCubeCamera.up.copy(up);
       viewCubeCamera.lookAt(0, 0, 0);
       viewCubeCamera.updateProjectionMatrix();
     }
     function renderViewCube(canvasWidth, canvasHeight) {
       updateViewCubeOrientation();
+      applyViewCubeTheme(uiThemeRef.current);
       const size = VIEWCUBE_SIZE;
       const x = canvasWidth - rightPanelWidthRef.current - VIEWCUBE_PAD - size;
       const y = canvasHeight - TOPBAR_HEIGHT - VIEWCUBE_PAD - size; // WebGL viewport Y is bottom-up
@@ -5567,17 +5590,41 @@ export default function RoomBuilder() {
       // does -- previously these three sat outside recomputeWallFloorMaterials
       // entirely, so toggling the tint on/off visibly changed the walls but
       // left these untouched.
+      // They also pick up the wall's own finish (roughness/metalness/map/
+      // envMap) below -- previously only .color was ever touched here, so a
+      // shiny "metal" or textured "concrete"/"wood" wall left these three
+      // stuck at their flat, matte, untextured constructor defaults, making
+      // the balcony platform/roof and any staircase read as a plain
+      // mismatched white next to the wall's actual finish.
       const roofColor = new THREE.Color(currentThemeRoofColor != null ? currentThemeRoofColor : mainColor);
       if (currentTintActiveOn) roofColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      balconyRoofMat.map = map;
+      balconyRoofMat.roughnessMap = roughnessMap;
       balconyRoofMat.color.copy(roofColor);
+      balconyRoofMat.roughness = roughness;
+      balconyRoofMat.metalness = metalness;
+      balconyRoofMat.envMap = shinyEnvMap;
+      balconyRoofMat.needsUpdate = true;
 
       const platformColor = new THREE.Color(currentThemePlatformColor != null ? currentThemePlatformColor : mainColor);
       if (currentTintActiveOn) platformColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      balconyPlatformMat.map = map;
+      balconyPlatformMat.roughnessMap = roughnessMap;
       balconyPlatformMat.color.copy(platformColor);
+      balconyPlatformMat.roughness = roughness;
+      balconyPlatformMat.metalness = metalness;
+      balconyPlatformMat.envMap = shinyEnvMap;
+      balconyPlatformMat.needsUpdate = true;
 
       const stairColor = new THREE.Color(currentThemeStairColor != null ? currentThemeStairColor : mainColor);
       if (currentTintActiveOn) stairColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
+      stairMat.map = map;
+      stairMat.roughnessMap = roughnessMap;
       stairMat.color.copy(stairColor);
+      stairMat.roughness = roughness;
+      stairMat.metalness = metalness;
+      stairMat.envMap = shinyEnvMap;
+      stairMat.needsUpdate = true;
 
       let floorBase, floorRough, floorMetal, floorMap, floorRoughnessMap;
       if (forceColor && preset.floorLighten != null) {
@@ -5677,7 +5724,7 @@ export default function RoomBuilder() {
     // [tintActiveOn]/[tintInactiveOn] effects fire before these refs exist
     // on the very first mount, so their default-on values would otherwise
     // never actually reach the materials until the user toggled something.
-    applyTintInactive(true, 0xff6b1a);
+    applyTintInactive(false, 0xff6b1a);
     applyTintActive(true, 0xffffff);
 
     // colors every prop kind to its own tone from a chosen theme (or, when
@@ -9246,39 +9293,54 @@ export default function RoomBuilder() {
         // Anchored in SCREEN space, not world space -- a fixed world-space
         // +X offset would swing to the front/left/behind the building as
         // the camera orbits. Instead project every corner of the floor's
-        // footprint (top and bottom) and take the rightmost one on screen,
-        // so the label always floats just past the building's own silhouette
-        // no matter which way it's currently facing.
+        // footprint (see the corner loop below) and take the rightmost one
+        // on screen, so the label always floats just past the building's
+        // own silhouette no matter which way it's currently facing.
         const fp = entry.data.footprint;
-        const baseY = g.position.y, topY = baseY + entry.data.height;
+        const baseY = g.position.y;
         const centerWorld = new THREE.Vector3((fp.xMin + fp.xMax) / 2, baseY + entry.data.height / 2, (fp.zMin + fp.zMax) / 2);
         const centerInFront = centerWorld.clone().sub(activeCamera.position).dot(camForward) > 0;
         if (!centerInFront) { rec.row.style.display = "none"; return; }
         const centerNdc = centerWorld.clone().project(activeCamera);
         let maxScreenX = -Infinity;
+        // only the 4 base-height (floor-plan) corners -- a per-level label
+        // is naming the floor PLAN, and the ceiling-height corners of a tall
+        // room routinely project much further out in perspective than any
+        // part of the silhouette a person would actually call "the edge of
+        // the building", particularly from a default, fairly close-in
+        // camera position. Chasing that wide ceiling-corner reading, rather
+        // than the floor outline directly below the label, was what pushed
+        // the row out past the canvas even at the default view with no
+        // zoom or orbit at all.
         [[fp.xMin, fp.zMin], [fp.xMax, fp.zMin], [fp.xMin, fp.zMax], [fp.xMax, fp.zMax]].forEach(([x, z]) => {
-          [baseY, topY].forEach((y) => {
-            const p = new THREE.Vector3(x, y, z);
-            if (p.clone().sub(activeCamera.position).dot(camForward) <= 0) return;
-            const ndc = p.project(activeCamera);
-            const sx = (ndc.x * 0.5 + 0.5) * rect.width;
-            if (sx > maxScreenX) maxScreenX = sx;
-          });
+          const p = new THREE.Vector3(x, baseY, z);
+          if (p.clone().sub(activeCamera.position).dot(camForward) <= 0) return;
+          const ndc = p.project(activeCamera);
+          const sx = (ndc.x * 0.5 + 0.5) * rect.width;
+          if (sx > maxScreenX) maxScreenX = sx;
         });
         if (maxScreenX === -Infinity) { rec.row.style.display = "none"; return; }
         const sy = (-centerNdc.y * 0.5 + 0.5) * rect.height;
         if (maxScreenX < -50 || maxScreenX > rect.width + 300 || sy < -100 || sy > rect.height + 100) { rec.row.style.display = "none"; return; }
         rec.row.style.display = "flex";
-        // the row (name + isolate/duplicate/add buttons) is wider than the
-        // plain text label this used to be -- clamp it clear of both the
-        // canvas edge and the right-docked Intent panel (which sits on top
-        // of the canvas at a higher z-index and would otherwise cover it),
-        // so a building silhouette that reaches close to either edge
-        // doesn't push the controls out of reach.
+        // Always sit just past the building's own rightmost screen point --
+        // this used to also clamp back toward the left whenever the
+        // building's silhouette reached close to the right-docked Intent
+        // panel, which meant a wide-enough (but still fully on-screen)
+        // building pulled the row back left of its own edge and landed it
+        // on top of the model, where it read as covered by the building and
+        // stopped being easy to grab. Staying clear of the model always
+        // wins over staying clear of the panel; if both can't be satisfied
+        // the row sits over/under the panel instead of over the building.
+        // The one remaining clamp is against the parent layer's own
+        // overflow:hidden edge (its width matches the canvas) -- without it
+        // a building silhouette that reaches past the visible canvas itself
+        // (an extreme zoom/orbit) would push the row past that edge too and
+        // it would simply vanish instead of showing up anywhere at all.
+        const FLOOR_LABEL_GAP = 24; // a bit further off the silhouette than before, easier to grab
         const ROW_WIDTH_ESTIMATE = 150;
-        const rightBound = rect.width - rightPanelWidthRef.current - ROW_WIDTH_ESTIMATE - 8;
-        const leftPx = Math.min(maxScreenX + 16, rightBound);
-        rec.row.style.left = Math.max(4, leftPx) + "px";
+        const maxOnCanvasLeft = rect.width - ROW_WIDTH_ESTIMATE - 4;
+        rec.row.style.left = Math.max(4, Math.min(maxScreenX + FLOOR_LABEL_GAP, maxOnCanvasLeft)) + "px";
         rec.row.style.top = Math.min(Math.max(sy, 20), rect.height - 20) + "px";
       });
       floorLabelPool.forEach((rec, id) => { if (!seen.has(id)) rec.row.style.display = "none"; });
@@ -10691,7 +10753,7 @@ export default function RoomBuilder() {
               setUltraRealistic(true);
               setTintActiveOn(true);
               setTintActiveColor(0xffffff);
-              setTintInactiveOn(true);
+              setTintInactiveOn(false);
               setTintInactiveColor(0xff6b1a);
               setThemeAnchor(null);
               setThemePresetIndex(0);
