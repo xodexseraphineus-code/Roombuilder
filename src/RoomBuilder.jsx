@@ -837,6 +837,9 @@ export default function RoomBuilder() {
   // behind either of these yet.
   const [topNavTab, setTopNavTab] = useState("Build");
   const [lensTab, setLensTab] = useState("Space");
+  // so tapping "Material" a second time can restore whatever lens was
+  // active before it, instead of just staying stuck on Material.
+  const prevLensTabRef = useRef("Space");
   // selecting the "Material" lens forces the X-ray-style Material Editor
   // display (see applyMaterialEditorMode) -- every other lens is still a
   // dummy prototyping tab with nothing wired to it.
@@ -2892,8 +2895,11 @@ export default function RoomBuilder() {
       back.position.set(0, yMid, -T / 2 - 0.002);
       back.rotation.y = Math.PI;
       back.receiveShadow = true;
+      const glass = new THREE.Mesh(new THREE.CircleGeometry(radius, 48), glassMat);
+      glass.position.set(0, yMid, 0);
+      glass.receiveShadow = true;
       const trimGroup = new THREE.Group();
-      trimGroup.add(front, back);
+      trimGroup.add(front, back, glass);
       sceneGroup.add(placeOnWall(trimGroup, lengthAxis, coord, uMid));
     }
 
@@ -8523,6 +8529,15 @@ export default function RoomBuilder() {
     }
     selectFloorRef.current = selectFloorById;
 
+    // a freshly created layer (new/duplicated/pasted) defaults to isolated
+    // -- it becomes the only visible one, rather than surfacing in a stack
+    // of every other layer the user wasn't necessarily looking at.
+    function isolateOnly(id) {
+      isolatedFloorIds.clear();
+      isolatedFloorIds.add(id);
+      setIsolatedFloorIdsState(Array.from(isolatedFloorIds));
+    }
+
     function duplicateActiveFloor() {
       pushUndo();
       const idx = floors.findIndex((f) => f.id === activeFloorId);
@@ -8545,7 +8560,7 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      if (isolatedFloorIds.size) { isolatedFloorIds.clear(); setIsolatedFloorIdsState([]); }
+      isolateOnly(newId);
       selectFloorById(newId);
       applyVisibility();
     }
@@ -8612,7 +8627,7 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      if (isolatedFloorIds.size) { isolatedFloorIds.clear(); setIsolatedFloorIdsState([]); }
+      isolateOnly(newId);
       selectFloorById(newId);
       applyVisibility();
     }
@@ -8751,7 +8766,7 @@ export default function RoomBuilder() {
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
-      if (isolatedFloorIds.size) { isolatedFloorIds.clear(); setIsolatedFloorIdsState([]); }
+      isolateOnly(newId);
       selectFloorById(newId);
       applyVisibility();
     }
@@ -9054,7 +9069,56 @@ export default function RoomBuilder() {
       }
     }
 
-    const floorLabelPool = new Map(); // floorId -> label element
+    // in-viewport layer controls: a floating row per visible floor (name +
+    // isolate/duplicate/add-layer buttons) anchored in screen space next to
+    // the building's silhouette. The name itself is both the click-to-
+    // activate target and the drag handle for reordering -- dragging it
+    // over another row (an orange line shows where it'll land) calls the
+    // same reorderFloors() the side panel's own drag-and-drop uses.
+    function svgIcon(inner) {
+      return `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+    }
+    const ISOLATE_ICON = svgIcon('<circle cx="12" cy="12" r="10"></circle><line x1="22" x2="18" y1="12" y2="12"></line><line x1="6" x2="2" y1="12" y2="12"></line><line x1="12" x2="12" y1="6" y2="2"></line><line x1="12" x2="12" y1="22" y2="18"></line>');
+    const DUPLICATE_ICON = svgIcon('<rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>');
+    const ADD_ICON = svgIcon('<path d="M5 12h14"></path><path d="M12 5v14"></path>');
+    function makeIconBtn(html, title) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.innerHTML = html;
+      b.title = title;
+      b.style.pointerEvents = "auto";
+      b.style.cursor = "pointer";
+      b.style.width = "15px";
+      b.style.height = "15px";
+      b.style.padding = "0";
+      b.style.display = "flex";
+      b.style.alignItems = "center";
+      b.style.justifyContent = "center";
+      b.style.border = "none";
+      b.style.borderRadius = "50%";
+      b.style.background = "rgba(255,255,255,0.14)";
+      b.style.flexShrink = "0";
+      return b;
+    }
+    const floorLabelPool = new Map(); // floorId -> { row, nameEl, isoBtn, dupBtn, addBtn }
+    let floorRowDrag = null; // { id, startX, startY, moved }
+    let floorDropTarget = null; // { targetId, edge, rect }
+    let floorDropLineEl = null;
+    function ensureFloorDropLine() {
+      if (floorDropLineEl) return floorDropLineEl;
+      const layer = floorLabelLayerRef.current;
+      if (!layer) return null;
+      const line = document.createElement("div");
+      line.style.position = "absolute";
+      line.style.height = "2px";
+      line.style.background = "#FF6B1A";
+      line.style.borderRadius = "1px";
+      line.style.pointerEvents = "none";
+      line.style.display = "none";
+      layer.appendChild(line);
+      floorDropLineEl = line;
+      return line;
+    }
     function updateFloorLabels() {
       const layer = floorLabelLayerRef.current;
       if (!layer) return;
@@ -9067,42 +9131,108 @@ export default function RoomBuilder() {
         const g = floorGroups.get(entry.id);
         if (!visible || !g) return;
         seen.add(entry.id);
-        let el = floorLabelPool.get(entry.id);
-        if (!el) {
-          // plain floating text -- no button/pill chrome, just a label,
-          // using the exact same font/size as the ribbon's own floating
-          // parameter labels (e.g. "Opening height" under the Window tool)
-          // -- the ".ribbon-label" class, replicated inline since this is a
-          // detached DOM node outside React's own tree.
-          el = document.createElement("div");
-          el.style.position = "absolute";
-          el.style.transform = "translate(0, -50%)";
-          el.style.pointerEvents = "auto";
-          el.style.cursor = "pointer";
-          el.style.fontSize = "9.5px";
-          el.style.fontWeight = "500";
-          el.style.fontFamily = '"Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace';
-          el.style.whiteSpace = "nowrap";
-          el.style.background = "none";
-          el.style.border = "none";
-          el.style.padding = "0";
-          el.style.textShadow = "0 1px 3px rgba(0,0,0,0.75)";
-          el.style.userSelect = "none";
-          layer.appendChild(el);
-          floorLabelPool.set(entry.id, el);
+        let rec = floorLabelPool.get(entry.id);
+        if (!rec) {
+          const row = document.createElement("div");
+          row.style.position = "absolute";
+          row.style.transform = "translate(0, -50%)";
+          row.style.display = "flex";
+          row.style.alignItems = "center";
+          row.style.gap = "5px";
+          row.style.padding = "3px 6px";
+          row.style.borderRadius = "999px";
+          row.style.pointerEvents = "none"; // re-enabled per-child below
+
+          const nameEl = document.createElement("div");
+          nameEl.style.pointerEvents = "auto";
+          nameEl.style.cursor = "grab";
+          nameEl.style.fontSize = "9.5px";
+          nameEl.style.fontWeight = "500";
+          nameEl.style.fontFamily = '"Space Mono", ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace';
+          nameEl.style.whiteSpace = "nowrap";
+          nameEl.style.textShadow = "0 1px 3px rgba(0,0,0,0.75)";
+          nameEl.style.userSelect = "none";
+          nameEl.style.touchAction = "none";
+
+          const isoBtn = makeIconBtn(ISOLATE_ICON, "Isolate this layer");
+          const dupBtn = makeIconBtn(DUPLICATE_ICON, "Duplicate this layer");
+          const addBtn = makeIconBtn(ADD_ICON, "Add a new layer after this one");
+          row.appendChild(nameEl);
+          row.appendChild(isoBtn);
+          row.appendChild(dupBtn);
+          row.appendChild(addBtn);
+          layer.appendChild(row);
+          rec = { row, nameEl, isoBtn, dupBtn, addBtn };
+          floorLabelPool.set(entry.id, rec);
+
+          isoBtn.onclick = (e) => { e.stopPropagation(); toggleIsolateRef.current(entry.id); };
+          dupBtn.onclick = (e) => { e.stopPropagation(); selectFloorById(entry.id); duplicateFloorRef.current(); };
+          addBtn.onclick = (e) => { e.stopPropagation(); selectFloorById(entry.id); addFloorRef.current(); };
+
+          nameEl.onpointerdown = (e) => {
+            nameEl.setPointerCapture(e.pointerId);
+            floorRowDrag = { id: entry.id, startX: e.clientX, startY: e.clientY, moved: false };
+          };
+          nameEl.onpointermove = (e) => {
+            if (!floorRowDrag || floorRowDrag.id !== entry.id) return;
+            const dx = e.clientX - floorRowDrag.startX, dy = e.clientY - floorRowDrag.startY;
+            if (!floorRowDrag.moved && Math.hypot(dx, dy) > 6) {
+              floorRowDrag.moved = true;
+              rec.row.style.opacity = "0.45";
+            }
+            if (!floorRowDrag.moved) return;
+            let found = null;
+            floorLabelPool.forEach((other, otherId) => {
+              if (otherId === entry.id || other.row.style.display === "none") return;
+              const r = other.row.getBoundingClientRect();
+              if (e.clientY >= r.top && e.clientY <= r.bottom) {
+                found = { targetId: otherId, edge: e.clientY < r.top + r.height / 2 ? "before" : "after", rect: r };
+              }
+            });
+            floorDropTarget = found;
+            const line = ensureFloorDropLine();
+            if (line) {
+              if (found) {
+                line.style.display = "block";
+                line.style.left = found.rect.left + "px";
+                line.style.width = found.rect.width + "px";
+                line.style.top = (found.edge === "before" ? found.rect.top - 2 : found.rect.bottom + 2) + "px";
+              } else {
+                line.style.display = "none";
+              }
+            }
+          };
+          nameEl.onpointerup = () => {
+            if (floorRowDrag && floorRowDrag.id === entry.id) {
+              if (floorRowDrag.moved) {
+                if (floorDropTarget) reorderFloors(entry.id, floorDropTarget.targetId, floorDropTarget.edge);
+              } else {
+                selectFloorById(entry.id);
+              }
+              rec.row.style.opacity = "1";
+            }
+            floorRowDrag = null;
+            floorDropTarget = null;
+            if (floorDropLineEl) floorDropLineEl.style.display = "none";
+          };
         }
-        el.onclick = () => selectFloorById(entry.id);
         const isActive = entry.id === activeFloorId;
-        // dark mode: fixed white/grey (readable against the dark viewport
-        // regardless of whatever the tint swatches happen to be set to);
-        // light mode: unchanged, still following the Active/Inactive tint
-        // colors like before.
-        if (uiThemeRef.current === "dark") {
-          el.style.color = isActive ? "#ffffff" : "#9a9a9a";
-        } else {
-          el.style.color = "#" + new THREE.Color(isActive ? currentTintActiveColor : currentTintInactiveColor).getHexString();
-        }
-        el.textContent = floorNamesRef.current[entry.id] || `Level ${floors.findIndex((f) => f.id === entry.id) + 1}`;
+        const isIsolated = isolatedFloorIds.has(entry.id);
+        // dark mode: fixed white/grey, readable against the always-dark
+        // viewport regardless of theme colors. Light mode is the inverse --
+        // dark grey text normally, switching to white once a layer is
+        // active, set off from the light viewport background by the same
+        // dark "collar" pill the orange selection ring sits on.
+        const isLight = uiThemeRef.current === "light";
+        const textColor = isActive ? "#ffffff" : (isLight ? "#3a3a3a" : "#9a9a9a");
+        rec.nameEl.style.color = textColor;
+        rec.dupBtn.style.color = textColor;
+        rec.addBtn.style.color = textColor;
+        rec.isoBtn.style.color = isIsolated ? "#ffffff" : textColor;
+        rec.isoBtn.style.background = isIsolated ? "#FF6B1A" : "rgba(255,255,255,0.14)";
+        rec.row.style.border = isActive ? "1.5px solid #FF6B1A" : "1.5px solid transparent";
+        rec.row.style.background = isActive && isLight ? "rgba(20,20,20,0.82)" : "transparent";
+        rec.nameEl.textContent = floorNamesRef.current[entry.id] || `Level ${floors.findIndex((f) => f.id === entry.id) + 1}`;
         // Anchored in SCREEN space, not world space -- a fixed world-space
         // +X offset would swing to the front/left/behind the building as
         // the camera orbits. Instead project every corner of the floor's
@@ -9113,7 +9243,7 @@ export default function RoomBuilder() {
         const baseY = g.position.y, topY = baseY + entry.data.height;
         const centerWorld = new THREE.Vector3((fp.xMin + fp.xMax) / 2, baseY + entry.data.height / 2, (fp.zMin + fp.zMax) / 2);
         const centerInFront = centerWorld.clone().sub(activeCamera.position).dot(camForward) > 0;
-        if (!centerInFront) { el.style.display = "none"; return; }
+        if (!centerInFront) { rec.row.style.display = "none"; return; }
         const centerNdc = centerWorld.clone().project(activeCamera);
         let maxScreenX = -Infinity;
         [[fp.xMin, fp.zMin], [fp.xMax, fp.zMin], [fp.xMin, fp.zMax], [fp.xMax, fp.zMax]].forEach(([x, z]) => {
@@ -9125,17 +9255,27 @@ export default function RoomBuilder() {
             if (sx > maxScreenX) maxScreenX = sx;
           });
         });
-        if (maxScreenX === -Infinity) { el.style.display = "none"; return; }
+        if (maxScreenX === -Infinity) { rec.row.style.display = "none"; return; }
         const sy = (-centerNdc.y * 0.5 + 0.5) * rect.height;
-        if (maxScreenX < -50 || maxScreenX > rect.width + 300 || sy < -100 || sy > rect.height + 100) { el.style.display = "none"; return; }
-        el.style.display = "block";
-        el.style.left = (maxScreenX + 16) + "px";
-        el.style.top = sy + "px";
+        if (maxScreenX < -50 || maxScreenX > rect.width + 300 || sy < -100 || sy > rect.height + 100) { rec.row.style.display = "none"; return; }
+        rec.row.style.display = "flex";
+        // the row (name + isolate/duplicate/add buttons) is wider than the
+        // plain text label this used to be -- clamp it clear of both the
+        // canvas edge and the right-docked Intent panel (which sits on top
+        // of the canvas at a higher z-index and would otherwise cover it),
+        // so a building silhouette that reaches close to either edge
+        // doesn't push the controls out of reach.
+        const ROW_WIDTH_ESTIMATE = 150;
+        const rightBound = rect.width - rightPanelWidthRef.current - ROW_WIDTH_ESTIMATE - 8;
+        const leftPx = Math.min(maxScreenX + 16, rightBound);
+        rec.row.style.left = Math.max(4, leftPx) + "px";
+        rec.row.style.top = Math.min(Math.max(sy, 20), rect.height - 20) + "px";
       });
-      floorLabelPool.forEach((el, id) => { if (!seen.has(id)) el.style.display = "none"; });
+      floorLabelPool.forEach((rec, id) => { if (!seen.has(id)) rec.row.style.display = "none"; });
     }
     function hideFloorLabels() {
-      floorLabelPool.forEach((el) => { el.style.display = "none"; });
+      floorLabelPool.forEach((rec) => { rec.row.style.display = "none"; });
+      if (floorDropLineEl) floorDropLineEl.style.display = "none";
     }
 
     function hideOverlayLabels() {
@@ -9308,7 +9448,8 @@ export default function RoomBuilder() {
       if (minorGrid) { minorGrid.geometry.dispose(); minorGrid.material.dispose(); }
       if (majorGrid) { majorGrid.geometry.dispose(); majorGrid.material.dispose(); }
       measureLabelPool.forEach((elx) => elx.remove());
-      floorLabelPool.forEach((elx) => elx.remove());
+      floorLabelPool.forEach((rec) => rec.row.remove());
+      if (floorDropLineEl) floorDropLineEl.remove();
       wallMat.dispose();
       floorMat.dispose();
       wallMatDim.dispose();
@@ -10635,12 +10776,24 @@ export default function RoomBuilder() {
             className="rb-btn"
             title={t === "Material" ? "X-ray view: translucent blue shell + bright edges, orange stairs/balconies/props" : undefined}
             onClick={() => {
-              // Wireframe and the Material Editor X-ray look share the same
-              // wall/prop materials -- leaving Wireframe on would stomp the
-              // Material Editor's blue/orange opacity back down to near-zero,
-              // so entering the Material lens always drops Wireframe first.
-              if (t === "Material") setWireframeMode(false);
-              setLensTab(t);
+              if (t === "Material") {
+                // Wireframe and the Material Editor X-ray look share the
+                // same wall/prop materials -- leaving Wireframe on would
+                // stomp the Material Editor's blue/orange opacity back down
+                // to near-zero, so entering the Material lens always drops
+                // Wireframe first.
+                setWireframeMode(false);
+                // tapping Material again while it's already active turns it
+                // back off, returning to whichever lens was showing before.
+                if (lensTab === "Material") {
+                  setLensTab(prevLensTabRef.current || "Space");
+                } else {
+                  prevLensTabRef.current = lensTab;
+                  setLensTab("Material");
+                }
+              } else {
+                setLensTab(t);
+              }
             }}
             style={{
               fontSize: 10.5, padding: "5px 11px", borderRadius: 999,
