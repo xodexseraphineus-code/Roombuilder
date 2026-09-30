@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronLeft, ChevronRight, Pencil } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Pencil } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -9682,12 +9682,26 @@ export default function RoomBuilder() {
   // own right-hand INTENT slot), resizable the same way as the Layers
   // panel on the left, just dragged from its own (left) edge instead.
   const [rightPanelWidth, setRightPanelWidth] = useState(220);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const rightPanelResizeRef = useRef(null);
+  // the ribbon along the bottom, collapsible the same way as the two side
+  // panels -- hidden entirely rather than shrunk, with its own floating
+  // chevron to bring it back.
+  const [ribbonCollapsed, setRibbonCollapsed] = useState(false);
+  // how much of the right edge / bottom edge the (possibly collapsed) right
+  // panel and ribbon actually occupy right now -- every other floating
+  // widget that keeps itself clear of them (the ViewCube, viewport-button
+  // strip, hint text, theme wheel, ...) reads these instead of the raw
+  // rightPanelWidth/RIBBON_HEIGHT so it reclaims that space the moment
+  // either one collapses, rather than leaving a dead gap where it used to be.
+  const rightPanelGap = rightPanelCollapsed ? 0 : rightPanelWidth;
+  const leftPanelGap = layersPanelCollapsed ? 0 : layersPanelWidth;
+  const effectiveRibbonHeight = ribbonCollapsed ? 0 : RIBBON_HEIGHT;
   // read inside the main effect's closure (mounted once), which otherwise
   // would only ever see this state's very first value -- used to keep the
   // ViewCube clear of the right panel.
-  const rightPanelWidthRef = useRef(rightPanelWidth);
-  useEffect(() => { rightPanelWidthRef.current = rightPanelWidth; }, [rightPanelWidth]);
+  const rightPanelWidthRef = useRef(rightPanelGap);
+  useEffect(() => { rightPanelWidthRef.current = rightPanelGap; }, [rightPanelGap]);
   const layersScrollRef = useRef(null);
   const scrollStripDragRef = useRef(null);
   const recentScrollInnerRef = useRef(null);
@@ -10061,7 +10075,7 @@ export default function RoomBuilder() {
           Text box: type an instruction and hit Enter or the send button --
           same Claude pipeline either way, useful wherever speech input
           isn't available (e.g. this sandbox). */}
-      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 12, right: rightPanelWidth + 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 12, right: rightPanelGap + 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <input
             type="text"
@@ -10143,7 +10157,7 @@ export default function RoomBuilder() {
       )}
 
       {walkMode && (
-        <div style={{ position: "absolute", right: rightPanelWidth + 24, bottom: RIBBON_HEIGHT + 20, width: 168, height: 168 }}>
+        <div style={{ position: "absolute", right: rightPanelGap + 24, bottom: effectiveRibbonHeight + 20, width: 168, height: 168 }}>
           {[
             { dir: "fwd", Icon: ArrowUp, style: { left: 56, top: 0 } },
             { dir: "left", Icon: ArrowLeft, style: { left: 0, top: 56 } },
@@ -10184,11 +10198,32 @@ export default function RoomBuilder() {
           nothing behind them yet), with Presets (this app's own "start
           from a scene" feature, formerly docked as "Recent" below the
           Layers panel) tucked into a compact strip at the bottom rather
-          than occupying the whole panel like it used to. */}
+          than occupying the whole panel like it used to. Collapsible the
+          same way as the Levels panel on the left, just mirrored. */}
+      {rightPanelCollapsed && (
+        <button
+          className="rb-btn"
+          onClick={() => setRightPanelCollapsed(false)}
+          title="Show intent panel"
+          style={{
+            // below the ViewCube rather than beside the top bar -- once
+            // this panel collapses the cube shifts right to reclaim the
+            // freed space (see rightPanelGap) and would otherwise sit right
+            // on top of a button placed up there.
+            position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 10, right: 8, zIndex: 5,
+            width: 24, height: 24, minWidth: 24, padding: 0, borderRadius: "50%",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "var(--bg-control)", color: "var(--text-secondary)",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+          }}
+        >
+          <ChevronLeft size={14} strokeWidth={2} />
+        </button>
+      )}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, right: 0, bottom: RIBBON_HEIGHT, width: rightPanelWidth,
-          background: "var(--bg-panel)", display: "flex", flexDirection: "column", overflow: "hidden",
+          position: "absolute", top: TOPBAR_HEIGHT, right: 0, bottom: effectiveRibbonHeight, width: rightPanelWidth,
+          background: "var(--bg-panel)", display: rightPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderLeft: "1px solid var(--divider-strong)",
         }}
       >
@@ -10212,7 +10247,21 @@ export default function RoomBuilder() {
         />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 14px 10px", flexShrink: 0 }}>
           <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--text-secondary)" }}>Intent</span>
-          <MoreHorizontal size={15} strokeWidth={2} color="var(--text-tertiary)" />
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <MoreHorizontal size={15} strokeWidth={2} color="var(--text-tertiary)" />
+            <button
+              className="rb-btn"
+              onClick={() => setRightPanelCollapsed(true)}
+              title="Hide intent panel"
+              style={{
+                width: 18, height: 18, minWidth: 18, padding: 0, borderRadius: "50%",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "var(--bg-control)", color: "var(--text-secondary)",
+              }}
+            >
+              <ChevronRight size={12} strokeWidth={2} />
+            </button>
+          </div>
         </div>
 
         <div style={{ padding: "0 14px 14px", flexShrink: 0 }}>
@@ -10327,7 +10376,7 @@ export default function RoomBuilder() {
       )}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: RIBBON_HEIGHT, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: effectiveRibbonHeight, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: layersPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
@@ -10998,7 +11047,7 @@ export default function RoomBuilder() {
           would go dark-on-dark and vanish in light mode). The room
           dimensions readout itself now lives in the Layers panel instead
           of floating here. */}
-      <div style={{ position: "absolute", bottom: RIBBON_HEIGHT + 12, right: rightPanelWidth + 16, color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 8.5, textAlign: "right" }}>
+      <div style={{ position: "absolute", bottom: effectiveRibbonHeight + 12, right: rightPanelGap + 16, color: uiTheme === "light" ? "rgba(20,20,20,0.5)" : "rgba(255,255,255,0.45)", textShadow: uiTheme === "light" ? "0 1px 2px rgba(255,255,255,0.6)" : "0 1px 2px rgba(0,0,0,0.5)", fontSize: 8.5, textAlign: "right" }}>
         Drag empty space to orbit (or pan, in a fixed view) &middot; scroll or pinch to zoom &middot; two-finger drag to pan
       </div>
 
@@ -11013,7 +11062,7 @@ export default function RoomBuilder() {
         <div
           title="Drag to orbit -- click a face, edge, or corner for that view"
           style={{
-            position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD, right: rightPanelWidth + VIEWCUBE_PAD,
+            position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD, right: rightPanelGap + VIEWCUBE_PAD,
             width: VIEWCUBE_SIZE, height: VIEWCUBE_SIZE, zIndex: 6, cursor: "grab", touchAction: "none",
           }}
           onPointerDown={(e) => {
@@ -11051,7 +11100,7 @@ export default function RoomBuilder() {
           rather than document-level commands. */}
       <div
         style={{
-          position: "absolute", bottom: RIBBON_HEIGHT + 34, right: rightPanelWidth + 16,
+          position: "absolute", bottom: effectiveRibbonHeight + 34, right: rightPanelGap + 16,
           display: "flex", alignItems: "center", gap: 10,
           background: "var(--bg-floating)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
           border: "0.5px solid var(--border-control)", borderRadius: 9, padding: "5px 7px",
@@ -11080,8 +11129,45 @@ export default function RoomBuilder() {
         </div>
       </div>
 
-      {/* BOTTOM: ribbon -- tools, then snapping/measurements, then viewport controls */}
-      <div className="ribbon">
+      {/* BOTTOM: ribbon -- tools, then snapping/measurements, then viewport controls.
+          Collapsible the same way as the two side panels: hidden entirely
+          (rather than shrunk) with its own floating chevron to bring it
+          back. Its own toggle sits just above its top-left corner rather
+          than inside the ribbon's own horizontally-scrolling content, so it
+          never scrolls out of reach. */}
+      {!ribbonCollapsed && (
+        <button
+          className="rb-btn"
+          onClick={() => setRibbonCollapsed(true)}
+          title="Hide build ribbon"
+          style={{
+            position: "absolute", bottom: RIBBON_HEIGHT + 6, left: leftPanelGap + 12, zIndex: 5,
+            width: 24, height: 24, minWidth: 24, padding: 0, borderRadius: "50%",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "var(--bg-control)", color: "var(--text-secondary)",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+          }}
+        >
+          <ChevronDown size={14} strokeWidth={2} />
+        </button>
+      )}
+      {ribbonCollapsed && (
+        <button
+          className="rb-btn"
+          onClick={() => setRibbonCollapsed(false)}
+          title="Show build ribbon"
+          style={{
+            position: "absolute", bottom: 8, left: leftPanelGap + 12, zIndex: 5,
+            width: 24, height: 24, minWidth: 24, padding: 0, borderRadius: "50%",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "var(--bg-control)", color: "var(--text-secondary)",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+          }}
+        >
+          <ChevronUp size={14} strokeWidth={2} />
+        </button>
+      )}
+      <div className="ribbon" style={{ display: ribbonCollapsed ? "none" : "flex" }}>
         <div className="ribbon-section">
           <div style={{ display: "flex", flexDirection: "column", gap: 1, marginRight: 6, flexShrink: 0 }}>
             <span className="panel-title" style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>Build</span>
