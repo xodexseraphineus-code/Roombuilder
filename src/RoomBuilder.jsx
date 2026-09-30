@@ -894,6 +894,25 @@ export default function RoomBuilder() {
   const [propsShape, setPropsShape] = useState("cube");
   const propsShapeRef = useRef(propsShape);
   useEffect(() => { propsShapeRef.current = propsShape; }, [propsShape]);
+  const [roomShape, setRoomShape] = useState("freeform");
+  const roomShapeRef = useRef(roomShape);
+  useEffect(() => { roomShapeRef.current = roomShape; }, [roomShape]);
+  const [freeformDraftCount, setFreeformDraftCount] = useState(0);
+  const freeformDraftApiRef = useRef({ undo: () => {}, cancel: () => {} });
+  const [selectedFreeformId, setSelectedFreeformId] = useState(null);
+  const selectedFreeformIdRef = useRef(selectedFreeformId);
+  useEffect(() => { selectedFreeformIdRef.current = selectedFreeformId; rebuildModelRef.current(); }, [selectedFreeformId]);
+  const deleteFreeformRef = useRef(() => {});
+  const [freeformThickness, setFreeformThickness] = useState(0.35);
+  const freeformThicknessRef = useRef(freeformThickness);
+  useEffect(() => { freeformThicknessRef.current = freeformThickness; }, [freeformThickness]);
+  const [freeformHeight, setFreeformHeight] = useState(WALL_HEIGHT);
+  const freeformHeightRef = useRef(freeformHeight);
+  useEffect(() => { freeformHeightRef.current = freeformHeight; }, [freeformHeight]);
+  const [freeformCeilingOn, setFreeformCeilingOn] = useState(false);
+  const freeformCeilingOnRef = useRef(freeformCeilingOn);
+  useEffect(() => { freeformCeilingOnRef.current = freeformCeilingOn; }, [freeformCeilingOn]);
+  const freeformParamApiRef = useRef({ setThickness: () => {}, setHeight: () => {}, setCeiling: () => {} });
   const [columnShape, setColumnShape] = useState("none");
   const columnShapeRef = useRef(columnShape);
   useEffect(() => { columnShapeRef.current = columnShape; }, [columnShape]);
@@ -2250,6 +2269,7 @@ export default function RoomBuilder() {
         columnBanks: [], // {id, panel, shape, u0, u1} -- a run of 5 evenly-spaced wall columns (square/round), drawn along a wall with the Wall tool
         suppBalconies: [], // {id, panel, u0, u1, side, platformHeight, railingCount} -- a thin floating platform on 2 corner pillars reaching the floor, a glass door, and a roof canopy, no stairs
         signs: [], // {id, panel, u0, u1, side, text} -- a rectangular sign standing off the wall on 4 corner posts, with the owner's own 3D text on its face
+        freeformRooms: [], // {id, points: [{x,z}...], thickness, height, ceilingEnabled} -- a closed polyline of arbitrary straight segments, extruded into mitered walls with a floor and optional ceiling
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
@@ -3557,6 +3577,14 @@ export default function RoomBuilder() {
     let previewOpening = null;
     let previewColumnBank = null; // {panel, shape, u0, u1} while dragging out a new run of wall columns
     let previewStair = null; // {x0,x1,z0,z1} while dragging out a new staircase footprint
+    // a Freeform Room draft in progress -- {points: [{x,z}...]} accumulated
+    // one tap at a time (not a drag), on the active floor's own ground
+    // plane, local to that floor (activeRoomId forced null while drafting).
+    // Tapping back near points[0] closes it into a real state.freeformRooms
+    // entry; only rendered while the Room tool's Freeform shape is active,
+    // so switching tools away just stops showing it rather than needing an
+    // explicit cancel path.
+    let freeformDraft = null;
     let previewRoom = null; // {x0,x1,z0,z1} while dragging out a new room's footprint
     let previewProp = null; // {kind,x0,x1,z0,z1} while dragging out a new prop's footprint (LOCAL to the active room)
     let measureAnchors = []; // {point: Vector3, text} for the length overlay
@@ -4366,6 +4394,7 @@ export default function RoomBuilder() {
       renderTerraces();
       renderSuppBalconies();
       renderSigns();
+      renderFreeformRooms();
       renderFloorPillars();
       renderCeiling(floorMeshesForCeiling);
     }
@@ -4390,6 +4419,148 @@ export default function RoomBuilder() {
         mesh.receiveShadow = true;
         sceneGroup.add(mesh);
       });
+    }
+
+    // offsets a closed polyline loop outward/inward by `dist` along each
+    // vertex's own miter bisector (the standard straight-skeleton offset
+    // construction), clamped so a very sharp/acute corner doesn't shoot the
+    // offset point out to an absurd spike. `points` is a closed loop with no
+    // duplicated last point; winding direction doesn't matter here -- the
+    // caller (buildFreeformWallLoops) figures out which of the two resulting
+    // offsets is the outer one by comparing enclosed areas.
+    function offsetPolylineLoop(points, dist) {
+      const n = points.length;
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const prev = points[(i - 1 + n) % n];
+        const curr = points[i];
+        const next = points[(i + 1) % n];
+        const d1x = curr.x - prev.x, d1z = curr.z - prev.z;
+        const len1 = Math.hypot(d1x, d1z) || 1;
+        const n1x = d1z / len1, n1z = -d1x / len1;
+        const d2x = next.x - curr.x, d2z = next.z - curr.z;
+        const len2 = Math.hypot(d2x, d2z) || 1;
+        const n2x = d2z / len2, n2z = -d2x / len2;
+        let bx = n1x + n2x, bz = n1z + n2z;
+        const blen = Math.hypot(bx, bz);
+        if (blen < 1e-6) {
+          // the two edges fold straight back on themselves -- no well-defined
+          // bisector, just offset along one edge's own normal.
+          out.push({ x: curr.x + n1x * dist, z: curr.z + n1z * dist });
+          continue;
+        }
+        bx /= blen; bz /= blen;
+        const cosHalf = Math.max(0.2, bx * n1x + bz * n1z); // clamp -- avoids a huge spike on a sharp corner
+        const miterLen = dist / cosHalf;
+        out.push({ x: curr.x + bx * miterLen, z: curr.z + bz * miterLen });
+      }
+      return out;
+    }
+    function polygonArea(points) {
+      let a = 0;
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i], q = points[(i + 1) % points.length];
+        a += p.x * q.z - q.x * p.z;
+      }
+      return a / 2;
+    }
+    // the two loops that make a closed freeform room's walls a solid ring in
+    // plan -- whichever of the +halfThickness/-halfThickness offsets encloses
+    // more area is the outer boundary, the other is the hole punched through
+    // it, regardless of which winding direction the user happened to draw in.
+    function buildFreeformWallLoops(points, thickness) {
+      const half = thickness / 2;
+      const a = offsetPolylineLoop(points, half);
+      const b = offsetPolylineLoop(points, -half);
+      const areaA = Math.abs(polygonArea(a));
+      const areaB = Math.abs(polygonArea(b));
+      return areaA >= areaB ? { outer: a, inner: b } : { outer: b, inner: a };
+    }
+    // Shape/Path live in local (x, y) extruded along local z, and the
+    // rotateX(-PI/2) below (needed to turn "extrude depth" into world-up)
+    // also negates that local y onto world z -- so z is negated here going
+    // in, cancelling that out and landing the loop at its true world z
+    // instead of mirrored front-to-back.
+    function loopToShape(loop) {
+      const shape = new THREE.Shape();
+      loop.forEach((p, i) => { if (i === 0) shape.moveTo(p.x, -p.z); else shape.lineTo(p.x, -p.z); });
+      shape.closePath();
+      return shape;
+    }
+    const FREEFORM_MARKER_R = 0.18;
+    // a closed, arbitrary-angle polyline drawn one tap at a time (see the
+    // "Freeform" Room-tool branch in onPointerDown/Up), extruded into a real
+    // mitered-corner wall ring, a floor, and an optional ceiling -- built as
+    // its own self-contained assembly rather than folded into the rectangular
+    // room/wall-panel system, so it doesn't (yet) accept windows/doors the
+    // way a normal wall does.
+    function renderFreeformRooms() {
+      (state.freeformRooms || []).forEach((rm) => {
+        if (!rm.points || rm.points.length < 3) return;
+        const isSelected = isPickableTarget && selectedFreeformIdRef.current === rm.id;
+        const wallMatHere = isSelected ? wallMatSelected : currentWallMat;
+        const floorMatHere = isSelected ? floorMatSelected : currentFloorMat;
+        const thickness = rm.thickness || 0.35;
+        const height = rm.height || WALL_HEIGHT;
+        const { outer, inner } = buildFreeformWallLoops(rm.points, thickness);
+        const wallShape = loopToShape(outer);
+        wallShape.holes.push((() => { const h = new THREE.Path(); inner.forEach((p, i) => { if (i === 0) h.moveTo(p.x, -p.z); else h.lineTo(p.x, -p.z); }); h.closePath(); return h; })());
+        const wallGeo = new THREE.ExtrudeGeometry(wallShape, { depth: height, bevelEnabled: false, curveSegments: 1, steps: 1 });
+        wallGeo.rotateX(-Math.PI / 2);
+        const wallMesh = new THREE.Mesh(wallGeo, wallMatHere);
+        wallMesh.position.y = 0;
+        wallMesh.castShadow = true;
+        wallMesh.receiveShadow = true;
+        addEdges(wallMesh);
+        wallMesh.userData = { kind: "freeform", id: rm.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+        sceneGroup.add(wallMesh);
+        if (isPickableTarget) pickList.push(wallMesh);
+
+        const FLOOR_T = 0.08;
+        const floorShape = loopToShape(rm.points);
+        const floorGeo = new THREE.ExtrudeGeometry(floorShape, { depth: FLOOR_T, bevelEnabled: false, curveSegments: 1, steps: 1 });
+        floorGeo.rotateX(-Math.PI / 2);
+        const floorMesh = new THREE.Mesh(floorGeo, floorMatHere);
+        floorMesh.position.y = -FLOOR_T;
+        floorMesh.receiveShadow = true;
+        addEdges(floorMesh);
+        floorMesh.userData = { kind: "freeform", id: rm.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+        sceneGroup.add(floorMesh);
+        if (isPickableTarget) pickList.push(floorMesh);
+
+        if (rm.ceilingEnabled) {
+          const ceilGeo = new THREE.ExtrudeGeometry(floorShape, { depth: FLOOR_T, bevelEnabled: false, curveSegments: 1, steps: 1 });
+          ceilGeo.rotateX(-Math.PI / 2);
+          const ceilMesh = new THREE.Mesh(ceilGeo, floorMatHere);
+          ceilMesh.position.y = height;
+          ceilMesh.receiveShadow = true;
+          addEdges(ceilMesh);
+          ceilMesh.userData = { kind: "freeform", id: rm.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(ceilMesh);
+          if (isPickableTarget) pickList.push(ceilMesh);
+        }
+      });
+
+      // the in-progress draft -- only while the Room tool's Freeform shape is
+      // actually selected, so switching tools away just stops drawing it
+      // instead of needing its own explicit cancel step.
+      if (freeformDraft && isPickableTarget && toolRef.current === "room" && roomShapeRef.current === "freeform") {
+        const pts = freeformDraft.points;
+        pts.forEach((p, i) => {
+          const geo = new THREE.SphereGeometry(i === 0 ? FREEFORM_MARKER_R * 1.3 : FREEFORM_MARKER_R, 12, 10);
+          const mesh = new THREE.Mesh(geo, handleMat);
+          mesh.position.set(p.x, 0.05, p.z);
+          mesh.renderOrder = 10;
+          sceneGroup.add(mesh);
+        });
+        if (pts.length > 1) {
+          const linePts = pts.map((p) => new THREE.Vector3(p.x, 0.05, p.z));
+          const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
+          const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xff6b1a, depthTest: false }));
+          line.renderOrder = 10;
+          sceneGroup.add(line);
+        }
+      }
     }
 
     // a staircase is a stack of solid steps, each a flat-bottomed box sitting
@@ -6968,6 +7139,63 @@ export default function RoomBuilder() {
       // to accidentally grab/move a room while just trying to click a wall
       // for a window or door -- especially since a click aimed at a wall
       // easily lands on the floor just behind/below it instead.
+      if (toolRef.current === "room" && roomShapeRef.current === "freeform") {
+        // Freeform Room: tap to drop points one at a time -- not a drag --
+        // tapping back near the very first point closes the loop into a real
+        // room. Always floor-level, never inside an extracted room, same
+        // reasoning as the blank-ground stair fallback: there's no sensible
+        // "whose local space" answer while the room itself is still being drawn.
+        const g = floorGroups.get(activeFloorId);
+        if (!g) return;
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -g.position.y);
+        const ray = rayFromEvent(e);
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(plane, pt)) return;
+        if (activeRoomId != null) switchActiveRoom(null);
+        const local = toLocalXZ(pt);
+        const snapped = { x: snapValue(local.x), z: snapValue(local.z) };
+        if (!freeformDraft) {
+          pushUndo();
+          freeformDraft = { points: [snapped] };
+          setFreeformDraftCount(1);
+          rebuild();
+          capture(e);
+          return;
+        }
+        const first = freeformDraft.points[0];
+        // use the raw (pre-snap) click position for the "back near the
+        // start" test -- comparing snapped-to-snapped can land the click
+        // exactly on the threshold (both points snap onto grid lines an
+        // exact multiple of the close distance apart) and never fire.
+        const distToFirst = Math.hypot(local.x - first.x, local.z - first.z);
+        const CLOSE_DIST = 2 * FT;
+        if (freeformDraft.points.length >= 3 && distToFirst < CLOSE_DIST) {
+          const pts = freeformDraft.points;
+          if (Math.abs(polygonArea(pts)) > 1) {
+            const id = idSeq++;
+            if (!state.freeformRooms) state.freeformRooms = [];
+            state.freeformRooms.push({
+              id, points: pts, thickness: freeformThicknessRef.current,
+              height: freeformHeightRef.current, ceilingEnabled: freeformCeilingOnRef.current,
+            });
+            setSelectedFreeformId(id);
+          }
+          freeformDraft = null;
+          setFreeformDraftCount(0);
+          rebuild();
+          capture(e);
+          return;
+        }
+        // skip an accidental double-tap essentially on top of the last point
+        const lastPt = freeformDraft.points[freeformDraft.points.length - 1];
+        if (Math.hypot(snapped.x - lastPt.x, snapped.z - lastPt.z) > 0.05) {
+          freeformDraft.points.push(snapped);
+          setFreeformDraftCount(freeformDraft.points.length);
+        }
+        rebuild();
+        capture(e);
+        return;
+      }
       if (toolRef.current === "room") {
         const floorEntry = floors.find((f) => f.id === activeFloorId);
         if (floorEntry) {
@@ -7189,6 +7417,7 @@ export default function RoomBuilder() {
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         setSelectedStairId(obj.userData.id);
         if (st) {
           setStairSteps(st.steps);
@@ -7213,6 +7442,7 @@ export default function RoomBuilder() {
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         setSelectedBalconyId(obj.userData.id);
         setSelectedBalconyPart(kind === "balcony-pillar" ? "pillars" : kind === "balcony-ceiling" ? "ceiling" : null);
         if (bal) {
@@ -7241,6 +7471,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         setSelectedTerraceId(obj.userData.id);
         return;
       }
@@ -7259,6 +7490,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         setSelectedSuppBalconyId(obj.userData.id);
         if (sb) {
           setSuppBalconyHeight(sb.platformHeight || 6 * FT);
@@ -7285,6 +7517,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedFreeformId(null);
         setSelectedSignId(sign.id);
         setSignText(sign.text || "");
         if (alreadySelected) {
@@ -7304,6 +7537,30 @@ export default function RoomBuilder() {
         return;
       }
 
+      // a closed Freeform Room -- select the whole wall+floor+ceiling
+      // assembly by tapping any part of it.
+      if (kind === "freeform") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        const rm = (state.freeformRooms || []).find((r) => r.id === obj.userData.id);
+        if (!rm) return;
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedPropId(null);
+        setSelectedOpeningId(null);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
+        setSelectedFreeformId(null);
+        setSelectedFreeformId(rm.id);
+        setFreeformThickness(rm.thickness || 0.35);
+        setFreeformHeight(rm.height || WALL_HEIGHT);
+        setFreeformCeilingOn(!!rm.ceilingEnabled);
+        return;
+      }
+
       // A window or door cutout in a wall -- selectable from any tool (not
       // just Window/Door), same as stairs and balconies. There's more
       // parametric control planned for doors specifically down the line;
@@ -7319,6 +7576,7 @@ export default function RoomBuilder() {
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         setSelectedOpeningId(obj.userData.id);
         // sync the height/dividers/direction controls to whichever opening
         // was just tapped, so they read (and edit) its actual values
@@ -7358,6 +7616,7 @@ export default function RoomBuilder() {
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         setSelectedPropId(obj.userData.id);
         return;
       }
@@ -7441,6 +7700,7 @@ export default function RoomBuilder() {
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
         // a deliberate tap on this room's own wall/partition, even if it was
@@ -7468,6 +7728,7 @@ export default function RoomBuilder() {
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
+        setSelectedFreeformId(null);
         setSelectedOpeningId(null);
         return;
       }
@@ -8256,6 +8517,7 @@ export default function RoomBuilder() {
           setSelectedTerraceId(null);
           setSelectedSuppBalconyId(null);
           setSelectedSignId(null);
+        setSelectedFreeformId(null);
           setSelectedOpeningId(null);
           switchActiveRoom(null);
         }
@@ -8631,6 +8893,7 @@ export default function RoomBuilder() {
       setSelectedTerraceId(null);
       setSelectedSuppBalconyId(null);
       setSelectedSignId(null);
+        setSelectedFreeformId(null);
       setSelectedOpeningId(null);
       setHiddenIds([]);
       target.set(0, state.height * 0.32, 0);
@@ -8814,6 +9077,7 @@ export default function RoomBuilder() {
       setSelectedTerraceId(null);
       setSelectedSuppBalconyId(null);
       setSelectedSignId(null);
+        setSelectedFreeformId(null);
       setSelectedOpeningId(null);
       rebuild();
     }
@@ -8995,9 +9259,60 @@ export default function RoomBuilder() {
       pushUndo();
       state.signs = (state.signs || []).filter((s) => s.id !== id);
       setSelectedSignId(null);
+        setSelectedFreeformId(null);
       rebuild();
     }
     deleteSignRef.current = deleteActiveSign;
+
+    function setActiveFreeformThickness(t) {
+      const id = selectedFreeformIdRef.current;
+      if (id == null) return;
+      const rm = (state.freeformRooms || []).find((r) => r.id === id);
+      if (!rm) return;
+      rm.thickness = Math.max(0.05, t);
+      rebuild();
+    }
+    function setActiveFreeformHeight(h) {
+      const id = selectedFreeformIdRef.current;
+      if (id == null) return;
+      const rm = (state.freeformRooms || []).find((r) => r.id === id);
+      if (!rm) return;
+      rm.height = Math.max(MIN_WALL_HEIGHT, h);
+      rebuild();
+    }
+    function setActiveFreeformCeiling(on) {
+      const id = selectedFreeformIdRef.current;
+      if (id == null) return;
+      const rm = (state.freeformRooms || []).find((r) => r.id === id);
+      if (!rm) return;
+      rm.ceilingEnabled = on;
+      rebuild();
+    }
+    freeformParamApiRef.current = { setThickness: setActiveFreeformThickness, setHeight: setActiveFreeformHeight, setCeiling: setActiveFreeformCeiling };
+
+    function deleteActiveFreeform() {
+      const id = selectedFreeformIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.freeformRooms = (state.freeformRooms || []).filter((r) => r.id !== id);
+      setSelectedFreeformId(null);
+      rebuild();
+    }
+    deleteFreeformRef.current = deleteActiveFreeform;
+
+    function undoFreeformDraftPoint() {
+      if (!freeformDraft || freeformDraft.points.length === 0) return;
+      freeformDraft.points.pop();
+      if (freeformDraft.points.length === 0) freeformDraft = null;
+      setFreeformDraftCount(freeformDraft ? freeformDraft.points.length : 0);
+      rebuild();
+    }
+    function cancelFreeformDraft() {
+      freeformDraft = null;
+      setFreeformDraftCount(0);
+      rebuild();
+    }
+    freeformDraftApiRef.current = { undo: undoFreeformDraftPoint, cancel: cancelFreeformDraft };
 
     function deleteActiveOpening() {
       const id = selectedOpeningIdRef.current;
@@ -9163,6 +9478,7 @@ export default function RoomBuilder() {
       setSelectedTerraceId(null);
       setSelectedSuppBalconyId(null);
       setSelectedSignId(null);
+        setSelectedFreeformId(null);
       setSelectedOpeningId(null);
       rebuild();
       if (prevActiveId !== id) {
@@ -11396,6 +11712,7 @@ export default function RoomBuilder() {
               setSelectedTerraceId(null);
               setSelectedSuppBalconyId(null);
               setSelectedSignId(null);
+        setSelectedFreeformId(null);
               setSelectedOpeningId(null);
               setBalconyStairHeight(3 * FT);
               setBalconyPlatformWidth(10 * FT);
@@ -12062,6 +12379,88 @@ export default function RoomBuilder() {
                   {label}
                 </button>
               ))}
+            </div>
+          </div>
+        )}
+        {tool === "room" && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Room shape</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[
+                { key: "freeform", label: "Freeform" },
+                { key: "rectangle", label: "Rectangle" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${roomShape === s ? "active" : ""}`}
+                  onClick={() => setRoomShape(s)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {tool === "room" && roomShape === "freeform" && freeformDraftCount > 0 && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">
+              Freeform &middot; {freeformDraftCount} point{freeformDraftCount === 1 ? "" : "s"}
+              {freeformDraftCount < 3 ? " (need 3+ to close)" : " -- tap back near the start to close"}
+            </span>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="rb-btn" onClick={() => freeformDraftApiRef.current.undo()}>Undo point</button>
+              <button className="rb-btn" onClick={() => freeformDraftApiRef.current.cancel()}>Cancel</button>
+            </div>
+          </div>
+        )}
+        {selectedFreeformId != null && (
+          <div className="ribbon-group" style={{ minWidth: 260 }}>
+            <span className="ribbon-label">Wall thickness &middot; {(freeformThickness * 12).toFixed(1)} in</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-bare-range"
+                type="range"
+                min={0.08}
+                max={1.5}
+                step={0.02}
+                value={freeformThickness}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setFreeformThickness(v);
+                  freeformParamApiRef.current.setThickness(v);
+                }}
+              />
+            </div>
+            <span className="ribbon-label">Height &middot; {(freeformHeight / FT).toFixed(1)} ft</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-bare-range"
+                type="range"
+                min={1}
+                max={40}
+                step={0.5}
+                value={freeformHeight / FT}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setFreeformHeight(ft * FT);
+                  freeformParamApiRef.current.setHeight(ft * FT);
+                }}
+              />
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+                <input
+                  type="checkbox"
+                  checked={freeformCeilingOn}
+                  onChange={(e) => {
+                    setFreeformCeilingOn(e.target.checked);
+                    freeformParamApiRef.current.setCeiling(e.target.checked);
+                  }}
+                />
+                Ceiling
+              </label>
+              <button className="rb-btn" onClick={() => deleteFreeformRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedFreeformId(null)}>Done</button>
             </div>
           </div>
         )}
