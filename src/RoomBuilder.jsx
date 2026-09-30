@@ -7,7 +7,10 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
+import { FontLoader } from "three/examples/jsm/loaders/FontLoader.js";
+import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
 import DEFAULT_PRESET_SCENES from "./defaultPresets.json";
+import ROBOTO_BOLD_FONT from "./fonts/roboto_bold.typeface.json";
 
 const WALL_HEIGHT = 4.8768; // 16 ft
 const MIN_WALL_HEIGHT = 0.5;
@@ -47,6 +50,10 @@ const COLORS = {
   accent: 0xbd6640,
   highlight: 0xff2d6e,
 };
+
+// parsed once at module scope (not per-mount) -- it's pure, stateless data,
+// shared by every Sign prop's 3D text.
+const SIGN_FONT = new FontLoader().parse(ROBOTO_BOLD_FONT);
 
 // a representative Teenage Engineering-style palette (orange, white, blue,
 // yellow, red) for the tint swatches -- couldn't find a documented "Apple
@@ -1059,6 +1066,12 @@ export default function RoomBuilder() {
   const suppBalconyHeightApiRef = useRef({ setHeight: () => {} });
   const [suppBalconyRailingCount, setSuppBalconyRailingCount] = useState(6);
   const suppBalconyRailingCountApiRef = useRef({ setCount: () => {} });
+  const [selectedSignId, setSelectedSignId] = useState(null);
+  const selectedSignIdRef = useRef(selectedSignId);
+  useEffect(() => { selectedSignIdRef.current = selectedSignId; rebuildModelRef.current(); }, [selectedSignId]);
+  const deleteSignRef = useRef(() => {});
+  const [signText, setSignText] = useState("");
+  const signTextApiRef = useRef({ setText: () => {} });
   const [selectedOpeningId, setSelectedOpeningId] = useState(null); // a window or door cutout in a wall
   const selectedOpeningIdRef = useRef(selectedOpeningId);
   useEffect(() => { selectedOpeningIdRef.current = selectedOpeningId; rebuildModelRef.current(); }, [selectedOpeningId]);
@@ -2234,6 +2247,7 @@ export default function RoomBuilder() {
         terraces: [], // {id, panel, u0, u1, side, depth} -- a flat roof-height deck with a perimeter railing, drawn along a wall like a balcony but with no stairs down to the ground
         columnBanks: [], // {id, panel, shape, u0, u1} -- a run of 5 evenly-spaced wall columns (square/round), drawn along a wall with the Wall tool
         suppBalconies: [], // {id, panel, u0, u1, side, platformHeight, railingCount} -- a thin floating platform on 2 corner pillars reaching the floor, a glass door, and a roof canopy, no stairs
+        signs: [], // {id, panel, u0, u1, side, text} -- a rectangular sign standing off the wall on 4 corner posts, with the owner's own 3D text on its face
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
     }
@@ -2656,6 +2670,14 @@ export default function RoomBuilder() {
     // than always just following the walls -- a room theme can give it a
     // deliberately contrasting (often complementary-hue) "roof" color.
     const balconyRoofMat = new THREE.MeshPhysicalMaterial({ color: COLORS.wall, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    // a Sign prop's own board -- tracks the wall color/finish exactly like
+    // the balcony platform/roof above, so it always starts out matching
+    // whatever the building's current material is.
+    const signBoardMat = new THREE.MeshPhysicalMaterial({ color: COLORS.wall, roughness: 0.85, metalness: 0.02, envMapIntensity: 0.35 });
+    // the sign's own 3D text -- a fixed accent color (the app's own signature
+    // orange) rather than a wall-tracked one, so it always reads clearly
+    // against the board regardless of the board's own current finish.
+    const signTextMat = new THREE.MeshStandardMaterial({ color: 0xff6b1a, roughness: 0.35, metalness: 0.1 });
     // decorative room ceiling -- 10% transparent (90% opaque) so it doesn't
     // block editing visibility from above; never added to pickList.
     const ceilingMat = new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.6, envMapIntensity: 0.35 });
@@ -3419,7 +3441,7 @@ export default function RoomBuilder() {
     function disposeObject(obj) {
       obj.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
-        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== pillarMat && o.material !== pillarMatSelected && o.material !== ceilingMat && o.material !== selMat && o.material !== selMatPreview && o.material !== handleMat && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && o.material !== windowFrameMat && o.material !== louverMat && o.material !== doorMetalMat && !Object.values(propMats).includes(o.material)) {
+        if (o.material && o.material !== wallMat && o.material !== floorMat && o.material !== wallMatDim && o.material !== floorMatDim && o.material !== wallMatSelected && o.material !== floorMatSelected && o.material !== pillarMat && o.material !== pillarMatSelected && o.material !== ceilingMat && o.material !== selMat && o.material !== selMatPreview && o.material !== handleMat && o.material !== glassMat && o.material !== stairMat && o.material !== hotspotMat && o.material !== windowFrameMat && o.material !== louverMat && o.material !== doorMetalMat && o.material !== signBoardMat && o.material !== signTextMat && !Object.values(propMats).includes(o.material)) {
           if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
           else o.material.dispose();
         }
@@ -4297,6 +4319,7 @@ export default function RoomBuilder() {
       renderBalconies();
       renderTerraces();
       renderSuppBalconies();
+      renderSigns();
       renderFloorPillars();
       renderCeiling(floorMeshesForCeiling);
     }
@@ -5033,6 +5056,103 @@ export default function RoomBuilder() {
       });
     }
 
+    // a Sign prop: a rectangular board standing 2ft off the wall on 4 thin
+    // corner posts (one per corner, running straight in from the wall
+    // behind it), with the owner's own name extruded as real 3D text
+    // (Roboto Bold) across its outward-facing side. The board starts out
+    // matching the building's current wall color/finish (signBoardMat, kept
+    // in sync by recomputeWallFloorMaterials same as the balcony platform),
+    // the text a fixed accent orange, and everything but the text stays
+    // put when the name is edited afterward -- only the text mesh actually
+    // needs rebuilding on every keystroke.
+    const SIGN_STANDOFF = 2 * FT;
+    const SIGN_THICKNESS = 0.15;
+    const SIGN_HEIGHT = 2.5 * FT;
+    const SIGN_BOTTOM = 7 * FT; // height of the board's own bottom edge above the floor
+    const SIGN_POST_RADIUS = 0.08;
+    function renderSigns() {
+      (state.signs || []).forEach((sign) => {
+        const info = getPanelInfo(sign.panel);
+        if (!info) return;
+        const side = sign.side || 1;
+        const nx = info.normal.x * side, nz = info.normal.z * side;
+        const axis = info.lengthAxis;
+        const isSelected = isPickableTarget && selectedSignIdRef.current === sign.id;
+        const boardMat = isSelected ? floorMatSelected : signBoardMat;
+        const postMat = isSelected ? pillarMatSelected : pillarMat;
+        function toWorld(u, d) {
+          if (axis === "x") return { x: u, z: info.coord + nz * d };
+          return { x: info.coord + nx * d, z: u };
+        }
+        function addPiece(geo, mat, wx, wy, wz, rot) {
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set(wx, wy, wz);
+          if (rot) { mesh.rotation.x = rot.x || 0; mesh.rotation.y = rot.y || 0; mesh.rotation.z = rot.z || 0; }
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: "sign", id: sign.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(mesh);
+          if (isPickableTarget) pickList.push(mesh);
+        }
+
+        const uLen = Math.max(0.02, sign.u1 - sign.u0);
+        const uMid = (sign.u0 + sign.u1) / 2;
+        const boardCenterY = SIGN_BOTTOM + SIGN_HEIGHT / 2;
+        const boardD = SIGN_STANDOFF + SIGN_THICKNESS / 2;
+
+        // the board itself
+        {
+          const geo = axis === "x"
+            ? new THREE.BoxGeometry(uLen, SIGN_HEIGHT, SIGN_THICKNESS)
+            : new THREE.BoxGeometry(SIGN_THICKNESS, SIGN_HEIGHT, uLen);
+          const w = toWorld(uMid, boardD);
+          addPiece(geo, boardMat, w.x, boardCenterY, w.z);
+        }
+
+        // 4 corner posts, straight in from the wall to each corner of the board
+        [sign.u0, sign.u1].forEach((u) => {
+          [SIGN_BOTTOM, SIGN_BOTTOM + SIGN_HEIGHT].forEach((y) => {
+            const geo = new THREE.CylinderGeometry(SIGN_POST_RADIUS, SIGN_POST_RADIUS, SIGN_STANDOFF, 10);
+            const w = toWorld(u, SIGN_STANDOFF / 2);
+            addPiece(geo, postMat, w.x, y, w.z, axis === "x" ? { x: Math.PI / 2 } : { z: Math.PI / 2 });
+          });
+        });
+
+        // the owner's own name, extruded as real 3D text across the board's
+        // outward-facing side -- built at a fixed reference size, then
+        // uniformly scaled to fit inside the board with a small margin
+        // (rather than re-triangulating the font outline at an exact target
+        // size), and oriented so it always reads right-side up and
+        // left-to-right to someone standing in front of the sign, whichever
+        // wall or side it was drawn on.
+        const text = (sign.text || "").trim();
+        if (text) {
+          const REF_SIZE = 1;
+          const geo = new TextGeometry(text, { font: SIGN_FONT, size: REF_SIZE, depth: 0.06, curveSegments: 3 });
+          geo.computeBoundingBox();
+          const bw = Math.max(0.0001, geo.boundingBox.max.x - geo.boundingBox.min.x);
+          const bh = Math.max(0.0001, geo.boundingBox.max.y - geo.boundingBox.min.y);
+          geo.translate(-(geo.boundingBox.min.x + geo.boundingBox.max.x) / 2, -(geo.boundingBox.min.y + geo.boundingBox.max.y) / 2, 0);
+          const scale = Math.min((uLen * 0.85) / bw, (SIGN_HEIGHT * 0.6) / bh);
+          const forward = new THREE.Vector3(nx, 0, nz).normalize();
+          const up = new THREE.Vector3(0, 1, 0);
+          const right = up.clone().cross(forward).normalize();
+          const basis = new THREE.Matrix4().makeBasis(right, up, forward);
+          const mesh = new THREE.Mesh(geo, signTextMat);
+          mesh.quaternion.setFromRotationMatrix(basis);
+          mesh.scale.setScalar(scale);
+          const w = toWorld(uMid, SIGN_STANDOFF + SIGN_THICKNESS + 0.01);
+          mesh.position.set(w.x, boardCenterY, w.z);
+          mesh.castShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: "sign", id: sign.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(mesh);
+          if (isPickableTarget) pickList.push(mesh);
+        }
+      });
+    }
+
     // legacy renderer for `floorPillars` -- a floor-area rectangle filled
     // with a grid of pillars, superseded by the Door tool's wall-embedded
     // "Pillars" style (see renderPillarBank) but kept so scenes saved
@@ -5424,7 +5544,7 @@ export default function RoomBuilder() {
     // "special" is the callout set from the Material Editor request
     // (stairs, balconies, props) that gets its own distinct treatment.
     const BUILDING_SHELL_MATS = [wallMat, floorMat, wallMatDim, floorMatDim, wallMatSelected, floorMatSelected, ceilingMat, mullionMat, pillarMat, pillarMatSelected];
-    const SPECIAL_ITEM_MATS = [stairMat, propMats.sphere, propMats.cone, propMats.cube, propMats.cylinder, balconyPlatformMat, balconyRoofMat];
+    const SPECIAL_ITEM_MATS = [stairMat, propMats.sphere, propMats.cone, propMats.cube, propMats.cylinder, balconyPlatformMat, balconyRoofMat, signBoardMat];
 
     // Wireframe and Material Editor both override the same shell/special
     // materials, and each is driven by its own independent React effect
@@ -5703,6 +5823,19 @@ export default function RoomBuilder() {
       balconyRoofMat.clearcoat = clearcoat;
       balconyRoofMat.clearcoatRoughness = clearcoatRoughness;
       balconyRoofMat.needsUpdate = true;
+
+      // a Sign prop's board always just matches the wall directly (not a
+      // theme's separate roof/platform tone) -- it's meant to read as a
+      // panel cut from the same material as the building itself.
+      signBoardMat.map = map;
+      signBoardMat.roughnessMap = roughnessMap;
+      signBoardMat.color.copy(wallColor);
+      signBoardMat.roughness = roughness;
+      signBoardMat.metalness = metalness;
+      signBoardMat.envMap = shinyEnvMap;
+      signBoardMat.clearcoat = clearcoat;
+      signBoardMat.clearcoatRoughness = clearcoatRoughness;
+      signBoardMat.needsUpdate = true;
 
       const platformColor = new THREE.Color(currentThemePlatformColor != null ? currentThemePlatformColor : mainColor);
       if (tintable && currentTintActiveOn) platformColor.lerp(new THREE.Color(currentTintActiveColor), 0.92);
@@ -6991,6 +7124,24 @@ export default function RoomBuilder() {
         return;
       }
 
+      // a Sign prop -- tapping the board, a corner post, or the text all
+      // select the whole thing.
+      if (kind === "sign") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        const sign = (state.signs || []).find((s) => s.id === obj.userData.id);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedPropId(null);
+        setSelectedOpeningId(null);
+        setSelectedBalconyId(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(obj.userData.id);
+        if (sign) setSignText(sign.text || "");
+        return;
+      }
+
       // A window or door cutout in a wall -- selectable from any tool (not
       // just Window/Door), same as stairs and balconies. There's more
       // parametric control planned for doors specifically down the line;
@@ -7071,11 +7222,11 @@ export default function RoomBuilder() {
       // a footprint sizes the prop from that drag (a roughly 5x5ft diagonal
       // makes a 5x5x5ft cube, and likewise for sphere/cone/cylinder); a
       // quick drag with no hold instead orbits the camera, same as the Room
-      // tool. Balcony, terrace, and the supported balcony are the
-      // exceptions -- all three are drawn along a wall (see the
-      // pending-balcony/pending-terrace/pending-suppbalcony branches
-      // below), so this doesn't apply to any of them.
-      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony") {
+      // tool. Balcony, terrace, the supported balcony, and the sign are
+      // the exceptions -- all four are drawn along a wall (see the
+      // pending-balcony/pending-terrace/pending-suppbalcony/pending-sign
+      // branches below), so this doesn't apply to any of them.
+      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony" && propsShapeRef.current !== "sign") {
         if (kind === "floor") {
           const ownerRoomId = obj.userData.ownerRoomId ?? null;
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
@@ -7197,6 +7348,14 @@ export default function RoomBuilder() {
         const normalComponent3 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
         const side3 = Math.sign((thickCoord3 - info.coord) * normalComponent3) || 1;
         dragState = { type: "pending-suppbalcony", panelKey, info, hitPoint: hp, side: side3, startScreen: { x: e.clientX, y: e.clientY } };
+      } else if (toolRef.current === "props" && propsShapeRef.current === "sign") {
+        // same wall-drag entry point as balcony/terrace/suppBalcony above,
+        // just its own dragState type -- see the sign-draw handling in
+        // onPointerMove/onPointerUp.
+        const thickCoord4 = info.thickAxis === "x" ? hit.point.x : hit.point.z;
+        const normalComponent4 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
+        const side4 = Math.sign((thickCoord4 - info.coord) * normalComponent4) || 1;
+        dragState = { type: "pending-sign", panelKey, info, hitPoint: hp, side: side4, startScreen: { x: e.clientX, y: e.clientY } };
       } else if (toolRef.current === "move" && columnShapeRef.current !== "none") {
         // a run of columns is drawn along a wall exactly like a window --
         // tap and drag to mark its span -- rather than the Wall tool's
@@ -7467,6 +7626,21 @@ export default function RoomBuilder() {
         return;
       }
 
+      if (dragState.type === "pending-sign") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "sign-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u, side: dragState.side };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: 7 * FT };
+          rebuild();
+        }
+        return;
+      }
+
       if (dragState.type === "pending-column") {
         const dx = e.clientX - dragState.startScreen.x;
         const dy = e.clientY - dragState.startScreen.y;
@@ -7593,6 +7767,15 @@ export default function RoomBuilder() {
         previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
         rebuild();
       } else if (dragState.type === "suppbalcony-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
+        rebuild();
+      } else if (dragState.type === "sign-draw") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
         const info = getPanelInfo(dragState.panelKey);
@@ -7984,6 +8167,21 @@ export default function RoomBuilder() {
           regenerateSuppBalconyOpening(supp);
           setSuppBalconyHeight(supp.platformHeight);
           setSuppBalconyRailingCount(supp.railingCount);
+        }
+        previewOpening = null;
+      } else if (dragState.type === "sign-draw") {
+        const u0g = Math.min(dragState.u0, dragState.u1);
+        const u1g = Math.max(dragState.u0, dragState.u1);
+        const MIN_SIGN = 2 * FT;
+        if (u1g - u0g >= MIN_SIGN) {
+          const sign = { id: idSeq++, panel: dragState.panelKey, u0: u0g, u1: u1g, side: dragState.side || 1, text: "" };
+          if (!state.signs) state.signs = [];
+          state.signs.push(sign);
+          // auto-selected (unlike the other wall props above) -- a blank
+          // sign is useless until named, so drop straight into "type the
+          // name" instead of making that a separate follow-up tap.
+          setSelectedSignId(sign.id);
+          setSignText("");
         }
         previewOpening = null;
       } else if (dragState.type === "column-draw") {
@@ -8523,6 +8721,26 @@ export default function RoomBuilder() {
       rebuild();
     }
     deleteSuppBalconyRef.current = deleteActiveSuppBalcony;
+
+    function setActiveSignText(text) {
+      const id = selectedSignIdRef.current;
+      if (id == null) return;
+      const sign = (state.signs || []).find((s) => s.id === id);
+      if (!sign) return;
+      sign.text = text;
+      rebuild();
+    }
+    signTextApiRef.current = { setText: setActiveSignText };
+
+    function deleteActiveSign() {
+      const id = selectedSignIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.signs = (state.signs || []).filter((s) => s.id !== id);
+      setSelectedSignId(null);
+      rebuild();
+    }
+    deleteSignRef.current = deleteActiveSign;
 
     function deleteActiveOpening() {
       const id = selectedOpeningIdRef.current;
@@ -11555,6 +11773,7 @@ export default function RoomBuilder() {
                 { key: "balcony", label: "Balcony" },
                 { key: "terrace", label: "Terrace" },
                 { key: "suppBalcony", label: "Supported Balcony" },
+                { key: "sign", label: "Sign" },
               ].map(({ key: s, label }) => (
                 <button
                   key={s}
@@ -11778,6 +11997,31 @@ export default function RoomBuilder() {
                 suppBalconyRailingCountApiRef.current.setCount(n);
               }}
             />
+          </div>
+        )}
+        {selectedSignId != null && (
+          <div className="ribbon-group" style={{ minWidth: 260 }}>
+            <span className="ribbon-label">Sign text</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="text"
+                value={signText}
+                placeholder="Trevor's House"
+                onPointerDown={(e) => e.stopPropagation()}
+                onChange={(e) => {
+                  const t = e.target.value;
+                  setSignText(t);
+                  signTextApiRef.current.setText(t);
+                }}
+                style={{
+                  flex: 1, minWidth: 0, fontSize: 12, fontFamily: "var(--font-system)",
+                  background: "var(--bg-control)", color: "var(--text-primary)",
+                  border: "1px solid var(--border-control)", borderRadius: 6, padding: "5px 8px",
+                }}
+              />
+              <button className="rb-btn" onClick={() => deleteSignRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedSignId(null)}>Done</button>
+            </div>
           </div>
         )}
         {selectedOpeningId != null && (
