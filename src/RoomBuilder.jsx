@@ -3503,13 +3503,13 @@ export default function RoomBuilder() {
     // small strip of solid wall there instead of running the opening flush
     // to the edge.
     const EDGE_WALL_MARGIN = 0.5 * FT;
-    function applyEdgeMargin(u0, u1, panelKey) {
+    function applyEdgeMargin(u0, u1, panelKey, margin = EDGE_WALL_MARGIN, minSpan = MIN_OPENING) {
       const info = getPanelInfo(panelKey);
       if (!info) return [u0, u1];
       let nu0 = u0, nu1 = u1;
-      if (nu0 <= info.u0 + 0.02) nu0 = info.u0 + EDGE_WALL_MARGIN;
-      if (nu1 >= info.u1 - 0.02) nu1 = info.u1 - EDGE_WALL_MARGIN;
-      if (nu1 - nu0 < MIN_OPENING) return [u0, u1]; // wall too short for both margins -- leave it as drawn
+      if (nu0 <= info.u0 + 0.02) nu0 = info.u0 + margin;
+      if (nu1 >= info.u1 - 0.02) nu1 = info.u1 - margin;
+      if (nu1 - nu0 < minSpan) return [u0, u1]; // wall too short for both margins -- leave it as drawn
       return [nu0, nu1];
     }
     function clampWallCoord(wallId, v) {
@@ -5065,11 +5065,23 @@ export default function RoomBuilder() {
     // the text a fixed accent orange, and everything but the text stays
     // put when the name is edited afterward -- only the text mesh actually
     // needs rebuilding on every keystroke.
-    const SIGN_STANDOFF = 2 * FT;
-    const SIGN_THICKNESS = 0.15;
-    const SIGN_HEIGHT = 2.5 * FT;
-    const SIGN_BOTTOM = 7 * FT; // height of the board's own bottom edge above the floor
+    const SIGN_STANDOFF = 1 * FT;
+    const SIGN_THICKNESS = 0.3;
+    const DEFAULT_SIGN_HEIGHT = 2.5 * FT;
+    const DEFAULT_SIGN_BOTTOM = 8 * FT; // height of the board's own bottom edge above the floor
     const SIGN_POST_RADIUS = 0.08;
+    const SIGN_EDGE_MARGIN = 1 * FT; // kept clear of a wall's own corners, horizontally
+    const SIGN_TOP_MARGIN = 1 * FT; // kept clear of the wall's top edge, vertically
+    const MIN_SIGN_W = 2 * FT;
+    const MIN_SIGN_H = 1 * FT;
+    // clamps a sign's own bottom/height so its top edge never crawls past
+    // SIGN_TOP_MARGIN below the current wall height -- used both when a new
+    // sign is first placed and whenever it's dragged/resized afterward.
+    function clampSignVertical(bottom, height) {
+      const h = Math.max(MIN_SIGN_H, height);
+      const maxBottom = Math.max(0, state.height - SIGN_TOP_MARGIN - h);
+      return { bottom: Math.max(0, Math.min(bottom, maxBottom)), height: h };
+    }
     function renderSigns() {
       (state.signs || []).forEach((sign) => {
         const info = getPanelInfo(sign.panel);
@@ -5080,6 +5092,8 @@ export default function RoomBuilder() {
         const isSelected = isPickableTarget && selectedSignIdRef.current === sign.id;
         const boardMat = isSelected ? floorMatSelected : signBoardMat;
         const postMat = isSelected ? pillarMatSelected : pillarMat;
+        const signHeight = sign.height != null ? sign.height : DEFAULT_SIGN_HEIGHT;
+        const signBottom = sign.bottom != null ? sign.bottom : DEFAULT_SIGN_BOTTOM;
         function toWorld(u, d) {
           if (axis === "x") return { x: u, z: info.coord + nz * d };
           return { x: info.coord + nx * d, z: u };
@@ -5098,21 +5112,21 @@ export default function RoomBuilder() {
 
         const uLen = Math.max(0.02, sign.u1 - sign.u0);
         const uMid = (sign.u0 + sign.u1) / 2;
-        const boardCenterY = SIGN_BOTTOM + SIGN_HEIGHT / 2;
+        const boardCenterY = signBottom + signHeight / 2;
         const boardD = SIGN_STANDOFF + SIGN_THICKNESS / 2;
 
         // the board itself
         {
           const geo = axis === "x"
-            ? new THREE.BoxGeometry(uLen, SIGN_HEIGHT, SIGN_THICKNESS)
-            : new THREE.BoxGeometry(SIGN_THICKNESS, SIGN_HEIGHT, uLen);
+            ? new THREE.BoxGeometry(uLen, signHeight, SIGN_THICKNESS)
+            : new THREE.BoxGeometry(SIGN_THICKNESS, signHeight, uLen);
           const w = toWorld(uMid, boardD);
           addPiece(geo, boardMat, w.x, boardCenterY, w.z);
         }
 
         // 4 corner posts, straight in from the wall to each corner of the board
         [sign.u0, sign.u1].forEach((u) => {
-          [SIGN_BOTTOM, SIGN_BOTTOM + SIGN_HEIGHT].forEach((y) => {
+          [signBottom, signBottom + signHeight].forEach((y) => {
             const geo = new THREE.CylinderGeometry(SIGN_POST_RADIUS, SIGN_POST_RADIUS, SIGN_STANDOFF, 10);
             const w = toWorld(u, SIGN_STANDOFF / 2);
             addPiece(geo, postMat, w.x, y, w.z, axis === "x" ? { x: Math.PI / 2 } : { z: Math.PI / 2 });
@@ -5121,20 +5135,20 @@ export default function RoomBuilder() {
 
         // the owner's own name, extruded as real 3D text across the board's
         // outward-facing side -- built at a fixed reference size, then
-        // uniformly scaled to fit inside the board with a small margin
-        // (rather than re-triangulating the font outline at an exact target
-        // size), and oriented so it always reads right-side up and
-        // left-to-right to someone standing in front of the sign, whichever
-        // wall or side it was drawn on.
+        // uniformly scaled up to nearly fill the board (rather than
+        // re-triangulating the font outline at an exact target size), and
+        // oriented so it always reads right-side up and left-to-right to
+        // someone standing in front of the sign, whichever wall or side it
+        // was drawn on.
         const text = (sign.text || "").trim();
         if (text) {
           const REF_SIZE = 1;
-          const geo = new TextGeometry(text, { font: SIGN_FONT, size: REF_SIZE, depth: 0.06, curveSegments: 3 });
+          const geo = new TextGeometry(text, { font: SIGN_FONT, size: REF_SIZE, depth: 0.12, curveSegments: 3 });
           geo.computeBoundingBox();
           const bw = Math.max(0.0001, geo.boundingBox.max.x - geo.boundingBox.min.x);
           const bh = Math.max(0.0001, geo.boundingBox.max.y - geo.boundingBox.min.y);
           geo.translate(-(geo.boundingBox.min.x + geo.boundingBox.max.x) / 2, -(geo.boundingBox.min.y + geo.boundingBox.max.y) / 2, 0);
-          const scale = Math.min((uLen * 0.85) / bw, (SIGN_HEIGHT * 0.6) / bh);
+          const scale = Math.min((uLen * 0.92) / bw, (signHeight * 0.8) / bh);
           const forward = new THREE.Vector3(nx, 0, nz).normalize();
           const up = new THREE.Vector3(0, 1, 0);
           const right = up.clone().cross(forward).normalize();
@@ -5149,6 +5163,26 @@ export default function RoomBuilder() {
           mesh.userData = { kind: "sign", id: sign.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(mesh);
           if (isPickableTarget) pickList.push(mesh);
+        }
+
+        // corner resize handles, same look/size as a prop's own -- only
+        // while this sign is selected. nw/ne drive the top edge (height),
+        // sw/se the bottom edge (bottom + height together, so the top stays
+        // put), w-side handles pull u0, e-side handles pull u1.
+        if (isSelected) {
+          function addHandle(edge, u, y) {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+            const w = toWorld(u, SIGN_STANDOFF + SIGN_THICKNESS);
+            mesh.position.set(w.x, y, w.z);
+            mesh.renderOrder = 10;
+            mesh.userData = { kind: "resize-handle", target: "sign", id: sign.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          addHandle("nw", sign.u0, signBottom + signHeight);
+          addHandle("ne", sign.u1, signBottom + signHeight);
+          addHandle("sw", sign.u0, signBottom);
+          addHandle("se", sign.u1, signBottom);
         }
       });
     }
@@ -7030,6 +7064,13 @@ export default function RoomBuilder() {
             const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
             dragState = { type: "resize-prop-corner", id: rh.id, corner: rh.edge, plane, cx: p.x, cz: p.z };
           }
+        } else if (rh.target === "sign") {
+          const sign = (state.signs || []).find((s) => s.id === rh.id);
+          if (!sign) return;
+          const info = getPanelInfo(sign.panel);
+          if (!info) return;
+          pushUndo();
+          dragState = { type: "resize-sign", id: rh.id, corner: rh.edge, panelKey: sign.panel, plane: panelFacePlane(info, hit.point) };
         } else if (rh.target === "wall-height") {
           // same vertical-drag-plane technique as a prop's own top handle --
           // a plane through the handle's own position, facing the camera
@@ -7057,6 +7098,9 @@ export default function RoomBuilder() {
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
         setSelectedOpeningId(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
         setSelectedStairId(obj.userData.id);
         if (st) setStairSteps(st.steps);
         return;
@@ -7075,6 +7119,9 @@ export default function RoomBuilder() {
         setSelectedStairId(null);
         setSelectedPropId(null);
         setSelectedOpeningId(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
         setSelectedBalconyId(obj.userData.id);
         setSelectedBalconyPart(kind === "balcony-pillar" ? "pillars" : kind === "balcony-ceiling" ? "ceiling" : null);
         if (bal) {
@@ -7100,6 +7147,9 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
         setSelectedOpeningId(null);
         setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
         setSelectedTerraceId(obj.userData.id);
         return;
       }
@@ -7115,7 +7165,9 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
         setSelectedOpeningId(null);
         setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
+        setSelectedSignId(null);
         setSelectedSuppBalconyId(obj.userData.id);
         if (sb) {
           setSuppBalconyHeight(sb.platformHeight || 6 * FT);
@@ -7125,20 +7177,39 @@ export default function RoomBuilder() {
       }
 
       // a Sign prop -- tapping the board, a corner post, or the text all
-      // select the whole thing.
+      // select the whole thing. Tapping it again while it's already the
+      // selected sign instead grabs it for a reposition-by-drag along the
+      // wall's own face (see the sign-move handling in onPointerMove).
       if (kind === "sign") {
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
         const sign = (state.signs || []).find((s) => s.id === obj.userData.id);
+        if (!sign) return;
+        const alreadySelected = selectedSignIdRef.current === sign.id;
         setSelectedPanel(null);
         setSelectedStairId(null);
         setSelectedPropId(null);
         setSelectedOpeningId(null);
         setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
-        setSelectedSignId(obj.userData.id);
-        if (sign) setSignText(sign.text || "");
+        setSelectedSignId(sign.id);
+        setSignText(sign.text || "");
+        if (alreadySelected) {
+          const info = getPanelInfo(sign.panel);
+          if (info) {
+            pushUndo();
+            dragState = {
+              type: "sign-move", id: sign.id, panelKey: sign.panel,
+              plane: panelFacePlane(info, hit.point),
+              startU: panelU(info, hit.point), startY: hit.point.y,
+              baseU0: sign.u0, baseU1: sign.u1,
+              baseBottom: sign.bottom != null ? sign.bottom : DEFAULT_SIGN_BOTTOM,
+            };
+            capture(e);
+          }
+        }
         return;
       }
 
@@ -7154,6 +7225,9 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
         setSelectedOpeningId(obj.userData.id);
         // sync the height/dividers/direction controls to whichever opening
         // was just tapped, so they read (and edit) its actual values
@@ -7190,6 +7264,9 @@ export default function RoomBuilder() {
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
         setSelectedOpeningId(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
         setSelectedPropId(obj.userData.id);
         return;
       }
@@ -7270,6 +7347,9 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
         // a deliberate tap on this room's own wall/partition, even if it was
@@ -7280,6 +7360,25 @@ export default function RoomBuilder() {
         // clears room focus -- reassert the cross-floor retarget so the
         // drag that's about to start still lands on the right floor.
         if (ownerRoomId == null) applyCrossFloorRetarget(hitFloorId);
+      }
+
+      // a tap that lands on plain floor and matched nothing more specific
+      // above -- the stairs and props tools handle their own floor taps
+      // earlier and always return before reaching here, so this only fires
+      // for every other tool. There was previously no reliable way to
+      // clear a selection once you just wanted to tap empty ground and
+      // move on, so treat this as an explicit "deselect everything" tap.
+      if (kind === "floor") {
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedPropId(null);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
+        setSelectedOpeningId(null);
+        return;
       }
 
       // grabbing an existing partition directly (outside the cut tool) always
@@ -7869,6 +7968,56 @@ export default function RoomBuilder() {
           }
         }
         rebuild();
+      } else if (dragState.type === "resize-sign") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sign = (state.signs || []).find((s) => s.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!sign || !info) { dragState = null; return; }
+        const edge = dragState.corner;
+        const hasW = edge.includes("w"), hasE = edge.includes("e");
+        const hasN = edge.includes("n"), hasS = edge.includes("s");
+        if (hasW || hasE) {
+          const u = snapValue(panelU(info, pt));
+          if (hasW) sign.u0 = Math.max(info.u0 + SIGN_EDGE_MARGIN, Math.min(u, sign.u1 - MIN_SIGN_W));
+          else sign.u1 = Math.min(info.u1 - SIGN_EDGE_MARGIN, Math.max(u, sign.u0 + MIN_SIGN_W));
+        }
+        if (hasN || hasS) {
+          const bottom = sign.bottom != null ? sign.bottom : DEFAULT_SIGN_BOTTOM;
+          const height = sign.height != null ? sign.height : DEFAULT_SIGN_HEIGHT;
+          const top = bottom + height;
+          const y = snapValue(pt.y);
+          const maxTop = state.height - SIGN_TOP_MARGIN;
+          if (hasN) {
+            const newTop = Math.max(bottom + MIN_SIGN_H, Math.min(maxTop, y));
+            sign.height = newTop - bottom;
+          } else {
+            const newBottom = Math.max(0, Math.min(top - MIN_SIGN_H, y));
+            sign.bottom = newBottom;
+            sign.height = top - newBottom;
+          }
+        }
+        rebuild();
+      } else if (dragState.type === "sign-move") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sign = (state.signs || []).find((s) => s.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!sign || !info) { dragState = null; return; }
+        const width = dragState.baseU1 - dragState.baseU0;
+        const du = panelU(info, pt) - dragState.startU;
+        let newU0 = dragState.baseU0 + du;
+        let newU1 = dragState.baseU1 + du;
+        const loU = info.u0 + SIGN_EDGE_MARGIN, hiU = info.u1 - SIGN_EDGE_MARGIN;
+        if (newU0 < loU) { newU0 = loU; newU1 = newU0 + width; }
+        if (newU1 > hiU) { newU1 = hiU; newU0 = newU1 - width; }
+        sign.u0 = snapValue(newU0);
+        sign.u1 = sign.u0 + width;
+        const height = sign.height != null ? sign.height : DEFAULT_SIGN_HEIGHT;
+        const dy = pt.y - dragState.startY;
+        const maxBottom = Math.max(0, state.height - SIGN_TOP_MARGIN - height);
+        sign.bottom = snapValue(Math.max(0, Math.min(maxBottom, dragState.baseBottom + dy)));
+        rebuild();
       } else if (dragState.type === "resize-prop-corner") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
@@ -8003,6 +8152,9 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
           setSelectedBalconyId(null);
           setSelectedBalconyPart(null);
+          setSelectedTerraceId(null);
+          setSelectedSuppBalconyId(null);
+          setSelectedSignId(null);
           setSelectedOpeningId(null);
           switchActiveRoom(null);
         }
@@ -8170,11 +8322,11 @@ export default function RoomBuilder() {
         }
         previewOpening = null;
       } else if (dragState.type === "sign-draw") {
-        const u0g = Math.min(dragState.u0, dragState.u1);
-        const u1g = Math.max(dragState.u0, dragState.u1);
-        const MIN_SIGN = 2 * FT;
-        if (u1g - u0g >= MIN_SIGN) {
-          const sign = { id: idSeq++, panel: dragState.panelKey, u0: u0g, u1: u1g, side: dragState.side || 1, text: "" };
+        let [u0g, u1g] = [Math.min(dragState.u0, dragState.u1), Math.max(dragState.u0, dragState.u1)];
+        [u0g, u1g] = applyEdgeMargin(u0g, u1g, dragState.panelKey, SIGN_EDGE_MARGIN, MIN_SIGN_W);
+        if (u1g - u0g >= MIN_SIGN_W) {
+          const { bottom, height } = clampSignVertical(DEFAULT_SIGN_BOTTOM, DEFAULT_SIGN_HEIGHT);
+          const sign = { id: idSeq++, panel: dragState.panelKey, u0: u0g, u1: u1g, side: dragState.side || 1, text: "", bottom, height };
           if (!state.signs) state.signs = [];
           state.signs.push(sign);
           // auto-selected (unlike the other wall props above) -- a blank
@@ -8378,6 +8530,14 @@ export default function RoomBuilder() {
       pinchState = null;
       setSelectedPanel(null);
       setSelectedRoomId(null);
+      setSelectedStairId(null);
+      setSelectedPropId(null);
+      setSelectedBalconyId(null);
+      setSelectedBalconyPart(null);
+      setSelectedTerraceId(null);
+      setSelectedSuppBalconyId(null);
+      setSelectedSignId(null);
+      setSelectedOpeningId(null);
       setHiddenIds([]);
       target.set(0, state.height * 0.32, 0);
       updateCamera();
@@ -8557,6 +8717,9 @@ export default function RoomBuilder() {
         setSelectedPropId(null);
       setSelectedBalconyId(null);
       setSelectedBalconyPart(null);
+      setSelectedTerraceId(null);
+      setSelectedSuppBalconyId(null);
+      setSelectedSignId(null);
       setSelectedOpeningId(null);
       rebuild();
     }
@@ -8901,6 +9064,12 @@ export default function RoomBuilder() {
       setSelectedRoomId(null);
       setSelectedStairId(null);
         setSelectedPropId(null);
+      setSelectedBalconyId(null);
+      setSelectedBalconyPart(null);
+      setSelectedTerraceId(null);
+      setSelectedSuppBalconyId(null);
+      setSelectedSignId(null);
+      setSelectedOpeningId(null);
       rebuild();
       if (prevActiveId !== id) {
         const prevEntry = floors.find((f) => f.id === prevActiveId);
@@ -11117,6 +11286,9 @@ export default function RoomBuilder() {
               setStairSteps(12);
               setSelectedBalconyId(null);
               setSelectedBalconyPart(null);
+              setSelectedTerraceId(null);
+              setSelectedSuppBalconyId(null);
+              setSelectedSignId(null);
               setSelectedOpeningId(null);
               setBalconyStairHeight(3 * FT);
               setBalconyPlatformWidth(10 * FT);
