@@ -1105,6 +1105,8 @@ export default function RoomBuilder() {
   const voiceRoomContextRef = useRef(() => "");
   const [stairSteps, setStairSteps] = useState(20);
   const stairStepsApiRef = useRef({ setSteps: () => {} });
+  const [stairHeight, setStairHeight] = useState(16 * FT);
+  const stairHeightApiRef = useRef({ setHeight: () => {} });
   const deleteStairRef = useRef(() => {});
   const switchActiveRoomRef = useRef(() => {});
   const [roomHeight, setRoomHeight] = useState(WALL_HEIGHT);
@@ -3848,16 +3850,60 @@ export default function RoomBuilder() {
       return out;
     }
     // stairwell headroom cutout: a rectangle the width of the stair, running
-    // 6ft back from the point where the stair reaches full height (its
-    // "end") toward where it starts climbing -- a simplified stand-in for
-    // a real headroom calculation, sized for one average person's clearance.
+    // STAIR_HEADROOM back from wherever the stair reaches the given floor's
+    // own level ("reachU", a position along the stair's start..end axis)
+    // toward where it starts climbing -- a simplified stand-in for a real
+    // headroom calculation, sized for one average person's clearance. For a
+    // stair whose top exactly coincides with the floor right above (the
+    // ordinary single-floor case) reachU is just stair.end; a taller stair
+    // punching through several floors reaches each intermediate one
+    // partway along its run instead (see recomputeAllStairFloorHoles).
     const STAIR_HEADROOM = 12 * FT;
-    function computeStairHoleCut(stair) {
+    function computeStairHoleCutAt(stair, reachU) {
       const dir = Math.sign(stair.end - stair.start) || 1;
-      const a = stair.end, b = stair.end - dir * STAIR_HEADROOM;
-      const lo = Math.min(a, b), hi = Math.max(a, b);
+      const runLo = Math.min(stair.start, stair.end), runHi = Math.max(stair.start, stair.end);
+      const a = Math.min(runHi, Math.max(runLo, reachU)), b = reachU - dir * STAIR_HEADROOM;
+      const lo = Math.max(runLo, Math.min(a, b)), hi = Math.min(runHi, Math.max(a, b));
       if (stair.axis === "x") return { x0: lo, x1: hi, z0: stair.widthMin, z1: stair.widthMax };
       return { x0: stair.widthMin, x1: stair.widthMax, z0: lo, z1: hi };
+    }
+    // recomputes every stair-cut floorHole in the whole building from
+    // scratch -- called after anything that could change which floors any
+    // given stair now reaches: drawing/deleting a stair, changing a
+    // stair's own height, or adding/removing/resizing a floor. Simpler and
+    // far less error-prone than trying to patch the affected floors'
+    // holes incrementally, and this only ever runs off an explicit user
+    // action, never on every rebuild.
+    function recomputeAllStairFloorHoles() {
+      const touched = new Set();
+      floors.forEach((f) => {
+        if (f.data.floorHoles && f.data.floorHoles.length) {
+          const before = f.data.floorHoles.length;
+          f.data.floorHoles = f.data.floorHoles.filter((h) => h.sourceStairId == null);
+          if (f.data.floorHoles.length !== before) touched.add(f.id);
+        }
+      });
+      let base = 0;
+      const baseElevs = floors.map((f) => { const b = base; base += f.data.height; return b; });
+      floors.forEach((floorEntry, idx) => {
+        (floorEntry.data.stairs || []).forEach((stair) => {
+          const stairBase = baseElevs[idx];
+          const totalHeight = stair.height != null ? stair.height : floorEntry.data.height;
+          const topElev = stairBase + totalHeight;
+          let cum = stairBase + floorEntry.data.height;
+          for (let j = idx + 1; j < floors.length && cum < topElev - 0.01; j++) {
+            const reachFrac = Math.max(0, Math.min(1, (cum - stairBase) / totalHeight));
+            const reachU = stair.start + (stair.end - stair.start) * reachFrac;
+            const cut = computeStairHoleCutAt(stair, reachU);
+            const target = floors[j];
+            if (!target.data.floorHoles) target.data.floorHoles = [];
+            target.data.floorHoles.push({ id: idSeq++, xMin: cut.x0, xMax: cut.x1, zMin: cut.z0, zMax: cut.z1, sourceStairId: stair.id });
+            touched.add(target.id);
+            cum += target.data.height;
+          }
+        });
+      });
+      floors.forEach((f) => { if (touched.has(f.id)) rebuildFloorEntry(f, false); });
     }
     function notchFloorCut(bump) {
       const def = wallDefs[bump.panel];
@@ -4351,11 +4397,14 @@ export default function RoomBuilder() {
     // of the footprint, so the whole run climbs from the floor to the room's
     // current height -- recomputed live, so raising/lowering the room re-scales it.
     function renderStairs() {
-      const H = state.height;
       (state.stairs || []).forEach((st) => {
         const span = st.end - st.start;
         const widthSpan = st.widthMax - st.widthMin;
         if (Math.abs(span) < 0.05 || widthSpan < 0.05) return;
+        // a stair's own total rise -- independently adjustable via the
+        // Height slider, so it can climb through more than just this one
+        // floor's own height (older/never-touched stairs fall back to it).
+        const H = st.height != null ? st.height : state.height;
         const n = Math.max(1, Math.round(st.steps) || 1);
         const stepH = H / n;
         const stepSpan = span / n;
@@ -5074,13 +5123,16 @@ export default function RoomBuilder() {
     const SIGN_TOP_MARGIN = 1 * FT; // kept clear of the wall's top edge, vertically
     const MIN_SIGN_W = 2 * FT;
     const MIN_SIGN_H = 1 * FT;
-    // clamps a sign's own bottom/height so its top edge never crawls past
-    // SIGN_TOP_MARGIN below the current wall height -- used both when a new
-    // sign is first placed and whenever it's dragged/resized afterward.
-    function clampSignVertical(bottom, height) {
-      const h = Math.max(MIN_SIGN_H, height);
-      const maxBottom = Math.max(0, state.height - SIGN_TOP_MARGIN - h);
-      return { bottom: Math.max(0, Math.min(bottom, maxBottom)), height: h };
+    // a brand-new sign's default vertical placement: both edges pinned --
+    // the bottom fixed at DEFAULT_SIGN_BOTTOM (8ft) off the floor and the
+    // top fixed at SIGN_TOP_MARGIN (1ft) below the current wall's own top,
+    // whatever that wall's height happens to be. Only falls back to a bare
+    // minimum-height sign right above the 8ft line if the wall is too
+    // short for both anchors to hold at once.
+    function defaultSignVertical() {
+      const bottom = DEFAULT_SIGN_BOTTOM;
+      const top = Math.max(bottom + MIN_SIGN_H, state.height - SIGN_TOP_MARGIN);
+      return { bottom, height: top - bottom };
     }
     function renderSigns() {
       (state.signs || []).forEach((sign) => {
@@ -6460,17 +6512,26 @@ export default function RoomBuilder() {
       }
       // stair climbing: smoothly ramp height while inside a stair's footprint
       const climb = floorEntry ? stairClimbAt(floorEntry, walkPos.x, walkPos.z) : null;
+      const climbHeight = climb ? (climb.stair.height != null ? climb.stair.height : (floorEntry.data.height || WALL_HEIGHT)) : 0;
       if (climb) {
-        walkHeightOffset = climb.frac * (floorEntry.data.height || WALL_HEIGHT);
+        walkHeightOffset = climb.frac * climbHeight;
       } else {
         walkHeightOffset = 0;
       }
       // reaching the top of a stair, with a floor above whose footprint
       // covers this point (i.e. we've walked into its stairwell opening),
-      // hands walking off to that floor at its own base level.
+      // hands walking off to whichever floor this stair's own height
+      // actually reaches -- several floors up at once for a tall enough
+      // one, not just the very next one.
       if (climb && climb.frac >= 0.98 && floorEntry) {
         const idx = floors.findIndex((f) => f.id === floorEntry.id);
-        const above = idx !== -1 ? floors[idx + 1] : null;
+        let destIdx = idx + 1;
+        let elev = floorEntry.data.height;
+        while (elev < climbHeight - 0.05 && destIdx < floors.length - 1) {
+          elev += floors[destIdx].data.height;
+          destIdx++;
+        }
+        const above = idx !== -1 && destIdx > idx ? floors[destIdx] : null;
         if (above) {
           const afp = above.data.footprint;
           if (walkPos.x >= afp.xMin && walkPos.x <= afp.xMax && walkPos.z >= afp.zMin && walkPos.z <= afp.zMax) {
@@ -6980,6 +7041,33 @@ export default function RoomBuilder() {
 
       const hit = pick(e);
       if (!hit) {
+        // Stairs tool: nothing pickable under the cursor at all -- blank
+        // ground past the edge of any floor's own footprint. Draws anchored
+        // to the active floor's own ground plane anyway, exactly like the
+        // Room tool's own blank-ground fallback above, so a staircase can
+        // start outside the room entirely and climb up to reach a wall from
+        // the outside. Explicitly floor-level (not inside whatever room, if
+        // any, happened to be focused), since that's what "outside the
+        // room" means and it's also required for the auto-cut headroom
+        // holes above to find it (see recomputeAllStairFloorHoles).
+        if (toolRef.current === "stairs") {
+          const g = floorGroups.get(activeFloorId);
+          if (g) {
+            const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -g.position.y);
+            const ray = rayFromEvent(e);
+            const pt = new THREE.Vector3();
+            if (ray.intersectPlane(plane, pt)) {
+              pushUndo();
+              setSelectedStairId(null);
+              setSelectedPropId(null);
+              switchActiveRoom(null);
+              const localStart = toLocalXZ(pt);
+              dragState = { type: "stair-draw", plane, x0: localStart.x, z0: localStart.z, x1: localStart.x, z1: localStart.z, unbounded: true };
+              capture(e);
+              return;
+            }
+          }
+        }
         orbiting = { x: e.clientX, y: e.clientY, moved: 0 };
         renderer.domElement.style.cursor = "grabbing";
         capture(e);
@@ -7102,7 +7190,10 @@ export default function RoomBuilder() {
         setSelectedSuppBalconyId(null);
         setSelectedSignId(null);
         setSelectedStairId(obj.userData.id);
-        if (st) setStairSteps(st.steps);
+        if (st) {
+          setStairSteps(st.steps);
+          setStairHeight(st.height != null ? st.height : state.height);
+        }
         return;
       }
 
@@ -8083,11 +8174,21 @@ export default function RoomBuilder() {
         // never record an endpoint beyond it -- previously the plane the
         // drag raycasts against is infinite, so the value kept extending
         // past the wall even though the wall visually hid the preview,
-        // and the built staircase would poke out through it.
-        const fp = state.footprint;
-        const margin = (state.thickness || 0.35) / 2 + 0.02;
-        const clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, local.x));
-        const clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, local.z));
+        // and the built staircase would poke out through it. A stair
+        // started on blank ground outside any room/footprint (see the
+        // onPointerDown blank-ground fallback) is deliberately exempt --
+        // it's meant to run right up to, or past, the building's own wall
+        // from the outside, not stay confined inside it.
+        let clampedX = local.x, clampedZ = local.z;
+        if (!dragState.unbounded) {
+          const fp = state.footprint;
+          const margin = (state.thickness || 0.35) / 2 + 0.02;
+          clampedX = Math.min(fp.xMax - margin, Math.max(fp.xMin + margin, local.x));
+          clampedZ = Math.min(fp.zMax - margin, Math.max(fp.zMin + margin, local.z));
+        } else {
+          clampedX = Math.min(MAX_COORD, Math.max(-MAX_COORD, local.x));
+          clampedZ = Math.min(MAX_COORD, Math.max(-MAX_COORD, local.z));
+        }
         dragState.x1 = snapValue(clampedX);
         dragState.z1 = snapValue(clampedZ);
         // compute the same dominant-axis choice the final commit uses, live,
@@ -8325,7 +8426,7 @@ export default function RoomBuilder() {
         let [u0g, u1g] = [Math.min(dragState.u0, dragState.u1), Math.max(dragState.u0, dragState.u1)];
         [u0g, u1g] = applyEdgeMargin(u0g, u1g, dragState.panelKey, SIGN_EDGE_MARGIN, MIN_SIGN_W);
         if (u1g - u0g >= MIN_SIGN_W) {
-          const { bottom, height } = clampSignVertical(DEFAULT_SIGN_BOTTOM, DEFAULT_SIGN_HEIGHT);
+          const { bottom, height } = defaultSignVertical();
           const sign = { id: idSeq++, panel: dragState.panelKey, u0: u0g, u1: u1g, side: dragState.side || 1, text: "", bottom, height };
           if (!state.signs) state.signs = [];
           state.signs.push(sign);
@@ -8354,30 +8455,23 @@ export default function RoomBuilder() {
           // the ascending axis follows whichever direction was dragged
           // farther (so stairs drawn along the room's length climb along
           // its length, drawn across the width climb across it); the click
-          // point is zero height, the release point is full room height.
+          // point is zero height, the release point is full room height by
+          // default -- its own `height` stays independently adjustable
+          // afterward via the Height slider, to rise through several
+          // floors at once instead.
           const stair = Math.abs(dx) >= Math.abs(dz)
-            ? { id, axis: "x", start: dragState.x0, end: dragState.x1, widthMin: Math.min(dragState.z0, dragState.z1), widthMax: Math.max(dragState.z0, dragState.z1), steps: defaultStairSteps(state.height) }
-            : { id, axis: "z", start: dragState.z0, end: dragState.z1, widthMin: Math.min(dragState.x0, dragState.x1), widthMax: Math.max(dragState.x0, dragState.x1), steps: defaultStairSteps(state.height) };
+            ? { id, axis: "x", start: dragState.x0, end: dragState.x1, widthMin: Math.min(dragState.z0, dragState.z1), widthMax: Math.max(dragState.z0, dragState.z1), steps: defaultStairSteps(state.height), height: state.height }
+            : { id, axis: "z", start: dragState.z0, end: dragState.z1, widthMin: Math.min(dragState.x0, dragState.x1), widthMax: Math.max(dragState.x0, dragState.x1), steps: defaultStairSteps(state.height), height: state.height };
           state.stairs.push(stair);
           setSelectedStairId(id);
           setStairSteps(stair.steps);
-          // if a layer already sits above this one, retroactively cut its
-          // headroom opening now too -- not just when a new layer is
-          // created after the fact. Only handled for stairs on the floor
+          setStairHeight(stair.height);
+          // retroactively cuts headroom openings in every floor this stair's
+          // own height now reaches, not just whatever's already there when a
+          // new layer is created later. Only handled for stairs on the floor
           // itself (not inside an extracted room), since a room's offset
-          // would need to be folded into the hole's world position. Uses
-          // buildingFloorEntry rather than activeFloorId, since the stair
-          // may have just been drawn on a different (non-active) floor.
-          if (buildingRoomId == null && buildingFloorEntry) {
-            const idx = floors.findIndex((f) => f.id === buildingFloorEntry.id);
-            const aboveEntry = idx !== -1 ? floors[idx + 1] : null;
-            if (aboveEntry) {
-              if (!aboveEntry.data.floorHoles) aboveEntry.data.floorHoles = [];
-              const cut = computeStairHoleCut(stair);
-              aboveEntry.data.floorHoles.push({ id: idSeq++, xMin: cut.x0, xMax: cut.x1, zMin: cut.z0, zMax: cut.z1, sourceStairId: id });
-              rebuildFloorEntry(aboveEntry, false);
-            }
-          }
+          // would need to be folded into the hole's world position.
+          if (buildingRoomId == null && buildingFloorEntry) recomputeAllStairFloorHoles();
         }
         previewStair = null;
       } else if (dragState.type === "room-draw") {
@@ -9137,6 +9231,10 @@ export default function RoomBuilder() {
       hiddenFloorIds.delete(removed.id);
       if (isolatedFloorIds.delete(removed.id)) setIsolatedFloorIdsState(Array.from(isolatedFloorIds));
       restackFloors();
+      // removing a floor shifts every elevation above it, which can change
+      // which floors any remaining stair reaches (and the removed floor may
+      // have carried away a stair whose holes are now stale elsewhere).
+      recomputeAllStairFloorHoles();
       const newIdx = Math.min(idx, floors.length - 1);
       selectFloorById(floors[newIdx].id);
       applyVisibility();
@@ -9155,25 +9253,24 @@ export default function RoomBuilder() {
       const idx = floors.findIndex((f) => f.id === activeFloorId);
       const newId = nextFloorId++;
       const newData = makeFloorData();
-      // if the floor directly below has any staircases, automatically cut a
-      // matching headroom opening in this new floor above them
       const belowEntry = idx !== -1 ? floors[idx] : null;
       // wall thickness is a whole-building spec (see setActiveFloorThickness)
       // -- a freshly added story should match it rather than silently
       // reverting to makeFloorData()'s hardcoded default.
       if (belowEntry) newData.thickness = belowEntry.data.thickness;
-      if (belowEntry && belowEntry.data.stairs && belowEntry.data.stairs.length) {
-        newData.floorHoles = belowEntry.data.stairs.map((st) => {
-          const cut = computeStairHoleCut(st);
-          return { id: idSeq++, xMin: cut.x0, xMax: cut.x1, zMin: cut.z0, zMax: cut.z1, sourceStairId: st.id };
-        });
-      }
       const entry = { id: newId, data: newData };
       if (idx === -1) floors.push(entry); else floors.splice(idx + 1, 0, entry);
       const g = new THREE.Group();
       scene.add(g);
       floorGroups.set(newId, g);
       restackFloors();
+      // a stair anywhere below (or, for a tall enough one, several floors
+      // below) may now reach up into this newly inserted layer -- and
+      // inserting a floor partway up the stack shifts every floor above it
+      // to a new elevation, which can change what every OTHER stair in the
+      // building reaches too. Recomputed from scratch rather than just
+      // pre-filling this one new floor's holes.
+      recomputeAllStairFloorHoles();
       selectFloorById(newId);
       applyVisibility();
     }
@@ -9435,21 +9532,30 @@ export default function RoomBuilder() {
     }
     stairStepsApiRef.current = { setSteps: setActiveStairSteps };
 
+    function setActiveStairHeight(h) {
+      const st = (state.stairs || []).find((s) => s.id === selectedStairIdRef.current);
+      if (!st) return;
+      const clamped = Math.max(MIN_STAIR_SIZE, h);
+      st.height = clamped;
+      // keep the riser count proportional (about the same rise per step)
+      // by default when the total height changes -- the Steps slider is
+      // still there afterward to fine-tune the count independently.
+      st.steps = defaultStairSteps(clamped);
+      setStairSteps(st.steps);
+      if (activeRoomId == null) recomputeAllStairFloorHoles();
+      rebuild();
+    }
+    stairHeightApiRef.current = { setHeight: setActiveStairHeight };
+
     function deleteActiveStair() {
       const id = selectedStairIdRef.current;
       if (id == null) return;
       pushUndo();
+      const wasFloorLevel = activeRoomId == null;
       state.stairs = (state.stairs || []).filter((s) => s.id !== id);
-      // clean up any headroom opening this stair auto-cut in the floor above
-      if (activeRoomId == null) {
-        const idx = floors.findIndex((f) => f.id === activeFloorId);
-        const aboveEntry = idx !== -1 ? floors[idx + 1] : null;
-        if (aboveEntry && aboveEntry.data.floorHoles) {
-          const before = aboveEntry.data.floorHoles.length;
-          aboveEntry.data.floorHoles = aboveEntry.data.floorHoles.filter((h) => h.sourceStairId !== id);
-          if (aboveEntry.data.floorHoles.length !== before) rebuildFloorEntry(aboveEntry, false);
-        }
-      }
+      // clean up any headroom openings this stair auto-cut in the floors
+      // above it (it may have reached several at once).
+      if (wasFloorLevel) recomputeAllStairFloorHoles();
       setSelectedStairId(null);
         setSelectedPropId(null);
       rebuild();
@@ -11284,6 +11390,7 @@ export default function RoomBuilder() {
               setSelectedStairId(null);
         setSelectedPropId(null);
               setStairSteps(12);
+              setStairHeight(16 * FT);
               setSelectedBalconyId(null);
               setSelectedBalconyPart(null);
               setSelectedTerraceId(null);
@@ -11975,6 +12082,27 @@ export default function RoomBuilder() {
                   {label}
                 </button>
               ))}
+            </div>
+          </div>
+        )}
+        {selectedStairId != null && (
+          <div className="ribbon-group" style={{ minWidth: 220 }}>
+            <span className="ribbon-label">Height &middot; {(stairHeight / FT).toFixed(1)} ft</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-bare-range"
+                type="range"
+                min={1}
+                max={(6 * floorHeight) / FT}
+                step={0.5}
+                value={stairHeight / FT}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setStairHeight(ft * FT);
+                  stairHeightApiRef.current.setHeight(ft * FT);
+                }}
+              />
             </div>
           </div>
         )}
