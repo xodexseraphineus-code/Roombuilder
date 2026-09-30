@@ -4523,12 +4523,17 @@ export default function RoomBuilder() {
       return { bottom, top };
     }
     // the plan-view rectangle a window/door punches through the wall's
-    // thickness -- a small quad centered on the segment's own centerline,
-    // slightly proud of the actual thickness so the cut goes cleanly through
-    // both wall faces with no sliver left over.
+    // thickness -- a small quad centered on the segment's own centerline.
+    // Unlike a flat rectangular-room panel, this quad is cut into the same
+    // Shape as the wall ring's own interior air-gap hole (innerHolePath), so
+    // it has to stay strictly inside the ring instead of overshooting past
+    // its faces: two holes that touch or overlap make the triangulation
+    // (Earcut, via ExtrudeGeometry) undefined -- in practice it draws the
+    // hole's edge outline but fills the interior solid instead of cutting
+    // it, which is exactly the "frame with no cutout" symptom this fixes.
     function freeformOpeningHoleQuad(rm, o, thickness) {
       const { p0, dir, nrm } = freeformSegmentBasis(rm, o.segIndex);
-      const half = thickness / 2 + 0.03;
+      const half = Math.max(0.02, thickness / 2 - 0.02);
       const a = { x: p0.x + dir.x * o.u0, z: p0.z + dir.z * o.u0 };
       const b = { x: p0.x + dir.x * o.u1, z: p0.z + dir.z * o.u1 };
       return [
