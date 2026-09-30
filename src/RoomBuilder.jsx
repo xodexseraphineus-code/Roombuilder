@@ -7163,15 +7163,22 @@ export default function RoomBuilder() {
           return;
         }
         const first = freeformDraft.points[0];
-        // use the raw (pre-snap) click position for the "back near the
-        // start" test -- comparing snapped-to-snapped can land the click
-        // exactly on the threshold (both points snap onto grid lines an
-        // exact multiple of the close distance apart) and never fire.
-        const distToFirst = Math.hypot(local.x - first.x, local.z - first.z);
-        const CLOSE_DIST = 2 * FT;
-        if (freeformDraft.points.length >= 3 && distToFirst < CLOSE_DIST) {
+        // Hit-test "back near the start" in SCREEN pixels, not world units --
+        // same reasoning as HANDLE_HIT_PX above: a fixed world-space radius
+        // (what this used to be) shrinks to an unhittable sliver once the
+        // room is any normal size or the view is zoomed out even a little,
+        // so a perfectly good tap on the visible first dot would miss and
+        // silently add a stray extra point instead of closing.
+        const firstScreenPos = new THREE.Vector3(first.x, pt.y, first.z).project(interactionCamera);
+        const rect = renderer.domElement.getBoundingClientRect();
+        const rw = interactionRect ? interactionRect.w : rect.width;
+        const rh = interactionRect ? interactionRect.h : rect.height;
+        const firstPx = { x: (firstScreenPos.x * 0.5 + 0.5) * rw, y: (-firstScreenPos.y * 0.5 + 0.5) * rh };
+        const curPx = pointerPixel(e);
+        const distToFirstPx = Math.hypot(curPx.x - firstPx.x, curPx.y - firstPx.y);
+        if (freeformDraft.points.length >= 3 && distToFirstPx < HANDLE_HIT_PX) {
           const pts = freeformDraft.points;
-          if (Math.abs(polygonArea(pts)) > 1) {
+          if (Math.abs(polygonArea(pts)) > 1e-4) {
             const id = idSeq++;
             if (!state.freeformRooms) state.freeformRooms = [];
             state.freeformRooms.push({
