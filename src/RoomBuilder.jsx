@@ -3593,6 +3593,12 @@ export default function RoomBuilder() {
     // so switching tools away just stops showing it rather than needing an
     // explicit cancel path.
     let freeformDraft = null;
+    // {roomId, segIndex, u0, u1, isDoor, height} while dragging out a new
+    // window/door's span on a Freeform Room's wall -- rendered as if it
+    // were already in rm.openings (see renderFreeformRooms) so the cut
+    // grows live as the drag moves, same as the rectangular system's own
+    // previewOpening.
+    let previewFreeformOpening = null;
     let previewRoom = null; // {x0,x1,z0,z1} while dragging out a new room's footprint
     let previewProp = null; // {kind,x0,x1,z0,z1} while dragging out a new prop's footprint (LOCAL to the active room)
     let measureAnchors = []; // {point: Vector3, text} for the length overlay
@@ -4591,7 +4597,8 @@ export default function RoomBuilder() {
         const innerHolePath = (() => { const h = new THREE.Path(); inner.forEach((p, i) => { if (i === 0) h.moveTo(p.x, -p.z); else h.lineTo(p.x, -p.z); }); h.closePath(); return h; })();
         wallShape.holes.push(innerHolePath);
 
-        const openings = rm.openings || [];
+        const openings = [...(rm.openings || [])];
+        if (previewFreeformOpening && previewFreeformOpening.roomId === rm.id) openings.push(previewFreeformOpening);
         const vSpans = openings.map((o) => ({ o, ...freeformOpeningVSpan(o, height) }));
         const breakpoints = Array.from(new Set([0, height, ...vSpans.flatMap((v) => [v.bottom, v.top])].map((v) => +v.toFixed(4)))).sort((a, b) => a - b);
         for (let bi = 0; bi < breakpoints.length - 1; bi++) {
@@ -4621,6 +4628,25 @@ export default function RoomBuilder() {
           wallMesh.userData = { kind: "freeform", part: "wall", id: rm.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(wallMesh);
           if (isPickableTarget) pickList.push(wallMesh);
+        }
+
+        // while the Opening/Door tool is active, an invisible, much thicker
+        // (1.5ft) hit-plane along each straight run of the wall -- the real
+        // wall is only as thick as its own setting (often just a few
+        // inches), an unreasonably precise target to tap or drag-start on
+        // directly, same reasoning as HANDLE_HIT_PX above. Tagged exactly
+        // like the wall itself so it flows through the same onPointerDown
+        // branch unchanged.
+        if (isPickableTarget && (toolRef.current === "cut" || toolRef.current === "door")) {
+          for (let i = 0; i < rm.points.length; i++) {
+            const { p0, dir, len } = freeformSegmentBasis(rm, i);
+            const hotspot = makeFreeformPanel(p0, dir, 0, len, 1.5 * FT, 0, height, hotspotMat);
+            hotspot.castShadow = false;
+            hotspot.receiveShadow = false;
+            hotspot.userData = { kind: "freeform", part: "wall", id: rm.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(hotspot);
+            pickList.push(hotspot);
+          }
         }
 
         // a thin glass pane for each window (not a door -- a door is just
@@ -7720,34 +7746,27 @@ export default function RoomBuilder() {
         return;
       }
 
-      // Opening/Door tool tapping a Freeform Room's own wall -- places a
-      // basic, fixed-width, default-style window or door centered on the
-      // tap, on whichever straight run of the polyline it landed closest to.
-      // Tap-only (no drag-to-size) and default style/height only -- the
-      // rectangular system's many door/window styles are a much deeper,
-      // axis-aligned-specific machinery not yet ported to arbitrary angles.
+      // Opening/Door tool tapping a Freeform Room's own wall -- a plain tap
+      // places a fixed-width default-style window/door centered on the tap
+      // (see the "pending-freeform-opening" cases in onPointerMove/Up);
+      // tap-and-drag instead marks out the opening's own width, exactly
+      // like the rectangular system's own cut/door tools. Default style
+      // only -- the rectangular system's many door/window styles are a much
+      // deeper, axis-aligned-specific machinery not yet ported to arbitrary
+      // angles.
       if (kind === "freeform" && obj.userData.part === "wall" && (toolRef.current === "cut" || toolRef.current === "door")) {
         const rm = (state.freeformRooms || []).find((r) => r.id === obj.userData.id);
         if (!rm) return;
         const seg = nearestFreeformSegment(rm, hit.point);
         if (!seg) return;
-        const isDoor = toolRef.current === "door";
-        const width = isDoor ? 6 * FT : 3 * FT;
-        const margin = 0.5 * FT;
-        let u0 = seg.u - width / 2, u1 = seg.u + width / 2;
-        if (u0 < margin) { u0 = margin; u1 = u0 + width; }
-        if (u1 > seg.len - margin) { u1 = seg.len - margin; u0 = u1 - width; }
-        u0 = Math.max(0, u0); u1 = Math.min(seg.len, u1);
-        if (u1 - u0 < 1) return;
-        pushUndo();
-        if (!rm.openings) rm.openings = [];
-        const id = idSeq++;
-        rm.openings.push({
-          id, segIndex: seg.segIndex, u0, u1, isDoor,
-          height: isDoor ? doorHeightRef.current : openingHeightRef.current,
-        });
-        setSelectedFreeformOpeningId(id);
-        rebuild();
+        const { nrm } = freeformSegmentBasis(rm, seg.segIndex);
+        const plane = new THREE.Plane();
+        plane.setFromNormalAndCoplanarPoint(new THREE.Vector3(nrm.x, 0, nrm.z), hit.point);
+        dragState = {
+          type: "pending-freeform-opening", roomId: rm.id, segIndex: seg.segIndex, segLen: seg.len,
+          u: seg.u, isDoor: toolRef.current === "door", plane, startScreen: { x: e.clientX, y: e.clientY },
+        };
+        capture(e);
         return;
       }
 
@@ -8249,6 +8268,26 @@ export default function RoomBuilder() {
         return;
       }
 
+      if (dragState.type === "pending-freeform-opening") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const armed = {
+            type: "freeform-opening-draw", roomId: dragState.roomId, segIndex: dragState.segIndex,
+            segLen: dragState.segLen, isDoor: dragState.isDoor, plane: dragState.plane, u0: dragState.u, u1: dragState.u,
+          };
+          dragState = armed;
+          previewFreeformOpening = {
+            roomId: armed.roomId, segIndex: armed.segIndex, u0: armed.u0, u1: armed.u1, isDoor: armed.isDoor,
+            height: armed.isDoor ? doorHeightRef.current : openingHeightRef.current,
+          };
+          rebuild();
+        }
+        return;
+      }
+
       if (dragState.type === "pending-room-tool") {
         // still waiting on the hold (see tick()) -- a real drag before it
         // fires means the user meant to orbit/pan the camera, not draw, so
@@ -8455,6 +8494,22 @@ export default function RoomBuilder() {
         const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
         dragState.u1 = u;
         previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: doorHeightRef.current, isDoor: true };
+        rebuild();
+      } else if (dragState.type === "freeform-opening-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const rm = (state.freeformRooms || []).find((r) => r.id === dragState.roomId);
+        if (!rm) { dragState = null; previewFreeformOpening = null; return; }
+        const { p0, dir } = freeformSegmentBasis(rm, dragState.segIndex);
+        const local = toLocalXZ(pt);
+        const uRaw = (local.x - p0.x) * dir.x + (local.z - p0.z) * dir.z;
+        const u = Math.max(0, Math.min(dragState.segLen, snapValue(uRaw)));
+        dragState.u1 = u;
+        previewFreeformOpening = {
+          roomId: dragState.roomId, segIndex: dragState.segIndex,
+          u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), isDoor: dragState.isDoor,
+          height: dragState.isDoor ? doorHeightRef.current : openingHeightRef.current,
+        };
         rebuild();
       } else if (dragState.type === "balcony-draw") {
         const pt = new THREE.Vector3();
@@ -8822,6 +8877,45 @@ export default function RoomBuilder() {
             id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current,
             pillarShape: pillarShapeRef.current, pillarSize: pillarSizeRef.current, pillarCount: pillarCountRef.current,
           });
+        }
+      } else if (dragState.type === "pending-freeform-opening") {
+        // a tap with no meaningful drag -- place the same fixed-width
+        // default-style window/door the old tap-only behavior did.
+        pushUndo();
+        const rm = (state.freeformRooms || []).find((r) => r.id === dragState.roomId);
+        if (rm) {
+          const width = dragState.isDoor ? 6 * FT : 3 * FT;
+          const margin = 0.5 * FT;
+          let u0 = dragState.u - width / 2, u1 = dragState.u + width / 2;
+          if (u0 < margin) { u0 = margin; u1 = u0 + width; }
+          if (u1 > dragState.segLen - margin) { u1 = dragState.segLen - margin; u0 = u1 - width; }
+          u0 = Math.max(0, u0); u1 = Math.min(dragState.segLen, u1);
+          if (u1 - u0 >= 1) {
+            if (!rm.openings) rm.openings = [];
+            const id = idSeq++;
+            rm.openings.push({
+              id, segIndex: dragState.segIndex, u0, u1, isDoor: dragState.isDoor,
+              height: dragState.isDoor ? doorHeightRef.current : openingHeightRef.current,
+            });
+            setSelectedFreeformOpeningId(id);
+          }
+        }
+      } else if (dragState.type === "freeform-opening-draw") {
+        const rm = (state.freeformRooms || []).find((r) => r.id === dragState.roomId);
+        previewFreeformOpening = null;
+        if (rm) {
+          let [u0, u1] = [Math.min(dragState.u0, dragState.u1), Math.max(dragState.u0, dragState.u1)];
+          const margin = 0.5 * FT;
+          u0 = Math.max(margin, u0); u1 = Math.min(dragState.segLen - margin, u1);
+          if (u1 - u0 >= 1) {
+            if (!rm.openings) rm.openings = [];
+            const id = idSeq++;
+            rm.openings.push({
+              id, segIndex: dragState.segIndex, u0, u1, isDoor: dragState.isDoor,
+              height: dragState.isDoor ? doorHeightRef.current : openingHeightRef.current,
+            });
+            setSelectedFreeformOpeningId(id);
+          }
         }
       } else if (dragState.type === "pending-room-tool") {
         // released before the hold armed drawing, with no meaningful drag
