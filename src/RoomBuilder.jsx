@@ -10924,6 +10924,11 @@ export default function RoomBuilder() {
   const fitScale = Math.min(1, viewportSize.w / designWidth, viewportSize.h / DESIGN_HEIGHT);
   const RIBBON_SCALE = isCompact ? 2.2 : 1;
   const PANEL_SCALE = isCompact ? 2.2 : 1;
+  // narrows the panels another 30% on top of PANEL_SCALE above, since full
+  // PANEL_SCALE width still ran too wide on a phone -- applied to width
+  // only (not the zoom itself), so all the enlarged-for-touch content
+  // inside stays the same size and just wraps/scrolls in less space.
+  const PANEL_WIDTH_SCALE = isCompact ? 0.7 : 1;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
   // the Layers panel (level height, wall thickness, level reordering) stays
   // open by default even in compact mode -- unlike the right panel below,
@@ -10954,8 +10959,8 @@ export default function RoomBuilder() {
   // layer the panels simply float on top of, not something squeezed between
   // them) is what absorbs the extra width freed up there, same as it always
   // was the main content on desktop.
-  const rightPanelGap = rightPanelCollapsed ? 0 : rightPanelWidth * PANEL_SCALE;
-  const leftPanelGap = layersPanelCollapsed ? 0 : layersPanelWidth * PANEL_SCALE;
+  const rightPanelGap = rightPanelCollapsed ? 0 : rightPanelWidth * PANEL_SCALE * PANEL_WIDTH_SCALE;
+  const leftPanelGap = layersPanelCollapsed ? 0 : layersPanelWidth * PANEL_SCALE * PANEL_WIDTH_SCALE;
   const effectiveRibbonHeight = ribbonCollapsed ? 0 : RIBBON_HEIGHT * RIBBON_SCALE;
   // read inside the main effect's closure (mounted once), which otherwise
   // would only ever see this state's very first value -- used to keep the
@@ -11501,7 +11506,7 @@ export default function RoomBuilder() {
           // toggle button above -- this panel's own zoom would otherwise
           // double-multiply these already-final design-space offsets (width
           // is left alone since that's the one value meant to scale up).
-          position: "absolute", top: TOPBAR_HEIGHT / PANEL_SCALE, right: 0, bottom: effectiveRibbonHeight / PANEL_SCALE, width: rightPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT / PANEL_SCALE, right: 0, bottom: effectiveRibbonHeight / PANEL_SCALE, width: rightPanelWidth * PANEL_WIDTH_SCALE,
           background: "var(--bg-panel)", display: rightPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderLeft: "1px solid var(--divider-strong)",
           zoom: PANEL_SCALE,
@@ -11662,7 +11667,7 @@ export default function RoomBuilder() {
         style={{
           // top/bottom are divided by PANEL_SCALE -- see the matching
           // comment on the right panel above.
-          position: "absolute", top: TOPBAR_HEIGHT / PANEL_SCALE, left: 0, bottom: effectiveRibbonHeight / PANEL_SCALE, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT / PANEL_SCALE, left: 0, bottom: effectiveRibbonHeight / PANEL_SCALE, width: layersPanelWidth * PANEL_WIDTH_SCALE,
           background: "var(--bg-panel)",
           display: layersPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
