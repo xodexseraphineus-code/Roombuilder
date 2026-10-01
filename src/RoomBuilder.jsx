@@ -10883,24 +10883,47 @@ export default function RoomBuilder() {
 
   const RIBBON_HEIGHT = 64;
   const TOPBAR_HEIGHT = 44;
-  // The outer index.html/main.jsx wrapper already scales the whole app
-  // uniformly to fit a phone screen -- fine for the 3D viewport and top
-  // bar, but it makes the ribbon and side panels too small to tap, since
-  // it shrinks everything by the same factor rather than recognizing those
-  // are the controls a finger actually needs to hit. So on a narrow/phone
-  // viewport, the ribbon and the two side panels additionally zoom in by
-  // RIBBON_SCALE/PANEL_SCALE on top of that outer fit-to-screen scale --
-  // everything else (top bar, 3D view) stays at the plain uniform scale.
+  // The app is built against a fixed desktop-sized (1400x900) layout, so on
+  // a phone it's wrapped in a fixed-size frame that's uniformly scaled down
+  // to fit (see the stage/frame wrapper around this component's own return,
+  // below) -- fine for the 3D viewport and top bar, but it makes the ribbon
+  // and side panels too small to tap, since it shrinks everything by the
+  // same factor rather than recognizing those are the controls a finger
+  // actually needs to hit. So on a narrow/phone viewport, the ribbon and
+  // the two side panels additionally zoom in by RIBBON_SCALE/PANEL_SCALE on
+  // top of that outer fit-to-screen scale -- everything else (top bar, 3D
+  // view) stays at the plain uniform scale.
+  const BASE_DESIGN_WIDTH = 1400;
+  const DESIGN_HEIGHT = 900;
   const startsCompact = typeof window !== "undefined" && window.innerWidth < 1100;
   // tracks the real window size continuously (e.g. across a phone
   // rotation), unlike the panel-collapse defaults below, which are only a
   // one-time nudge the user's own later choice overrides.
   const [isCompact, setIsCompact] = useState(startsCompact);
+  const [viewportSize, setViewportSize] = useState(() => ({
+    w: typeof window !== "undefined" ? window.innerWidth : BASE_DESIGN_WIDTH,
+    h: typeof window !== "undefined" ? window.innerHeight : DESIGN_HEIGHT,
+  }));
   useEffect(() => {
-    const onResize = () => setIsCompact(window.innerWidth < 1100);
+    const onResize = () => {
+      setIsCompact(window.innerWidth < 1100);
+      setViewportSize({ w: window.innerWidth, h: window.innerHeight });
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+  // A phone's landscape screen is a lot wider (relative to its height) than
+  // this 1400x900 design -- scaling that fixed aspect ratio down to fit the
+  // screen's height (the binding constraint) leaves empty bands down the
+  // sides. Rather than waste that space, widen the design frame itself to
+  // exactly match the real screen's aspect ratio (eliminating the bands
+  // entirely) and hand the extra width to the one thing on screen that
+  // should actually use it: the Levels panel, not the 3D view itself
+  // (which should keep the same look/proportions it always had) and not
+  // the right panel (collapsed by default on a phone anyway).
+  const designWidth = isCompact ? Math.max(BASE_DESIGN_WIDTH, DESIGN_HEIGHT * (viewportSize.w / viewportSize.h)) : BASE_DESIGN_WIDTH;
+  const fitScale = Math.min(1, viewportSize.w / designWidth, viewportSize.h / DESIGN_HEIGHT);
+  const extraDesignWidth = isCompact ? Math.max(0, designWidth - BASE_DESIGN_WIDTH) : 0;
   const RIBBON_SCALE = isCompact ? 2.2 : 1;
   const PANEL_SCALE = isCompact ? 2.2 : 1;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
@@ -10927,9 +10950,14 @@ export default function RoomBuilder() {
   // rightPanelWidth/RIBBON_HEIGHT so it reclaims that space the moment
   // either one collapses, rather than leaving a dead gap where it used to be.
   // Each is additionally scaled by PANEL_SCALE/RIBBON_SCALE in compact mode
-  // to match the zoomed-in panel/ribbon's real on-screen footprint.
+  // to match the zoomed-in panel/ribbon's real on-screen footprint. The
+  // Levels panel also absorbs the extra design-space width freed up by
+  // widening the frame to the real screen's aspect ratio above, in its own
+  // pre-zoom units (so that, after its own PANEL_SCALE zoom is applied, it
+  // comes out to exactly that many extra pixels on screen).
+  const effectiveLayersPanelWidth = layersPanelWidth + extraDesignWidth / PANEL_SCALE;
   const rightPanelGap = rightPanelCollapsed ? 0 : rightPanelWidth * PANEL_SCALE;
-  const leftPanelGap = layersPanelCollapsed ? 0 : layersPanelWidth * PANEL_SCALE;
+  const leftPanelGap = layersPanelCollapsed ? 0 : effectiveLayersPanelWidth * PANEL_SCALE;
   const effectiveRibbonHeight = ribbonCollapsed ? 0 : RIBBON_HEIGHT * RIBBON_SCALE;
   // read inside the main effect's closure (mounted once), which otherwise
   // would only ever see this state's very first value -- used to keep the
@@ -11113,6 +11141,8 @@ export default function RoomBuilder() {
   }
 
   return (
+    <div style={{ width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" }}>
+    <div style={{ width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` }}>
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
@@ -11620,7 +11650,7 @@ export default function RoomBuilder() {
       )}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: effectiveRibbonHeight, width: layersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: effectiveRibbonHeight, width: effectiveLayersPanelWidth,
           background: "var(--bg-panel)",
           display: layersPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
@@ -13297,6 +13327,8 @@ export default function RoomBuilder() {
           }}
         />
       )}
+    </div>
+    </div>
     </div>
   );
 }
