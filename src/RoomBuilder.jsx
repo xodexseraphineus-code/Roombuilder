@@ -4522,27 +4522,6 @@ export default function RoomBuilder() {
       const top = Math.min(wallHeight, bottom + o.height);
       return { bottom, top };
     }
-    // the plan-view rectangle a window/door punches through the wall's
-    // thickness -- a small quad centered on the segment's own centerline.
-    // Unlike a flat rectangular-room panel, this quad is cut into the same
-    // Shape as the wall ring's own interior air-gap hole (innerHolePath), so
-    // it has to stay strictly inside the ring instead of overshooting past
-    // its faces: two holes that touch or overlap make the triangulation
-    // (Earcut, via ExtrudeGeometry) undefined -- in practice it draws the
-    // hole's edge outline but fills the interior solid instead of cutting
-    // it, which is exactly the "frame with no cutout" symptom this fixes.
-    function freeformOpeningHoleQuad(rm, o, thickness) {
-      const { p0, dir, nrm } = freeformSegmentBasis(rm, o.segIndex);
-      const half = Math.max(0.02, thickness / 2 - 0.02);
-      const a = { x: p0.x + dir.x * o.u0, z: p0.z + dir.z * o.u0 };
-      const b = { x: p0.x + dir.x * o.u1, z: p0.z + dir.z * o.u1 };
-      return [
-        { x: a.x + nrm.x * half, z: a.z + nrm.z * half },
-        { x: b.x + nrm.x * half, z: b.z + nrm.z * half },
-        { x: b.x - nrm.x * half, z: b.z - nrm.z * half },
-        { x: a.x - nrm.x * half, z: a.z - nrm.z * half },
-      ];
-    }
     // which straight run of a freeform room's wall a world-space tap landed
     // closest to, and how far along that run (its own local "u") -- clamped
     // to the run's own length, the same "nearest point on a segment" test
@@ -4606,33 +4585,59 @@ export default function RoomBuilder() {
         if (previewFreeformOpening && previewFreeformOpening.roomId === rm.id) openings.push(previewFreeformOpening);
         const vSpans = openings.map((o) => ({ o, ...freeformOpeningVSpan(o, height) }));
         const breakpoints = Array.from(new Set([0, height, ...vSpans.flatMap((v) => [v.bottom, v.top])].map((v) => +v.toFixed(4)))).sort((a, b) => a - b);
-        for (let bi = 0; bi < breakpoints.length - 1; bi++) {
-          const bandLo = breakpoints[bi], bandHi = breakpoints[bi + 1];
-          const bandH = bandHi - bandLo;
-          if (bandH < 0.02) continue;
-          const active = vSpans.filter((v) => v.bottom <= bandLo + 1e-3 && v.top >= bandHi - 1e-3);
-          let bandShape = wallShape;
-          if (active.length) {
-            bandShape = loopToShape(outer);
-            bandShape.holes.push(innerHolePath);
-            active.forEach((v) => {
-              const quad = freeformOpeningHoleQuad(rm, v.o, thickness);
-              const h = new THREE.Path();
-              quad.forEach((p, i) => { if (i === 0) h.moveTo(p.x, -p.z); else h.lineTo(p.x, -p.z); });
-              h.closePath();
-              bandShape.holes.push(h);
-            });
-          }
-          const wallGeo = new THREE.ExtrudeGeometry(bandShape, { depth: bandH, bevelEnabled: false, curveSegments: 1, steps: 1 });
-          wallGeo.rotateX(-Math.PI / 2);
-          const wallMesh = new THREE.Mesh(wallGeo, wallMatHere);
-          wallMesh.position.y = bandLo;
+        const addWallPiece = (wallMesh) => {
           wallMesh.castShadow = true;
           wallMesh.receiveShadow = true;
           addEdges(wallMesh);
           wallMesh.userData = { kind: "freeform", part: "wall", id: rm.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
           sceneGroup.add(wallMesh);
           if (isPickableTarget) pickList.push(wallMesh);
+        };
+        for (let bi = 0; bi < breakpoints.length - 1; bi++) {
+          const bandLo = breakpoints[bi], bandHi = breakpoints[bi + 1];
+          const bandH = bandHi - bandLo;
+          if (bandH < 0.02) continue;
+          const active = vSpans.filter((v) => v.bottom <= bandLo + 1e-3 && v.top >= bandHi - 1e-3);
+          if (!active.length) {
+            const wallGeo = new THREE.ExtrudeGeometry(wallShape, { depth: bandH, bevelEnabled: false, curveSegments: 1, steps: 1 });
+            wallGeo.rotateX(-Math.PI / 2);
+            const wallMesh = new THREE.Mesh(wallGeo, wallMatHere);
+            wallMesh.position.y = bandLo;
+            addWallPiece(wallMesh);
+            continue;
+          }
+          // A door/window hole never touches the ring's own outer or inner
+          // boundary (deliberately, to keep it a well-formed, non-overlapping
+          // hole for Earcut) -- but that also means it's a fully enclosed
+          // "island" in the Shape, so ExtrudeGeometry only carves a cavity
+          // visible from directly above/below. The ring's OUTER contour is
+          // never itself interrupted, so its own side-wall extrusion stays
+          // one continuous, unbroken strip -- the wall still looks (and
+          // raycasts) solid from any ordinary side-on view, even though the
+          // hole is real in the horizontal cross-section. So instead of
+          // relying on ExtrudeGeometry's hole support for a band that has an
+          // active opening, build that band from separate flat panels per
+          // segment (skipping the opening's own span), which genuinely
+          // leaves a gap no matter which direction it's viewed from -- the
+          // same approach the rectangular room system uses for its own
+          // walls. Each full-length panel is extended half a thickness past
+          // its own segment's ends so neighboring segments still overlap
+          // into a filled corner, approximating the ring's miter.
+          const corner = thickness / 2;
+          for (let i = 0; i < rm.points.length; i++) {
+            const { p0, dir, len } = freeformSegmentBasis(rm, i);
+            const segActive = active.filter((v) => v.o.segIndex === i).sort((x, y) => x.o.u0 - y.o.u0);
+            if (!segActive.length) {
+              addWallPiece(makeFreeformPanel(p0, dir, -corner, len + corner, thickness, bandLo, bandHi, wallMatHere));
+              continue;
+            }
+            let cursor = -corner;
+            segActive.forEach((v) => {
+              if (v.o.u0 > cursor + 0.001) addWallPiece(makeFreeformPanel(p0, dir, cursor, v.o.u0, thickness, bandLo, bandHi, wallMatHere));
+              cursor = v.o.u1;
+            });
+            if (cursor < len + corner - 0.001) addWallPiece(makeFreeformPanel(p0, dir, cursor, len + corner, thickness, bandLo, bandHi, wallMatHere));
+          }
         }
 
         // while the Opening/Door tool is active, an invisible, much thicker
