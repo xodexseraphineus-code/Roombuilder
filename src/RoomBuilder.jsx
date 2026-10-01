@@ -11350,15 +11350,17 @@ export default function RoomBuilder() {
 
       <div ref={mountRef} style={{ position: "absolute", inset: 0, touchAction: "none" }} />
 
-      {/* Command UI -- a typed command box plus the mic button, docked
-          below the ViewCube (not the top bar directly) so the two never
-          overlap, and still inset from the right edge, clear of the lens
-          pill row centered above the viewport. Mic: tap to start (ring
-          turns orange while active), speak, tap again to stop and submit.
-          Text box: type an instruction and hit Enter or the send button --
-          same Claude pipeline either way, useful wherever speech input
-          isn't available (e.g. this sandbox). */}
-      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 12, right: rightPanelGap + 24, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+      {/* Command UI -- a typed command box plus the mic button, docked in
+          the same row as the Form/Space/Lens/... pills just under the top
+          bar (used to float lower, below the ViewCube, in the middle of
+          the viewport itself -- just clutter sitting over the 3D view with
+          nothing else around it). Right offset clears the ViewCube's own
+          footprint so the two don't overlap. Mic: tap to start (ring turns
+          orange while active), speak, tap again to stop and submit. Text
+          box: type an instruction and hit Enter or the send button -- same
+          Claude pipeline either way, useful wherever speech input isn't
+          available (e.g. this sandbox). */}
+      <div style={{ position: "absolute", top: TOPBAR_HEIGHT + 10, right: rightPanelGap + VIEWCUBE_PAD + VIEWCUBE_SIZE + 16, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <input
             type="text"
