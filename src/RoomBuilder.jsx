@@ -415,7 +415,7 @@ function angleDiffDeg(a, b) {
 // its own six real swatch colors -- without applying anything itself; drag
 // anywhere on the colorful disc itself to spin it, with a bit of momentum
 // once released, like a real dial.
-function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, mode, onToggleMode, hueShift, satMul, lightMul, onSlider }) {
+function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, mode, onToggleMode, hueShift, satMul, lightMul, onSlider, compact }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     const id = requestAnimationFrame(() => setEntered(true));
@@ -492,6 +492,14 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, mod
   }
 
   const size = 272; // 20% smaller than the original 340
+  // on a phone, this already renders at the same fitScale as the rest of
+  // the (unzoomed) 3D viewport -- no extra zoom like the ribbon/panels get
+  // -- but that alone still reads as a huge disc dominating the now much
+  // narrower side panel, so shrink it down further, visually, with an
+  // extra transform scale (below) that leaves all its internal wedge/ring
+  // radius math untouched.
+  const WHEEL_COMPACT_SCALE = 0.65;
+  const wheelScale = compact ? WHEEL_COMPACT_SCALE : 1;
   const cx = size / 2, cy = size / 2;
   const hubR = 19;
   const greyR0 = 19, greyR1 = 34;
@@ -535,7 +543,7 @@ function ThemeWheelOverlay({ pos, onPosChange, onPick, onClose, activeTheme, mod
       <div
         style={{
           width: size, height: size, position: "relative",
-          transform: `scale(${entered ? 1 : 0.35})`,
+          transform: `scale(${(entered ? 1 : 0.35) * wheelScale})`,
           opacity: entered ? 1 : 0,
           transition: "transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.25s ease",
           filter: "drop-shadow(0 8px 24px rgba(0,0,0,0.35))",
@@ -10924,11 +10932,12 @@ export default function RoomBuilder() {
   const fitScale = Math.min(1, viewportSize.w / designWidth, viewportSize.h / DESIGN_HEIGHT);
   const RIBBON_SCALE = isCompact ? 2.2 : 1;
   const PANEL_SCALE = isCompact ? 2.2 : 1;
-  // narrows the panels another 30% on top of PANEL_SCALE above, since full
-  // PANEL_SCALE width still ran too wide on a phone -- applied to width
-  // only (not the zoom itself), so all the enlarged-for-touch content
-  // inside stays the same size and just wraps/scrolls in less space.
-  const PANEL_WIDTH_SCALE = isCompact ? 0.7 : 1;
+  // narrows the panels another 30%, then another 15% on top of that
+  // (0.7 * 0.85), on top of PANEL_SCALE above, since full PANEL_SCALE width
+  // still ran too wide on a phone -- applied to width only (not the zoom
+  // itself), so all the enlarged-for-touch content inside stays the same
+  // size and just wraps/scrolls in less space.
+  const PANEL_WIDTH_SCALE = isCompact ? 0.7 * 0.85 : 1;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
   // the Layers panel (level height, wall thickness, level reordering) stays
   // open by default even in compact mode -- unlike the right panel below,
@@ -13329,6 +13338,7 @@ export default function RoomBuilder() {
         <ThemeWheelOverlay
           pos={themeWheelPos}
           onPosChange={setThemeWheelPos}
+          compact={isCompact}
           activeTheme={themeAnchor}
           mode={themeWheelMode}
           onToggleMode={() => setThemeWheelMode((m) => (m === "hue" ? "theme" : "hue"))}
