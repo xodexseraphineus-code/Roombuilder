@@ -11479,7 +11479,12 @@ export default function RoomBuilder() {
             // this panel collapses the cube shifts right to reclaim the
             // freed space (see rightPanelGap) and would otherwise sit right
             // on top of a button placed up there.
-            position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 10, right: 8, zIndex: 5,
+            // top/right offsets are divided by PANEL_SCALE because this
+            // button carries its own zoom: PANEL_SCALE below, which would
+            // otherwise multiply these already-final design-space offsets
+            // a second time (width/height are left alone since those SHOULD
+            // scale up by PANEL_SCALE, for a bigger tap target).
+            position: "absolute", top: (TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 10) / PANEL_SCALE, right: 8 / PANEL_SCALE, zIndex: 5,
             width: 24, height: 24, minWidth: 24, padding: 0, borderRadius: "50%",
             display: "flex", alignItems: "center", justifyContent: "center",
             background: "var(--bg-control)", color: "var(--text-secondary)",
@@ -11492,7 +11497,11 @@ export default function RoomBuilder() {
       )}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, right: 0, bottom: effectiveRibbonHeight, width: rightPanelWidth,
+          // top/bottom are divided by PANEL_SCALE for the same reason as the
+          // toggle button above -- this panel's own zoom would otherwise
+          // double-multiply these already-final design-space offsets (width
+          // is left alone since that's the one value meant to scale up).
+          position: "absolute", top: TOPBAR_HEIGHT / PANEL_SCALE, right: 0, bottom: effectiveRibbonHeight / PANEL_SCALE, width: rightPanelWidth,
           background: "var(--bg-panel)", display: rightPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderLeft: "1px solid var(--divider-strong)",
           zoom: PANEL_SCALE,
@@ -11635,7 +11644,10 @@ export default function RoomBuilder() {
           onClick={() => setLayersPanelCollapsed(false)}
           title="Show levels panel"
           style={{
-            position: "absolute", top: TOPBAR_HEIGHT + 10, left: 8, zIndex: 5,
+            // see the matching comment on the right panel's toggle button --
+            // divided by PANEL_SCALE so this button's own zoom doesn't
+            // double-multiply these already-final design-space offsets.
+            position: "absolute", top: (TOPBAR_HEIGHT + 10) / PANEL_SCALE, left: 8 / PANEL_SCALE, zIndex: 5,
             width: 24, height: 24, minWidth: 24, padding: 0, borderRadius: "50%",
             display: "flex", alignItems: "center", justifyContent: "center",
             background: "var(--bg-control)", color: "var(--text-secondary)",
@@ -11648,7 +11660,9 @@ export default function RoomBuilder() {
       )}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: effectiveRibbonHeight, width: layersPanelWidth,
+          // top/bottom are divided by PANEL_SCALE -- see the matching
+          // comment on the right panel above.
+          position: "absolute", top: TOPBAR_HEIGHT / PANEL_SCALE, left: 0, bottom: effectiveRibbonHeight / PANEL_SCALE, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: layersPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
