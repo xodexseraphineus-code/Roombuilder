@@ -10883,25 +10883,31 @@ export default function RoomBuilder() {
 
   const RIBBON_HEIGHT = 64;
   const TOPBAR_HEIGHT = 44;
-  // a phone in landscape (where this is actually usable -- see the
-  // manifest's own orientation lock) is still much narrower than the
-  // desktop-sized layout this was built against, so both side panels start
-  // collapsed there to give the 3D view and ribbon toolbar the width they
-  // need; this only sets the *initial* state; the user's own expand/collapse
-  // choice after that sticks, same as on desktop.
+  // The outer index.html/main.jsx wrapper already scales the whole app
+  // uniformly to fit a phone screen -- fine for the 3D viewport and top
+  // bar, but it makes the ribbon and side panels too small to tap, since
+  // it shrinks everything by the same factor rather than recognizing those
+  // are the controls a finger actually needs to hit. So on a narrow/phone
+  // viewport, the ribbon and the two side panels additionally zoom in by
+  // RIBBON_SCALE/PANEL_SCALE on top of that outer fit-to-screen scale --
+  // everything else (top bar, 3D view) stays at the plain uniform scale.
   const startsCompact = typeof window !== "undefined" && window.innerWidth < 1100;
-  // unlike the panel-collapse default above (a one-time nudge the user's own
-  // later choice overrides), the zoom level has no user preference to step
-  // around, so it tracks the real window size continuously -- e.g. across a
-  // phone rotation -- rather than freezing whatever it was at mount.
+  // tracks the real window size continuously (e.g. across a phone
+  // rotation), unlike the panel-collapse defaults below, which are only a
+  // one-time nudge the user's own later choice overrides.
   const [isCompact, setIsCompact] = useState(startsCompact);
   useEffect(() => {
     const onResize = () => setIsCompact(window.innerWidth < 1100);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+  const RIBBON_SCALE = isCompact ? 2.2 : 1;
+  const PANEL_SCALE = isCompact ? 2.2 : 1;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
-  const [layersPanelCollapsed, setLayersPanelCollapsed] = useState(startsCompact);
+  // the Layers panel (level height, wall thickness, level reordering) stays
+  // open by default even in compact mode -- unlike the right panel below,
+  // it's a real working control, not decorative.
+  const [layersPanelCollapsed, setLayersPanelCollapsed] = useState(false);
   const LAYERS_PANEL_COLLAPSED_WIDTH = 30;
   const panelResizeRef = useRef(null);
   // right-docked panel -- presets/Recent live here now (see the mockup's
@@ -10920,9 +10926,11 @@ export default function RoomBuilder() {
   // strip, hint text, theme wheel, ...) reads these instead of the raw
   // rightPanelWidth/RIBBON_HEIGHT so it reclaims that space the moment
   // either one collapses, rather than leaving a dead gap where it used to be.
-  const rightPanelGap = rightPanelCollapsed ? 0 : rightPanelWidth;
-  const leftPanelGap = layersPanelCollapsed ? 0 : layersPanelWidth;
-  const effectiveRibbonHeight = ribbonCollapsed ? 0 : RIBBON_HEIGHT;
+  // Each is additionally scaled by PANEL_SCALE/RIBBON_SCALE in compact mode
+  // to match the zoomed-in panel/ribbon's real on-screen footprint.
+  const rightPanelGap = rightPanelCollapsed ? 0 : rightPanelWidth * PANEL_SCALE;
+  const leftPanelGap = layersPanelCollapsed ? 0 : layersPanelWidth * PANEL_SCALE;
+  const effectiveRibbonHeight = ribbonCollapsed ? 0 : RIBBON_HEIGHT * RIBBON_SCALE;
   // read inside the main effect's closure (mounted once), which otherwise
   // would only ever see this state's very first value -- used to keep the
   // ViewCube clear of the right panel.
@@ -11105,7 +11113,7 @@ export default function RoomBuilder() {
   }
 
   return (
-    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none", zoom: isCompact ? 1.4 : 1 }}>
+    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
@@ -11262,6 +11270,13 @@ export default function RoomBuilder() {
           display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden;
           background: var(--bg-panel);
           border-top: 1px solid var(--splitter);
+          /* on a phone, the uniform whole-app scale (see main.jsx) makes
+             this too small to tap -- zoom in further here specifically
+             (zoom actually affects layout, unlike transform, so this
+             element's own height: ${RIBBON_HEIGHT}px above renders at
+             ${RIBBON_HEIGHT}px * RIBBON_SCALE, and everything else just
+             keeps reading effectiveRibbonHeight to stay clear of it). */
+          zoom: ${RIBBON_SCALE};
         }
         .ribbon-section { display: flex; align-items: center; gap: 12px; padding: 0 12px; flex-shrink: 0; }
         .ribbon-divider { width: 1px; align-self: stretch; margin: 8px 0; background: var(--splitter); flex-shrink: 0; }
@@ -11441,6 +11456,7 @@ export default function RoomBuilder() {
             display: "flex", alignItems: "center", justifyContent: "center",
             background: "var(--bg-control)", color: "var(--text-secondary)",
             boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+            zoom: PANEL_SCALE,
           }}
         >
           <ChevronLeft size={14} strokeWidth={2} />
@@ -11451,6 +11467,7 @@ export default function RoomBuilder() {
           position: "absolute", top: TOPBAR_HEIGHT, right: 0, bottom: effectiveRibbonHeight, width: rightPanelWidth,
           background: "var(--bg-panel)", display: rightPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderLeft: "1px solid var(--divider-strong)",
+          zoom: PANEL_SCALE,
         }}
       >
         <div
@@ -11595,6 +11612,7 @@ export default function RoomBuilder() {
             display: "flex", alignItems: "center", justifyContent: "center",
             background: "var(--bg-control)", color: "var(--text-secondary)",
             boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+            zoom: PANEL_SCALE,
           }}
         >
           <ChevronRight size={14} strokeWidth={2} />
@@ -11606,6 +11624,7 @@ export default function RoomBuilder() {
           background: "var(--bg-panel)",
           display: layersPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
+          zoom: PANEL_SCALE,
         }}
       >
         <div
@@ -11996,15 +12015,8 @@ export default function RoomBuilder() {
         }}
       >
         {/* prototyping nav tabs -- for playing with ideas only, not wired
-            to a real Levels/Lens/Intent/Explore mode switch yet. Centered
-            absolutely so it's unaffected by the side panels' widths, which
-            also means it has no collision-avoidance with the project-name
-            controls or the view toggles it's centered between -- fine on a
-            wide desktop window, but it starts overlapping them well before
-            a phone's zoomed-in top bar runs out of room, so it's dropped
-            there rather than fought into fitting (it's not wired to
-            anything a phone user would need yet anyway). */}
-        {!isCompact && <div style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)", display: "flex", gap: 2, pointerEvents: "auto" }}>
+            to a real Levels/Lens/Intent/Explore mode switch yet. */}
+        <div style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)", display: "flex", gap: 2, pointerEvents: "auto" }}>
           {["Build", "Levels", "Lens", "Intent", "Explore"].map((t) => (
             <button
               key={t}
@@ -12020,7 +12032,7 @@ export default function RoomBuilder() {
               {t.toUpperCase()}
             </button>
           ))}
-        </div>}
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4, pointerEvents: "auto", position: "relative" }}>
           {editingProjectName ? (
             <input
