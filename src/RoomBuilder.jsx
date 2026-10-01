@@ -10916,14 +10916,12 @@ export default function RoomBuilder() {
   // this 1400x900 design -- scaling that fixed aspect ratio down to fit the
   // screen's height (the binding constraint) leaves empty bands down the
   // sides. Rather than waste that space, widen the design frame itself to
-  // exactly match the real screen's aspect ratio (eliminating the bands
-  // entirely) and hand the extra width to the one thing on screen that
-  // should actually use it: the Levels panel, not the 3D view itself
-  // (which should keep the same look/proportions it always had) and not
-  // the right panel (collapsed by default on a phone anyway).
+  // exactly match the real screen's aspect ratio, eliminating the bands
+  // entirely. The 3D view is a full-bleed layer (not sized off the panel
+  // gaps), so it alone absorbs the extra width automatically -- the side
+  // panels and ribbon keep their own fixed, proportionally-scaled sizes.
   const designWidth = isCompact ? Math.max(BASE_DESIGN_WIDTH, DESIGN_HEIGHT * (viewportSize.w / viewportSize.h)) : BASE_DESIGN_WIDTH;
   const fitScale = Math.min(1, viewportSize.w / designWidth, viewportSize.h / DESIGN_HEIGHT);
-  const extraDesignWidth = isCompact ? Math.max(0, designWidth - BASE_DESIGN_WIDTH) : 0;
   const RIBBON_SCALE = isCompact ? 2.2 : 1;
   const PANEL_SCALE = isCompact ? 2.2 : 1;
   const [layersPanelWidth, setLayersPanelWidth] = useState(148);
@@ -10950,14 +10948,14 @@ export default function RoomBuilder() {
   // rightPanelWidth/RIBBON_HEIGHT so it reclaims that space the moment
   // either one collapses, rather than leaving a dead gap where it used to be.
   // Each is additionally scaled by PANEL_SCALE/RIBBON_SCALE in compact mode
-  // to match the zoomed-in panel/ribbon's real on-screen footprint. The
-  // Levels panel also absorbs the extra design-space width freed up by
-  // widening the frame to the real screen's aspect ratio above, in its own
-  // pre-zoom units (so that, after its own PANEL_SCALE zoom is applied, it
-  // comes out to exactly that many extra pixels on screen).
-  const effectiveLayersPanelWidth = layersPanelWidth + extraDesignWidth / PANEL_SCALE;
+  // to match the zoomed-in panel/ribbon's real on-screen footprint. Both
+  // panels stay narrow, pinned to their own edge, at that same proportional
+  // size regardless of the frame-widening above -- the 3D view (a full-bleed
+  // layer the panels simply float on top of, not something squeezed between
+  // them) is what absorbs the extra width freed up there, same as it always
+  // was the main content on desktop.
   const rightPanelGap = rightPanelCollapsed ? 0 : rightPanelWidth * PANEL_SCALE;
-  const leftPanelGap = layersPanelCollapsed ? 0 : effectiveLayersPanelWidth * PANEL_SCALE;
+  const leftPanelGap = layersPanelCollapsed ? 0 : layersPanelWidth * PANEL_SCALE;
   const effectiveRibbonHeight = ribbonCollapsed ? 0 : RIBBON_HEIGHT * RIBBON_SCALE;
   // read inside the main effect's closure (mounted once), which otherwise
   // would only ever see this state's very first value -- used to keep the
@@ -11650,7 +11648,7 @@ export default function RoomBuilder() {
       )}
       <div
         style={{
-          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: effectiveRibbonHeight, width: effectiveLayersPanelWidth,
+          position: "absolute", top: TOPBAR_HEIGHT, left: 0, bottom: effectiveRibbonHeight, width: layersPanelWidth,
           background: "var(--bg-panel)",
           display: layersPanelCollapsed ? "none" : "flex", flexDirection: "column", overflow: "hidden",
           borderRight: "1px solid var(--divider-strong)",
