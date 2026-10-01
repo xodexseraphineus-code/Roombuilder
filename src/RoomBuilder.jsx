@@ -1447,7 +1447,7 @@ export default function RoomBuilder() {
       applyViewCubeTheme(uiThemeRef.current);
       const size = VIEWCUBE_SIZE;
       const x = canvasWidth - rightPanelWidthRef.current - VIEWCUBE_PAD - size;
-      const y = canvasHeight - TOPBAR_HEIGHT - VIEWCUBE_PAD - size; // WebGL viewport Y is bottom-up
+      const y = canvasHeight - VIEWCUBE_TOP_OFFSET - size; // WebGL viewport Y is bottom-up
       // composite over whatever the main render already put in this corner
       // (it always renders full-canvas first, see tick()) rather than
       // clearing to a flat color first -- autoClear would otherwise paint
@@ -10891,6 +10891,15 @@ export default function RoomBuilder() {
 
   const RIBBON_HEIGHT = 64;
   const TOPBAR_HEIGHT = 44;
+  // the ViewCube used to sit right under the top bar (TOPBAR_HEIGHT +
+  // VIEWCUBE_PAD), but now that the Form/Space/Lens pills and the command
+  // box also dock in that same band, the cube's top edge landed inside
+  // that row's own vertical span -- not actually clipped by anything, but
+  // crowded enough to read as overlapping it. Push the cube down to clear
+  // the row's height (its tallest element is the 40px-tall mic button)
+  // plus a clean gap, so it's unambiguously floating lower, in open
+  // viewport space.
+  const VIEWCUBE_TOP_OFFSET = TOPBAR_HEIGHT + 10 + 40 + 14;
   // The app is built against a fixed desktop-sized (1400x900) layout, so on
   // a phone it's wrapped in a fixed-size frame that's uniformly scaled down
   // to fit (see the stage/frame wrapper around this component's own return,
@@ -11500,7 +11509,7 @@ export default function RoomBuilder() {
             // otherwise multiply these already-final design-space offsets
             // a second time (width/height are left alone since those SHOULD
             // scale up by PANEL_SCALE, for a bigger tap target).
-            position: "absolute", top: (TOPBAR_HEIGHT + VIEWCUBE_PAD + VIEWCUBE_SIZE + 10) / PANEL_SCALE, right: 8 / PANEL_SCALE, zIndex: 5,
+            position: "absolute", top: (VIEWCUBE_TOP_OFFSET + VIEWCUBE_SIZE + 10) / PANEL_SCALE, right: 8 / PANEL_SCALE, zIndex: 5,
             width: 24, height: 24, minWidth: 24, padding: 0, borderRadius: "50%",
             display: "flex", alignItems: "center", justifyContent: "center",
             background: "var(--bg-control)", color: "var(--text-secondary)",
@@ -12371,7 +12380,7 @@ export default function RoomBuilder() {
         <div
           title="Drag to orbit -- click a face, edge, or corner for that view"
           style={{
-            position: "absolute", top: TOPBAR_HEIGHT + VIEWCUBE_PAD, right: rightPanelGap + VIEWCUBE_PAD,
+            position: "absolute", top: VIEWCUBE_TOP_OFFSET, right: rightPanelGap + VIEWCUBE_PAD,
             width: VIEWCUBE_SIZE, height: VIEWCUBE_SIZE, zIndex: 6, cursor: "grab", touchAction: "none",
           }}
           onPointerDown={(e) => {
