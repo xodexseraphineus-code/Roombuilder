@@ -11161,9 +11161,18 @@ export default function RoomBuilder() {
     }
   }
 
+  // The fixed-size design frame + scale-to-fit below exists only to make a
+  // phone usable -- on anything wide enough to not be isCompact (tablets,
+  // desktop), it would otherwise force the ORIGINAL, always-fluid layout
+  // into a fixed 1400x900 box and letterbox it with black bars on any
+  // screen whose aspect ratio isn't exactly 1400:900, something the app
+  // never did before this phone work existed. So outside of compact mode,
+  // both wrapper divs collapse to plain 100%/100% pass-throughs (no fixed
+  // dimensions, no transform, no centering, no black background),
+  // reproducing the original, unwrapped, edge-to-edge fluid layout exactly.
   return (
-    <div style={{ width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" }}>
-    <div style={{ width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` }}>
+    <div style={isCompact ? { width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" } : { width: "100%", height: "100%" }}>
+    <div style={isCompact ? { width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` } : { width: "100%", height: "100%" }}>
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
