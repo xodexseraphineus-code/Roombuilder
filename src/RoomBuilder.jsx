@@ -1264,11 +1264,22 @@ export default function RoomBuilder() {
   const [arActive, setArActive] = useState(false);
   // plain DOM text, not a WebGL object or window.alert -- both of those
   // can end up invisible/suppressed during an XR session transition, so
-  // this is the one piece of UI that stays rendered (via .ar-overlay,
-  // exempted from the chrome-hiding rule above) the whole time AR is
+  // this is one piece of UI that always stays rendered (the rest of the
+  // normal UI also stays up throughout AR, composited over the camera
+  // feed via the WebXR dom-overlay feature) the whole time AR is
   // starting up or active, to actually see what's happening instead of
   // guessing from a frozen-looking screen.
   const [arStatus, setArStatus] = useState("");
+  // setArStatus triggers a re-render of this whole (large) component, so
+  // the hit-test-miss frame loop below -- which used to call it on a
+  // timer regardless of whether the text had actually changed -- was
+  // forcing a few extra re-renders per second for nothing, on top of
+  // everything AR itself costs. Routing every status update through here
+  // skips the setState entirely once the message stops changing.
+  const arStatusRef = useRef("");
+  const setArStatusIfChanged = (msg) => {
+    if (arStatusRef.current !== msg) { arStatusRef.current = msg; setArStatus(msg); }
+  };
   useEffect(() => {
     if (navigator.xr && navigator.xr.isSessionSupported) {
       navigator.xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
@@ -10876,6 +10887,7 @@ export default function RoomBuilder() {
     scene.add(arReticle);
     const savedBackground = scene.background;
     const savedFog = scene.fog;
+    const savedShadowsEnabled = renderer.shadowMap.enabled;
     let arSession = null;
     let arHitTestSource = null;
     let arPlaced = false;
@@ -10886,27 +10898,40 @@ export default function RoomBuilder() {
       if (majorGrid) majorGrid.visible = v;
     }
 
+    // Target size (meters) for the LONGER footprint dimension once placed
+    // -- a dollhouse view you can stand outside of and look down into,
+    // rather than true 1:1 scale (which, for anything room-sized or
+    // bigger, means standing either deep inside it or far enough back
+    // that the phone's tracking has to cover real distance to see it all).
+    const AR_DOLLHOUSE_SIZE = 0.9144; // 3ft
+    let arScale = 1;
+
     function onArSelect() {
-      setArStatus(arReticle.visible ? "Placed -- walk around to view it" : "No surface detected yet -- point the camera at the ground and wait for the ring");
+      setArStatusIfChanged(arReticle.visible ? "Placed -- walk around to view it" : "No surface detected yet -- point the camera at the ground and wait for the ring");
       if (arReticle.visible && !arPlaced) {
+        const bbox = new THREE.Box3();
+        floorGroups.forEach((g) => bbox.expandByObject(g));
+        const size = new THREE.Vector3();
+        bbox.getSize(size);
+        arScale = AR_DOLLHOUSE_SIZE / Math.max(size.x, size.z, 0.001);
+        scene.scale.setScalar(arScale);
+
         // Placing the building's own origin (its footprint center) right at
         // the tapped point put the viewer inside it whenever the tap landed
         // close to their own feet, which it usually does. Push the
         // building's center further away from the viewer, along the same
-        // ground direction from camera to tap point, by half its footprint
-        // so its NEAR edge lands at the tap instead -- the whole thing then
-        // recedes away from the viewer, who stays outside looking at it.
+        // ground direction from camera to tap point, by half its (now
+        // dollhouse-scaled) footprint so its NEAR edge lands at the tap
+        // instead -- it then recedes away from the viewer, who stays
+        // outside looking at it, at a scale small enough to see all of
+        // from a couple of steps back either way.
         const hitPos = new THREE.Vector3().setFromMatrixPosition(arReticle.matrix);
         const xrCam = renderer.xr.getCamera(camera);
         const camPos = new THREE.Vector3();
         xrCam.getWorldPosition(camPos);
         const dir = new THREE.Vector3(hitPos.x - camPos.x, 0, hitPos.z - camPos.z);
         if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1); else dir.normalize();
-        const bbox = new THREE.Box3();
-        floorGroups.forEach((g) => bbox.expandByObject(g));
-        const size = new THREE.Vector3();
-        bbox.getSize(size);
-        const pushDist = Math.max(size.x, size.z) / 2 + 1;
+        const pushDist = (Math.max(size.x, size.z) * arScale) / 2 + 0.15;
         scene.position.set(hitPos.x + dir.x * pushDist, hitPos.y, hitPos.z + dir.z * pushDist);
         arPlaced = true;
         arReticle.visible = false;
@@ -10921,10 +10946,10 @@ export default function RoomBuilder() {
         if (hitTestResults.length) {
           arReticle.visible = true;
           arReticle.matrix.fromArray(hitTestResults[0].getPose(refSpace).transform.matrix);
-          if (arFrameCount % 30 === 0) setArStatus("Surface found -- tap to place the building");
+          setArStatusIfChanged("Surface found -- tap to place the building");
         } else {
           arReticle.visible = false;
-          if (arFrameCount % 30 === 0) setArStatus(`Looking for a surface... (frame ${arFrameCount}) point the camera at the ground`);
+          setArStatusIfChanged("Looking for a surface... point the camera at the ground");
         }
       }
       renderer.render(scene, camera);
@@ -10938,40 +10963,56 @@ export default function RoomBuilder() {
       scene.fog = savedFog;
       groundGroup.visible = true;
       setGridsVisible(true);
+      renderer.shadowMap.enabled = savedShadowsEnabled;
       scene.position.set(0, 0, 0);
       scene.quaternion.identity();
+      scene.scale.setScalar(1);
       arReticle.visible = false;
       setArActive(false);
-      setArStatus("");
+      setArStatusIfChanged("");
       lastTickTime = performance.now();
       raf = requestAnimationFrame(tick);
     }
 
     async function startAR() {
-      if (!navigator.xr) { setArStatus("This browser has no navigator.xr at all"); return; }
-      setArStatus("Requesting camera/AR permission...");
+      if (!navigator.xr) { setArStatusIfChanged("This browser has no navigator.xr at all"); return; }
+      setArStatusIfChanged("Requesting camera/AR permission...");
       cancelAnimationFrame(raf);
       arPlaced = false;
       arFrameCount = 0;
       scene.position.set(0, 0, 0);
       scene.quaternion.identity();
+      scene.scale.setScalar(1);
       scene.background = null;
       scene.fog = null;
       groundGroup.visible = false;
       setGridsVisible(false);
+      // shadow mapping is one of the more expensive parts of a frame, and
+      // on top of whatever overhead the phone's own AR tracking already
+      // costs, it's not worth it at dollhouse scale where the shadows
+      // would barely be visible anyway.
+      renderer.shadowMap.enabled = false;
       renderer.setClearColor(0x000000, 0);
       try {
-        const session = await navigator.xr.requestSession("immersive-ar", { requiredFeatures: ["hit-test"] });
-        setArStatus("Session granted -- starting renderer...");
+        // dom-overlay is what actually lets the normal page UI (toolbar,
+        // panels, buttons) stay visible and clickable on top of the AR
+        // camera passthrough -- without requesting it, Chrome's immersive-ar
+        // session only shows the WebGL canvas and nothing else on the page.
+        const session = await navigator.xr.requestSession("immersive-ar", {
+          requiredFeatures: ["hit-test"],
+          optionalFeatures: ["dom-overlay"],
+          domOverlay: { root: document.body },
+        });
+        setArStatusIfChanged("Session granted -- starting renderer...");
         arSession = session;
         session.addEventListener("end", onArSessionEnd);
         session.addEventListener("select", onArSelect);
         renderer.xr.setReferenceSpaceType("local");
         await renderer.xr.setSession(session);
-        setArStatus("Renderer attached -- requesting hit-test...");
+        setArStatusIfChanged("Renderer attached -- requesting hit-test...");
         const viewerSpace = await session.requestReferenceSpace("viewer");
         arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-        setArStatus("Looking for a surface... point the camera at the ground");
+        setArStatusIfChanged("Looking for a surface... point the camera at the ground");
         renderer.setAnimationLoop(arRenderLoop);
         setArActive(true);
       } catch (err) {
@@ -10982,9 +11023,10 @@ export default function RoomBuilder() {
         scene.fog = savedFog;
         groundGroup.visible = true;
         setGridsVisible(true);
+        renderer.shadowMap.enabled = savedShadowsEnabled;
         raf = requestAnimationFrame(tick);
         setArActive(false);
-        setArStatus("Couldn't start AR: " + (err && err.message ? err.message : String(err)));
+        setArStatusIfChanged("Couldn't start AR: " + (err && err.message ? err.message : String(err)));
       }
     }
 
@@ -11335,7 +11377,7 @@ export default function RoomBuilder() {
   return (
     <div style={isCompact ? { width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" } : { width: "100%", height: "100%" }}>
     <div style={isCompact ? { width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` } : { width: "100%", height: "100%" }}>
-    <div data-theme={uiTheme} className={arActive ? "ar-active" : undefined} style={{ position: "relative", width: "100%", height: "100%", background: arActive ? "transparent" : "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
+    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
@@ -11526,13 +11568,6 @@ export default function RoomBuilder() {
           touch-action: none; cursor: pointer; user-select: none;
         }
         .rb-walk-btn:active { background: rgba(255,107,26,0.55); border-color: var(--accent); }
-        /* AR mode: hide every normal UI chrome sibling (top bar, ribbon,
-           panels, floating hints) so only the canvas (camera passthrough +
-           the placed building) and the AR status/exit overlay show --
-           everything that isn't the 3D mount or that overlay is a direct
-           child of this same container, so this one rule covers all of it
-           without needing to touch each piece individually. */
-        .ar-active > div:not(.ar-mount):not(.ar-overlay) { display: none !important; }
       `}</style>
 
       <div ref={mountRef} className="ar-mount" style={{ position: "absolute", inset: 0, touchAction: "none" }} />
