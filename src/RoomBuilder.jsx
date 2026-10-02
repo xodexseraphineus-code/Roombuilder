@@ -10999,8 +10999,15 @@ export default function RoomBuilder() {
         const local = scene.worldToLocal(hits[0].point.clone());
         arDebugMarker.position.copy(local);
         arDebugMarker.visible = true;
+        // Categorical only (kind/panel, never the continuously-changing
+        // point coordinates) so this stays dedup'd by setArStatusIfChanged
+        // while dragging across the same surface, instead of forcing a
+        // React re-render every frame the way raw position text would.
+        const ud = hits[0].object.userData || {};
+        setArStatusIfChanged("Touching: " + (ud.kind || "unknown") + (ud.panel ? "  [" + ud.panel + "]" : ""));
       } else {
         arDebugMarker.visible = false;
+        setArStatusIfChanged("Touching: nothing (ray misses all pickable geometry)");
       }
     }
 
