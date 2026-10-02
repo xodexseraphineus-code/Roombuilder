@@ -1285,6 +1285,24 @@ export default function RoomBuilder() {
       navigator.xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
     }
   }, []);
+  useEffect(() => {
+    // The app's own root div goes transparent during AR so the viewport
+    // shows the camera passthrough instead of its normal solid
+    // background, but html/body sit underneath that root and default to
+    // an opaque (effectively white) page background of their own -- left
+    // alone, that still blocks the passthrough everywhere the root's
+    // transparency would otherwise let it through.
+    const prevHtmlBg = document.documentElement.style.background;
+    const prevBodyBg = document.body.style.background;
+    if (arActive) {
+      document.documentElement.style.background = "transparent";
+      document.body.style.background = "transparent";
+    }
+    return () => {
+      document.documentElement.style.background = prevHtmlBg;
+      document.body.style.background = prevBodyBg;
+    };
+  }, [arActive]);
   const [floorIds, setFloorIds] = useState([1]);
   const [activeFloorIdState, setActiveFloorIdState] = useState(1);
   const activeFloorIdRef = useRef(activeFloorIdState);
@@ -11377,7 +11395,7 @@ export default function RoomBuilder() {
   return (
     <div style={isCompact ? { width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" } : { width: "100%", height: "100%" }}>
     <div style={isCompact ? { width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` } : { width: "100%", height: "100%" }}>
-    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
+    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: arActive ? "transparent" : "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
