@@ -11174,11 +11174,19 @@ export default function RoomBuilder() {
         // panels, buttons) stay visible and clickable on top of the AR
         // camera passthrough -- without requesting it, Chrome's immersive-ar
         // session only shows the WebGL canvas and nothing else on the page.
-        const session = await navigator.xr.requestSession("immersive-ar", {
-          requiredFeatures: ["hit-test"],
-          optionalFeatures: ["dom-overlay"],
-          domOverlay: { root: document.body },
-        });
+        // Diagnostic-only escape hatches: appending ?ar_no_overlay and/or
+        // ?ar_no_hittest to the page URL drop those specific features from
+        // the session request, so the same build can be used to test which
+        // one (if any) is responsible for a given device's black-screen-in-
+        // AR problem, without a separate build for each guess.
+        const arDiag = new URLSearchParams(location.search);
+        const arSessionOptions = {};
+        if (!arDiag.has("ar_no_hittest")) arSessionOptions.requiredFeatures = ["hit-test"];
+        if (!arDiag.has("ar_no_overlay")) {
+          arSessionOptions.optionalFeatures = ["dom-overlay"];
+          arSessionOptions.domOverlay = { root: document.body };
+        }
+        const session = await navigator.xr.requestSession("immersive-ar", arSessionOptions);
         setArStatusIfChanged("Session granted -- starting renderer...");
         arSession = session;
         session.addEventListener("end", onArSessionEnd);
@@ -11189,9 +11197,17 @@ export default function RoomBuilder() {
         renderer.xr.setReferenceSpaceType("local");
         await renderer.xr.setSession(session);
         setArStatusIfChanged("Renderer attached -- requesting hit-test...");
-        const viewerSpace = await session.requestReferenceSpace("viewer");
-        arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-        setArStatusIfChanged("Looking for a surface... point the camera at the ground");
+        if (arSessionOptions.requiredFeatures) {
+          const viewerSpace = await session.requestReferenceSpace("viewer");
+          arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+          setArStatusIfChanged("Looking for a surface... point the camera at the ground");
+        } else {
+          // ar_no_hittest diagnostic mode -- hit-test was never requested as
+          // a session feature, so asking for a hit-test source would throw.
+          // No placement reticle in this mode, but it still proves whether
+          // the camera passthrough itself shows up without hit-test in play.
+          setArStatusIfChanged("Diagnostic mode: no hit-test -- just checking passthrough");
+        }
         renderer.setAnimationLoop(arRenderLoop);
         arSessionIsActive = true;
         setArActive(true);
