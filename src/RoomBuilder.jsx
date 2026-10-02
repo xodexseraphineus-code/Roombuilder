@@ -824,6 +824,15 @@ function makeRoadTexture(size) {
 }
 
 export default function RoomBuilder() {
+  // Opt-in on-device debug console (Eruda) for diagnosing issues on phones
+  // where there's no computer handy for USB/chrome://inspect remote
+  // debugging -- ?debug_console loads a floating button that opens a
+  // DevTools-like panel (console, network, elements) right on the device.
+  // Dynamically imported so it costs nothing for anyone not using the flag.
+  useEffect(() => {
+    if (!new URLSearchParams(location.search).has("debug_console")) return;
+    import("eruda").then((eruda) => (eruda.default || eruda).init());
+  }, []);
   const mountRef = useRef(null);
   const hudRef = useRef(null);
   const heightLabelRef = useRef(null);
