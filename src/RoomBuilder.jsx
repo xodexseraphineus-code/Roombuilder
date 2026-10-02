@@ -10957,6 +10957,19 @@ export default function RoomBuilder() {
     arReticle.matrixAutoUpdate = false;
     arReticle.visible = false;
     scene.add(arReticle);
+    // Diagnostic only: a large, impossible-to-miss sphere kept 1.5m directly
+    // in front of the camera at all times during the session, regardless of
+    // placement state. The reticle ring is small (8-10cm) and lies flat on
+    // the ground -- easy to miss entirely on a phone screen even if it's
+    // genuinely rendering -- so on a device where nothing seems to draw at
+    // all, this removes any doubt about whether that's literally true.
+    const arTestSphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.3, 24, 16),
+      new THREE.MeshBasicMaterial({ color: 0xff00ff, depthTest: false })
+    );
+    arTestSphere.renderOrder = 1000;
+    arTestSphere.visible = false;
+    scene.add(arTestSphere);
     // A small bright dot showing exactly where the touch-drag bridge below
     // thinks each tap/drag is hitting, so a real-device tester can tell at
     // a glance whether it's actually landing where their finger is pointed
@@ -11145,6 +11158,19 @@ export default function RoomBuilder() {
 
     function arRenderLoopBody(_timestamp, frame) {
       arFrameCount++;
+      // Keep the big diagnostic sphere 1.5m in front of the camera, every
+      // frame, for the whole session -- see where it's created above.
+      {
+        const xrCam = renderer.xr.getCamera(camera);
+        const camPos = new THREE.Vector3();
+        const camDir = new THREE.Vector3();
+        xrCam.getWorldPosition(camPos);
+        xrCam.getWorldDirection(camDir);
+        const spherePos = camPos.addScaledVector(camDir, 1.5);
+        scene.worldToLocal(spherePos);
+        arTestSphere.position.copy(spherePos);
+        arTestSphere.visible = true;
+      }
       if (frame && arHitTestSource && !arPlaced) {
         const refSpace = renderer.xr.getReferenceSpace();
         const hitTestResults = frame.getHitTestResults(arHitTestSource);
@@ -11203,6 +11229,7 @@ export default function RoomBuilder() {
       scene.quaternion.identity();
       scene.scale.setScalar(1);
       arReticle.visible = false;
+      arTestSphere.visible = false;
       setArActive(false);
       setArStatusIfChanged("");
       setArDebugInfo("");
@@ -11326,6 +11353,8 @@ export default function RoomBuilder() {
       pillarMatSelected.dispose();
       arReticle.geometry.dispose();
       arReticle.material.dispose();
+      arTestSphere.geometry.dispose();
+      arTestSphere.material.dispose();
       arDebugMarker.geometry.dispose();
       arDebugMarker.material.dispose();
       mullionMat.dispose();
