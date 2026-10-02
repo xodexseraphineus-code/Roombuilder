@@ -1561,8 +1561,21 @@ export default function RoomBuilder() {
     // specifically, independent of anything the AR code itself does, so
     // this tests whether that's what's happening on a device where
     // Three.js's own official AR example works but this app's AR doesn't.
-    const arNoAntialias = new URLSearchParams(location.search).has("ar_no_antialias");
-    const renderer = new THREE.WebGLRenderer({ antialias: !arNoAntialias, alpha: true });
+    const arDiagParams = new URLSearchParams(location.search);
+    const arNoAntialias = arDiagParams.has("ar_no_antialias");
+    // Diagnostic-only: ?ar_premult_off builds the context with
+    // premultipliedAlpha: false instead of the default true. A well-known,
+    // specific WebXR/Three.js gotcha: with premultiplied alpha, a pixel the
+    // scene never touches (RGB and alpha both 0) can still composite as
+    // opaque black instead of see-through on some devices/drivers, exactly
+    // matching "content we draw shows up fine, but the background behind it
+    // never shows the camera" -- which is precisely what's left unexplained
+    // after ruling out no-render-at-all, errors, context loss, and blend mode.
+    const arPremultOff = arDiagParams.has("ar_premult_off");
+    const renderer = new THREE.WebGLRenderer({
+      antialias: !arNoAntialias, alpha: true,
+      premultipliedAlpha: !arPremultOff,
+    });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
