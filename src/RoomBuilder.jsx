@@ -833,6 +833,12 @@ export default function RoomBuilder() {
     if (!new URLSearchParams(location.search).has("debug_console")) return;
     import("eruda").then((eruda) => (eruda.default || eruda).init());
   }, []);
+  // TEMPORARY, always-on (no flag needed): shows the exact URL this page
+  // actually sees. Several ?ar_... diagnostic flags produced identical
+  // "still broken" results across very different configurations -- worth
+  // confirming directly whether query params survive however this link is
+  // actually being opened, rather than trusting that they do.
+  const [__debugUrl] = useState(() => location.href);
   const mountRef = useRef(null);
   const hudRef = useRef(null);
   const heightLabelRef = useRef(null);
@@ -11693,6 +11699,17 @@ export default function RoomBuilder() {
     <div style={isCompact ? { width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" } : { width: "100%", height: "100%" }}>
     <div style={isCompact ? { width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` } : { width: "100%", height: "100%" }}>
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: arActive ? "transparent" : "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
+      {/* TEMPORARY diagnostic banner, always on -- shows the literal URL
+          this page instance sees, to confirm whether query-string flags
+          (?ar_no_overlay etc.) actually reach the app when opened via
+          whatever link/route the person actually used. */}
+      <div style={{
+        position: "absolute", top: 0, left: 0, right: 0, zIndex: 100000,
+        background: "#ffcf00", color: "#000", fontSize: 11, fontFamily: "monospace",
+        padding: "3px 6px", wordBreak: "break-all", pointerEvents: "none",
+      }}>
+        URL: {__debugUrl}
+      </div>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
