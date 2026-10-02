@@ -1280,6 +1280,13 @@ export default function RoomBuilder() {
   const setArStatusIfChanged = (msg) => {
     if (arStatusRef.current !== msg) { arStatusRef.current = msg; setArStatus(msg); }
   };
+  // Set once per session (not dedup'd/overwritten like arStatus, which
+  // changes constantly as hit-testing progresses) -- diagnostic info about
+  // the session itself, most importantly environmentBlendMode: if a device
+  // reports anything other than "alpha-blend", the camera is never composited
+  // through our transparent background no matter what else is right, which
+  // would explain a black AR view with otherwise-correct hit-test/UI behavior.
+  const [arDebugInfo, setArDebugInfo] = useState("");
   useEffect(() => {
     if (navigator.xr && navigator.xr.isSessionSupported) {
       navigator.xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
@@ -11174,6 +11181,7 @@ export default function RoomBuilder() {
       arReticle.visible = false;
       setArActive(false);
       setArStatusIfChanged("");
+      setArDebugInfo("");
       lastTickTime = performance.now();
       raf = requestAnimationFrame(tick);
     }
@@ -11225,6 +11233,10 @@ export default function RoomBuilder() {
         session.addEventListener("selectcancel", onArSelectEndOrCancel);
         renderer.xr.setReferenceSpaceType("local");
         await renderer.xr.setSession(session);
+        setArDebugInfo(
+          "blend=" + session.environmentBlendMode +
+          "  overlay=" + (session.domOverlayState ? session.domOverlayState.type : "none")
+        );
         setArStatusIfChanged("Renderer attached -- requesting hit-test...");
         if (arSessionOptions.requiredFeatures) {
           const viewerSpace = await session.requestReferenceSpace("viewer");
@@ -11820,6 +11832,14 @@ export default function RoomBuilder() {
           }}>
             {arStatus || "AR active"}
           </div>
+          {arDebugInfo && (
+            <div style={{
+              padding: "4px 12px", borderRadius: 999, background: "rgba(0,0,0,0.65)", color: "#ffcf5c",
+              fontSize: 11, fontFamily: "var(--font-system)", textAlign: "center", maxWidth: "80vw",
+            }}>
+              {arDebugInfo}
+            </div>
+          )}
           {arActive && (
             <button
               onClick={() => arApiRef.current?.stop()}
