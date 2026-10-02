@@ -829,9 +829,24 @@ export default function RoomBuilder() {
   // debugging -- ?debug_console loads a floating button that opens a
   // DevTools-like panel (console, network, elements) right on the device.
   // Dynamically imported so it costs nothing for anyone not using the flag.
+  const [__erudaStatus, __setErudaStatus] = useState("");
   useEffect(() => {
     if (!new URLSearchParams(location.search).has("debug_console")) return;
-    import("eruda").then((eruda) => (eruda.default || eruda).init());
+    __setErudaStatus("eruda: loading...");
+    import("eruda")
+      .then((eruda) => {
+        (eruda.default || eruda).init();
+        __setErudaStatus("eruda: loaded, button should be visible");
+      })
+      .catch((err) => {
+        // The floating button not showing up gives no clue on its own
+        // whether the import itself failed (network, stale service-worker
+        // cache serving an older bundle that predates this code, a module
+        // error) versus succeeding but the button being hidden/covered by
+        // something -- surfacing the outcome either way, right in the
+        // always-on banner below, removes that ambiguity.
+        __setErudaStatus("eruda FAILED: " + (err && err.message ? err.message : String(err)));
+      });
   }, []);
   // TEMPORARY, always-on (no flag needed): shows the exact URL this page
   // actually sees. Several ?ar_... diagnostic flags produced identical
@@ -11709,6 +11724,7 @@ export default function RoomBuilder() {
         padding: "3px 6px", wordBreak: "break-all", pointerEvents: "none",
       }}>
         URL: {__debugUrl}
+        {__erudaStatus ? "  |  " + __erudaStatus : ""}
       </div>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');

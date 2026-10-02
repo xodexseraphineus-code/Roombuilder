@@ -37,6 +37,15 @@ export default defineConfig({
         // raise Workbox's default 2MB precache limit so the main chunk isn't
         // silently skipped from the install-time cache.
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        // "autoUpdate" still leaves the OLD service worker (and its cached
+        // bundle) active for the tab that triggered the update -- a visit
+        // right after a fresh deploy can keep running yesterday's code
+        // until a second, later visit. During this round of fast iterate-
+        // and-redeploy-and-retest cycles, that's indistinguishable from the
+        // fix itself not having shipped. Taking over immediately removes
+        // that whole class of "did they actually get the new build" doubt.
+        skipWaiting: true,
+        clientsClaim: true,
       },
     }),
   ],
