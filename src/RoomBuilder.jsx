@@ -1262,6 +1262,13 @@ export default function RoomBuilder() {
   // since navigator.xr.isSessionSupported is itself async.
   const [arSupported, setArSupported] = useState(false);
   const [arActive, setArActive] = useState(false);
+  // plain DOM text, not a WebGL object or window.alert -- both of those
+  // can end up invisible/suppressed during an XR session transition, so
+  // this is the one piece of UI that stays rendered (via .ar-overlay,
+  // exempted from the chrome-hiding rule above) the whole time AR is
+  // starting up or active, to actually see what's happening instead of
+  // guessing from a frozen-looking screen.
+  const [arStatus, setArStatus] = useState("");
   useEffect(() => {
     if (navigator.xr && navigator.xr.isSessionSupported) {
       navigator.xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
@@ -10872,8 +10879,15 @@ export default function RoomBuilder() {
     let arSession = null;
     let arHitTestSource = null;
     let arPlaced = false;
+    let arFrameCount = 0;
+
+    function setGridsVisible(v) {
+      if (minorGrid) minorGrid.visible = v;
+      if (majorGrid) majorGrid.visible = v;
+    }
 
     function onArSelect() {
+      setArStatus(arReticle.visible ? "Placed -- walk around to view it" : "No surface detected yet -- point the camera at the ground and wait for the ring");
       if (arReticle.visible && !arPlaced) {
         scene.position.setFromMatrixPosition(arReticle.matrix);
         arPlaced = true;
@@ -10882,14 +10896,17 @@ export default function RoomBuilder() {
     }
 
     function arRenderLoop(_timestamp, frame) {
+      arFrameCount++;
       if (frame && arHitTestSource && !arPlaced) {
         const refSpace = renderer.xr.getReferenceSpace();
         const hitTestResults = frame.getHitTestResults(arHitTestSource);
         if (hitTestResults.length) {
           arReticle.visible = true;
           arReticle.matrix.fromArray(hitTestResults[0].getPose(refSpace).transform.matrix);
+          if (arFrameCount % 30 === 0) setArStatus("Surface found -- tap to place the building");
         } else {
           arReticle.visible = false;
+          if (arFrameCount % 30 === 0) setArStatus(`Looking for a surface... (frame ${arFrameCount}) point the camera at the ground`);
         }
       }
       renderer.render(scene, camera);
@@ -10902,31 +10919,41 @@ export default function RoomBuilder() {
       scene.background = savedBackground;
       scene.fog = savedFog;
       groundGroup.visible = true;
+      setGridsVisible(true);
       scene.position.set(0, 0, 0);
       scene.quaternion.identity();
       arReticle.visible = false;
       setArActive(false);
+      setArStatus("");
       lastTickTime = performance.now();
       raf = requestAnimationFrame(tick);
     }
 
     async function startAR() {
-      if (!navigator.xr) return;
+      if (!navigator.xr) { setArStatus("This browser has no navigator.xr at all"); return; }
+      setArStatus("Requesting camera/AR permission...");
       cancelAnimationFrame(raf);
       arPlaced = false;
+      arFrameCount = 0;
       scene.position.set(0, 0, 0);
       scene.quaternion.identity();
       scene.background = null;
       scene.fog = null;
       groundGroup.visible = false;
+      setGridsVisible(false);
+      renderer.setClearColor(0x000000, 0);
       try {
         const session = await navigator.xr.requestSession("immersive-ar", { requiredFeatures: ["hit-test"] });
+        setArStatus("Session granted -- starting renderer...");
         arSession = session;
         session.addEventListener("end", onArSessionEnd);
         session.addEventListener("select", onArSelect);
+        renderer.xr.setReferenceSpaceType("local");
         await renderer.xr.setSession(session);
+        setArStatus("Renderer attached -- requesting hit-test...");
         const viewerSpace = await session.requestReferenceSpace("viewer");
         arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+        setArStatus("Looking for a surface... point the camera at the ground");
         renderer.setAnimationLoop(arRenderLoop);
         setArActive(true);
       } catch (err) {
@@ -10936,8 +10963,10 @@ export default function RoomBuilder() {
         scene.background = savedBackground;
         scene.fog = savedFog;
         groundGroup.visible = true;
+        setGridsVisible(true);
         raf = requestAnimationFrame(tick);
-        window.alert("Couldn't start AR: " + (err && err.message ? err.message : err));
+        setArActive(false);
+        setArStatus("Couldn't start AR: " + (err && err.message ? err.message : String(err)));
       }
     }
 
@@ -11288,7 +11317,7 @@ export default function RoomBuilder() {
   return (
     <div style={isCompact ? { width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" } : { width: "100%", height: "100%" }}>
     <div style={isCompact ? { width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` } : { width: "100%", height: "100%" }}>
-    <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
+    <div data-theme={uiTheme} className={arActive ? "ar-active" : undefined} style={{ position: "relative", width: "100%", height: "100%", background: arActive ? "transparent" : "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
@@ -11479,9 +11508,50 @@ export default function RoomBuilder() {
           touch-action: none; cursor: pointer; user-select: none;
         }
         .rb-walk-btn:active { background: rgba(255,107,26,0.55); border-color: var(--accent); }
+        /* AR mode: hide every normal UI chrome sibling (top bar, ribbon,
+           panels, floating hints) so only the canvas (camera passthrough +
+           the placed building) and the AR status/exit overlay show --
+           everything that isn't the 3D mount or that overlay is a direct
+           child of this same container, so this one rule covers all of it
+           without needing to touch each piece individually. */
+        .ar-active > div:not(.ar-mount):not(.ar-overlay) { display: none !important; }
       `}</style>
 
-      <div ref={mountRef} style={{ position: "absolute", inset: 0, touchAction: "none" }} />
+      <div ref={mountRef} className="ar-mount" style={{ position: "absolute", inset: 0, touchAction: "none" }} />
+
+      {/* AR status/exit overlay -- plain DOM text (not a WebGL object, not
+          window.alert, both of which can end up invisible during an XR
+          session transition), so there's always something on screen that
+          actually shows what's happening instead of a frozen-looking view.
+          Shown whenever AR is active OR mid-startup (arStatus set but not
+          yet arActive, e.g. while awaiting the permission prompt). */}
+      {(arActive || arStatus) && (
+        <div
+          className="ar-overlay"
+          style={{
+            position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)", zIndex: 999,
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none",
+          }}
+        >
+          <div style={{
+            padding: "8px 14px", borderRadius: 999, background: "rgba(0,0,0,0.65)", color: "#fff",
+            fontSize: 12, fontFamily: "var(--font-system)", textAlign: "center", maxWidth: "80vw",
+          }}>
+            {arStatus || "AR active"}
+          </div>
+          {arActive && (
+            <button
+              onClick={() => arApiRef.current?.stop()}
+              style={{
+                pointerEvents: "auto", padding: "6px 16px", borderRadius: 999, border: "none",
+                background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 12, cursor: "pointer",
+              }}
+            >
+              Exit AR
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Command UI -- a typed command box plus the mic button, docked in
           the same row as the Form/Space/Lens/... pills just under the top
