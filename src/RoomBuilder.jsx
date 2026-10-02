@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Pencil } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, Scan as ArIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Pencil } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -839,6 +839,7 @@ export default function RoomBuilder() {
   const setViewModeApiRef = useRef(() => {});
   const viewCubeApiRef = useRef(null);
   const viewCubeDragRef = useRef(null);
+  const arApiRef = useRef(null);
   // UI chrome theme (ribbon, panels, buttons) -- mostly just the
   // surrounding app frame (CSS), but also drives the 3D viewport's empty-
   // space background/fog color via viewportThemeApiRef below, since a
@@ -1256,6 +1257,16 @@ export default function RoomBuilder() {
   const walkModeApiRef = useRef(() => {});
   useEffect(() => { walkModeRef.current = walkMode; walkModeApiRef.current(walkMode); }, [walkMode]);
   const walkInputRef = useRef({ fwd: false, back: false, left: false, right: false });
+  // AR (WebXR immersive-ar, Chrome on Android only -- Safari/iOS has no
+  // WebXR support at all) -- support is feature-detected once on mount
+  // since navigator.xr.isSessionSupported is itself async.
+  const [arSupported, setArSupported] = useState(false);
+  const [arActive, setArActive] = useState(false);
+  useEffect(() => {
+    if (navigator.xr && navigator.xr.isSessionSupported) {
+      navigator.xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
+    }
+  }, []);
   const [floorIds, setFloorIds] = useState([1]);
   const [activeFloorIdState, setActiveFloorIdState] = useState(1);
   const activeFloorIdRef = useRef(activeFloorIdState);
@@ -1497,7 +1508,10 @@ export default function RoomBuilder() {
       cam.setViewOffset(w * VIEW_SHIFT, h, 0, 0, w, h);
     }
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // alpha: true -- required for AR passthrough below: with no opaque
+    // background, the browser's WebXR compositor can show the camera feed
+    // through the canvas wherever the scene doesn't paint over it.
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -1507,6 +1521,7 @@ export default function RoomBuilder() {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.domElement.style.touchAction = "none";
     renderer.domElement.style.cursor = "grab";
+    renderer.xr.enabled = true;
     mount.appendChild(renderer.domElement);
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.55);
@@ -10835,7 +10850,105 @@ export default function RoomBuilder() {
     }
     tick();
 
+    // ---------- AR (WebXR immersive-ar): place the building at a
+    // real-world surface detected under a tap, then let the browser's own
+    // tracked camera pose drive the view as the user walks around it.
+    // Rather than restructure the whole scene graph (every tool adds its
+    // meshes straight into a per-floor group, not one shared root), the
+    // entire `scene` object's own transform is moved to the hit point --
+    // it's already the single common ancestor of every floor group, the
+    // ground plane, and the lights, so moving it rigidly carries the whole
+    // building and its shadows to the placement spot without touching
+    // anything else. ----------
+    const arReticle = new THREE.Mesh(
+      new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xff6b1a })
+    );
+    arReticle.matrixAutoUpdate = false;
+    arReticle.visible = false;
+    scene.add(arReticle);
+    const savedBackground = scene.background;
+    const savedFog = scene.fog;
+    let arSession = null;
+    let arHitTestSource = null;
+    let arPlaced = false;
+
+    function onArSelect() {
+      if (arReticle.visible && !arPlaced) {
+        scene.position.setFromMatrixPosition(arReticle.matrix);
+        arPlaced = true;
+        arReticle.visible = false;
+      }
+    }
+
+    function arRenderLoop(_timestamp, frame) {
+      if (frame && arHitTestSource && !arPlaced) {
+        const refSpace = renderer.xr.getReferenceSpace();
+        const hitTestResults = frame.getHitTestResults(arHitTestSource);
+        if (hitTestResults.length) {
+          arReticle.visible = true;
+          arReticle.matrix.fromArray(hitTestResults[0].getPose(refSpace).transform.matrix);
+        } else {
+          arReticle.visible = false;
+        }
+      }
+      renderer.render(scene, camera);
+    }
+
+    function onArSessionEnd() {
+      renderer.setAnimationLoop(null);
+      arSession = null;
+      arHitTestSource = null;
+      scene.background = savedBackground;
+      scene.fog = savedFog;
+      groundGroup.visible = true;
+      scene.position.set(0, 0, 0);
+      scene.quaternion.identity();
+      arReticle.visible = false;
+      setArActive(false);
+      lastTickTime = performance.now();
+      raf = requestAnimationFrame(tick);
+    }
+
+    async function startAR() {
+      if (!navigator.xr) return;
+      cancelAnimationFrame(raf);
+      arPlaced = false;
+      scene.position.set(0, 0, 0);
+      scene.quaternion.identity();
+      scene.background = null;
+      scene.fog = null;
+      groundGroup.visible = false;
+      try {
+        const session = await navigator.xr.requestSession("immersive-ar", { requiredFeatures: ["hit-test"] });
+        arSession = session;
+        session.addEventListener("end", onArSessionEnd);
+        session.addEventListener("select", onArSelect);
+        await renderer.xr.setSession(session);
+        const viewerSpace = await session.requestReferenceSpace("viewer");
+        arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+        renderer.setAnimationLoop(arRenderLoop);
+        setArActive(true);
+      } catch (err) {
+        // AR unsupported, or the user declined the camera permission
+        // prompt -- fall back to the normal view rather than leaving the
+        // scene stuck on its AR-mode background/ground state.
+        scene.background = savedBackground;
+        scene.fog = savedFog;
+        groundGroup.visible = true;
+        raf = requestAnimationFrame(tick);
+        window.alert("Couldn't start AR: " + (err && err.message ? err.message : err));
+      }
+    }
+
+    function stopAR() {
+      if (arSession) arSession.end();
+    }
+
+    arApiRef.current = { start: startAR, stop: stopAR };
+
     return () => {
+      if (arSession) arSession.end();
       cancelAnimationFrame(raf);
       ro.disconnect();
       el.removeEventListener("pointerdown", onPointerDown);
@@ -10860,6 +10973,8 @@ export default function RoomBuilder() {
       floorMatSelected.dispose();
       pillarMat.dispose();
       pillarMatSelected.dispose();
+      arReticle.geometry.dispose();
+      arReticle.material.dispose();
       mullionMat.dispose();
       ceilingMat.dispose();
       balconyRoofMat.dispose();
@@ -12313,6 +12428,16 @@ export default function RoomBuilder() {
           >
             <CameraIcon size={16} strokeWidth={2} />
           </button>
+          {arSupported && (
+            <button
+              className={`rb-btn ${arActive ? "active" : ""}`}
+              title={arActive ? "Exit AR" : "View in AR -- tap a real surface through your camera to place the building there"}
+              style={{ display: "flex", alignItems: "center" }}
+              onClick={() => (arActive ? arApiRef.current?.stop() : arApiRef.current?.start())}
+            >
+              <ArIcon size={16} strokeWidth={2} />
+            </button>
+          )}
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12, pointerEvents: "auto" }}>
