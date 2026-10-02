@@ -11045,6 +11045,24 @@ export default function RoomBuilder() {
       if (majorGrid) majorGrid.visible = v;
     }
 
+    // The building itself (every floor's own group, plus the per-room
+    // containers rooms live in -- both added directly to `scene`, same as
+    // floorGroups) was never hidden before placement, only the ground/grid
+    // were. Before a tap places it, `scene` sits at identity transform
+    // (position 0, scale 1) -- true, un-scaled size -- centered on roughly
+    // the viewer's own starting position in the session's reference space.
+    // For anything bigger than a closet, that means the camera starts out
+    // sitting inside (or pressed right up against) full-size walls, filling
+    // the entire view with unlit close-range geometry -- indistinguishable
+    // from "no passthrough at all" depending on framing and lighting, which
+    // is almost certainly what one device's "it's just all black" was
+    // actually showing, independent of whatever caused the tablet's own
+    // separate issues.
+    function setBuildingVisible(v) {
+      floorGroups.forEach((g) => { g.visible = v; });
+      roomContainers.forEach((c) => { c.visible = v; });
+    }
+
     // Target size (meters) for the LONGER footprint dimension once placed
     // -- a dollhouse view you can stand outside of and look down into,
     // rather than true 1:1 scale (which, for anything room-sized or
@@ -11081,6 +11099,7 @@ export default function RoomBuilder() {
         const pushDist = (Math.max(size.x, size.z) * arScale) / 2 + 0.15;
         scene.position.set(hitPos.x + dir.x * pushDist, hitPos.y, hitPos.z + dir.z * pushDist);
         arPlaced = true;
+        setBuildingVisible(true);
         arReticle.visible = false;
       }
     }
@@ -11137,6 +11156,7 @@ export default function RoomBuilder() {
       arDragActive = false;
       scene.background = savedBackground;
       scene.fog = savedFog;
+      setBuildingVisible(true);
       groundGroup.visible = true;
       setGridsVisible(true);
       renderer.shadowMap.enabled = savedShadowsEnabled;
@@ -11161,6 +11181,7 @@ export default function RoomBuilder() {
       scene.scale.setScalar(1);
       scene.background = null;
       scene.fog = null;
+      setBuildingVisible(false);
       groundGroup.visible = false;
       setGridsVisible(false);
       // shadow mapping is one of the more expensive parts of a frame, and
@@ -11217,6 +11238,7 @@ export default function RoomBuilder() {
         // scene stuck on its AR-mode background/ground state.
         scene.background = savedBackground;
         scene.fog = savedFog;
+        setBuildingVisible(true);
         groundGroup.visible = true;
         setGridsVisible(true);
         renderer.shadowMap.enabled = savedShadowsEnabled;
