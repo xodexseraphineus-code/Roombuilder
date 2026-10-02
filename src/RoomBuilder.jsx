@@ -1547,7 +1547,15 @@ export default function RoomBuilder() {
     // alpha: true -- required for AR passthrough below: with no opaque
     // background, the browser's WebXR compositor can show the camera feed
     // through the canvas wherever the scene doesn't paint over it.
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    // Diagnostic-only: ?ar_no_antialias builds the renderer's WebGL context
+    // without antialiasing at all (set once here -- it can't be toggled
+    // after the context exists). Some mobile GPU drivers have had trouble
+    // compositing a multisampled, alpha-blended context into an XRWebGLLayer
+    // specifically, independent of anything the AR code itself does, so
+    // this tests whether that's what's happening on a device where
+    // Three.js's own official AR example works but this app's AR doesn't.
+    const arNoAntialias = new URLSearchParams(location.search).has("ar_no_antialias");
+    const renderer = new THREE.WebGLRenderer({ antialias: !arNoAntialias, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
