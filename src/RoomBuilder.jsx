@@ -10889,7 +10889,25 @@ export default function RoomBuilder() {
     function onArSelect() {
       setArStatus(arReticle.visible ? "Placed -- walk around to view it" : "No surface detected yet -- point the camera at the ground and wait for the ring");
       if (arReticle.visible && !arPlaced) {
-        scene.position.setFromMatrixPosition(arReticle.matrix);
+        // Placing the building's own origin (its footprint center) right at
+        // the tapped point put the viewer inside it whenever the tap landed
+        // close to their own feet, which it usually does. Push the
+        // building's center further away from the viewer, along the same
+        // ground direction from camera to tap point, by half its footprint
+        // so its NEAR edge lands at the tap instead -- the whole thing then
+        // recedes away from the viewer, who stays outside looking at it.
+        const hitPos = new THREE.Vector3().setFromMatrixPosition(arReticle.matrix);
+        const xrCam = renderer.xr.getCamera(camera);
+        const camPos = new THREE.Vector3();
+        xrCam.getWorldPosition(camPos);
+        const dir = new THREE.Vector3(hitPos.x - camPos.x, 0, hitPos.z - camPos.z);
+        if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1); else dir.normalize();
+        const bbox = new THREE.Box3();
+        floorGroups.forEach((g) => bbox.expandByObject(g));
+        const size = new THREE.Vector3();
+        bbox.getSize(size);
+        const pushDist = Math.max(size.x, size.z) / 2 + 1;
+        scene.position.set(hitPos.x + dir.x * pushDist, hitPos.y, hitPos.z + dir.z * pushDist);
         arPlaced = true;
         arReticle.visible = false;
       }
