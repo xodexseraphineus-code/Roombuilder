@@ -10931,6 +10931,22 @@ export default function RoomBuilder() {
     arReticle.matrixAutoUpdate = false;
     arReticle.visible = false;
     scene.add(arReticle);
+    // A small bright dot showing exactly where the touch-drag bridge below
+    // thinks each tap/drag is hitting, so a real-device tester can tell at
+    // a glance whether it's actually landing where their finger is pointed
+    // -- without this, "it's offset" has no way to become "offset by how
+    // much, which way." Added directly to `scene`, so its own transform
+    // (position/scale, changed once at placement) carries it along with
+    // everything else automatically; its own position is always set in
+    // local (pre-transform) space to match.
+    const arDebugMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.03, 12, 10),
+      new THREE.MeshBasicMaterial({ color: 0x00ff66, depthTest: false })
+    );
+    arDebugMarker.renderOrder = 999;
+    arDebugMarker.visible = false;
+    scene.add(arDebugMarker);
+    const arDebugRaycaster = new THREE.Raycaster();
     const savedBackground = scene.background;
     const savedFog = scene.fog;
     const savedShadowsEnabled = renderer.shadowMap.enabled;
@@ -10974,6 +10990,18 @@ export default function RoomBuilder() {
         clientX: rect.left + (ndc.x * 0.5 + 0.5) * rect.width,
         clientY: rect.top + (1 - (ndc.y * 0.5 + 0.5)) * rect.height,
       };
+    }
+
+    function updateArDebugMarker(origin, direction) {
+      arDebugRaycaster.set(origin, direction);
+      const hits = arDebugRaycaster.intersectObjects(pickList, false);
+      if (hits.length) {
+        const local = scene.worldToLocal(hits[0].point.clone());
+        arDebugMarker.position.copy(local);
+        arDebugMarker.visible = true;
+      } else {
+        arDebugMarker.visible = false;
+      }
     }
 
     function dispatchArPointer(type, clientX, clientY, ray) {
@@ -11071,13 +11099,24 @@ export default function RoomBuilder() {
           const m = pose.transform.matrix;
           const origin = new THREE.Vector3(m[12], m[13], m[14]);
           const direction = new THREE.Vector3(0, 0, -1).transformDirection(new THREE.Matrix4().fromArray(m));
+          // camera only gets synced to this frame's tracked pose when
+          // renderer.render() runs, at the bottom of this function -- too
+          // late for arRayToClientXY below, which needs it NOW to turn the
+          // ray into a matching screen point. The underlying per-frame pose
+          // data is already current by this point in the callback, so
+          // forcing the sync early just reads it sooner, with no downside
+          // to render() re-doing the identical sync moments later.
+          renderer.xr.updateCamera(camera);
           const { clientX, clientY } = arRayToClientXY(origin, direction);
           arLastDragX = clientX;
           arLastDragY = clientY;
           arLastDragRay = { origin, direction };
+          updateArDebugMarker(origin, direction);
           dispatchArPointer(arDragActive ? "pointermove" : "pointerdown", clientX, clientY, arLastDragRay);
           arDragActive = true;
         }
+      } else if (!arDragInputSource) {
+        arDebugMarker.visible = false;
       }
       renderer.render(scene, camera);
     }
@@ -11198,6 +11237,8 @@ export default function RoomBuilder() {
       pillarMatSelected.dispose();
       arReticle.geometry.dispose();
       arReticle.material.dispose();
+      arDebugMarker.geometry.dispose();
+      arDebugMarker.material.dispose();
       mullionMat.dispose();
       ceilingMat.dispose();
       balconyRoofMat.dispose();
