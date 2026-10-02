@@ -7083,7 +7083,21 @@ export default function RoomBuilder() {
       }
       return best;
     }
+    // During an AR session, screen-space math (NDC from clientX/Y through
+    // the ordinary perspective camera) is one extra, error-prone hop from
+    // what WebXR actually gives us for a touch: a real 3D ray straight from
+    // the tracked input source. Rather than round-trip that ray to a fake
+    // screen point and back just to satisfy pick()/rayFromEvent()'s normal
+    // mouse-event path, the AR pointer bridge below sets this immediately
+    // before dispatching each synthetic event and clears it right after, so
+    // every tool's raycasting uses the authentic ray with zero conversion.
+    let arRayOverride = null;
     function pick(e) {
+      if (arRayOverride) {
+        raycaster.set(arRayOverride.origin, arRayOverride.direction);
+        const hits = raycaster.intersectObjects(pickList, false);
+        return hits.length ? hits[0] : null;
+      }
       const handle = pickHandle(e);
       if (handle) return { object: handle, point: handle.getWorldPosition(new THREE.Vector3()) };
       raycaster.setFromCamera(getNDC(e), interactionCamera);
@@ -7091,6 +7105,10 @@ export default function RoomBuilder() {
       return hits.length ? hits[0] : null;
     }
     function rayFromEvent(e) {
+      if (arRayOverride) {
+        raycaster.set(arRayOverride.origin, arRayOverride.direction);
+        return raycaster.ray;
+      }
       raycaster.setFromCamera(getNDC(e), interactionCamera);
       return raycaster.ray;
     }
@@ -10939,8 +10957,15 @@ export default function RoomBuilder() {
     let arDragActive = false;
     let arLastDragX = 0;
     let arLastDragY = 0;
+    let arLastDragRay = null; // {origin, direction} -- reused for the final pointerup, dispatched after the input source (and its pose) is already gone
     const AR_DRAG_POINTER_ID = -777;
 
+    // clientX/Y still has to be *something* numeric for a well-formed
+    // PointerEvent, and a couple of incidental pixel-space checks elsewhere
+    // (drag-distance thresholds, etc.) read it directly -- but the actual
+    // raycasting that decides which wall/surface gets edited never uses it
+    // during AR (see arRayOverride above), so this only needs to be
+    // approximately right, not exact.
     function arRayToClientXY(origin, direction) {
       const point = origin.clone().addScaledVector(direction, 2);
       const ndc = point.project(camera);
@@ -10951,12 +10976,14 @@ export default function RoomBuilder() {
       };
     }
 
-    function dispatchArPointer(type, clientX, clientY) {
+    function dispatchArPointer(type, clientX, clientY, ray) {
+      arRayOverride = ray || arLastDragRay;
       el.dispatchEvent(new PointerEvent(type, {
         clientX, clientY, pointerId: AR_DRAG_POINTER_ID, pointerType: "touch",
         isPrimary: true, bubbles: true, cancelable: true,
         button: 0, buttons: type === "pointerup" ? 0 : 1,
       }));
+      arRayOverride = null;
     }
 
     function onArSelectStart(e) {
@@ -10975,6 +11002,7 @@ export default function RoomBuilder() {
         dispatchArPointer("pointerup", arLastDragX, arLastDragY);
         arDragActive = false;
       }
+      arLastDragRay = null;
     }
 
     function setGridsVisible(v) {
@@ -11046,7 +11074,8 @@ export default function RoomBuilder() {
           const { clientX, clientY } = arRayToClientXY(origin, direction);
           arLastDragX = clientX;
           arLastDragY = clientY;
-          dispatchArPointer(arDragActive ? "pointermove" : "pointerdown", clientX, clientY);
+          arLastDragRay = { origin, direction };
+          dispatchArPointer(arDragActive ? "pointermove" : "pointerdown", clientX, clientY, arLastDragRay);
           arDragActive = true;
         }
       }
