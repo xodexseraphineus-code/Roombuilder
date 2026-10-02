@@ -9226,10 +9226,20 @@ export default function RoomBuilder() {
     }
 
     const el = renderer.domElement;
-    el.addEventListener("pointerdown", onPointerDown, { passive: false });
-    el.addEventListener("pointermove", onPointerMove, { passive: false });
-    el.addEventListener("pointerup", onPointerUp);
-    el.addEventListener("pointercancel", onPointerUp);
+    // While an AR session is active, real touches on the canvas are the
+    // user's own on-screen finger -- the browser may or may not still
+    // forward them as genuine (isTrusted) pointer events here depending on
+    // the device, but either way the authoritative source of truth during
+    // AR is the WebXR input-source bridge below, which synthesizes its own
+    // (isTrusted: false) pointer events from the tracked ray. Dropping any
+    // real one that slips through avoids a drag ever being double-handled.
+    function ignoreDuringAR(handler) {
+      return (e) => { if (arSessionIsActive && e.isTrusted) return; handler(e); };
+    }
+    el.addEventListener("pointerdown", ignoreDuringAR(onPointerDown), { passive: false });
+    el.addEventListener("pointermove", ignoreDuringAR(onPointerMove), { passive: false });
+    el.addEventListener("pointerup", ignoreDuringAR(onPointerUp));
+    el.addEventListener("pointercancel", ignoreDuringAR(onPointerUp));
     el.addEventListener("wheel", onWheel, { passive: false });
     // belt-and-suspenders: some mobile browsers still try to interpret a
     // second touch as a native gesture (page pinch-zoom, swipe-back) even
@@ -10910,6 +10920,62 @@ export default function RoomBuilder() {
     let arHitTestSource = null;
     let arPlaced = false;
     let arFrameCount = 0;
+    // True for the whole lifetime of the XR session (not just once placed)
+    // -- read by the ignoreDuringAR() pointer-event guard above, declared
+    // before this runs but not evaluated until an actual pointer event
+    // arrives, by which point this has already been set.
+    let arSessionIsActive = false;
+    // The existing room/wall/door/opening tools are all wired to ordinary
+    // DOM pointer events on the canvas, and the browser does not reliably
+    // keep delivering those once an immersive session owns the display --
+    // touches are instead reported through the WebXR input-source API as
+    // "screen" transient-pointer select gestures. Rather than teach every
+    // tool a second, XR-specific input path, this bridges the one real
+    // input source WebXR gives us for a handheld phone (a ray through the
+    // tapped screen point, live for exactly as long as the finger is down)
+    // back into synthetic pointerdown/pointermove/pointerup events on the
+    // same canvas, so every existing tool keeps working unmodified.
+    let arDragInputSource = null;
+    let arDragActive = false;
+    let arLastDragX = 0;
+    let arLastDragY = 0;
+    const AR_DRAG_POINTER_ID = -777;
+
+    function arRayToClientXY(origin, direction) {
+      const point = origin.clone().addScaledVector(direction, 2);
+      const ndc = point.project(camera);
+      const rect = el.getBoundingClientRect();
+      return {
+        clientX: rect.left + (ndc.x * 0.5 + 0.5) * rect.width,
+        clientY: rect.top + (1 - (ndc.y * 0.5 + 0.5)) * rect.height,
+      };
+    }
+
+    function dispatchArPointer(type, clientX, clientY) {
+      el.dispatchEvent(new PointerEvent(type, {
+        clientX, clientY, pointerId: AR_DRAG_POINTER_ID, pointerType: "touch",
+        isPrimary: true, bubbles: true, cancelable: true,
+        button: 0, buttons: type === "pointerup" ? 0 : 1,
+      }));
+    }
+
+    function onArSelectStart(e) {
+      // Before the building is placed, a tap is the placement tap handled
+      // by onArSelect() below -- only bridge drags for editing once there's
+      // something in the scene worth editing.
+      if (!arPlaced || arDragInputSource) return;
+      arDragInputSource = e.inputSource;
+      arDragActive = false; // first sampled pose in arRenderLoop sends pointerdown
+    }
+
+    function onArSelectEndOrCancel(e) {
+      if (arDragInputSource !== e.inputSource) return;
+      arDragInputSource = null;
+      if (arDragActive) {
+        dispatchArPointer("pointerup", arLastDragX, arLastDragY);
+        arDragActive = false;
+      }
+    }
 
     function setGridsVisible(v) {
       if (minorGrid) minorGrid.visible = v;
@@ -10970,6 +11036,20 @@ export default function RoomBuilder() {
           setArStatusIfChanged("Looking for a surface... point the camera at the ground");
         }
       }
+      if (frame && arDragInputSource) {
+        const refSpace = renderer.xr.getReferenceSpace();
+        const pose = frame.getPose(arDragInputSource.targetRaySpace, refSpace);
+        if (pose) {
+          const m = pose.transform.matrix;
+          const origin = new THREE.Vector3(m[12], m[13], m[14]);
+          const direction = new THREE.Vector3(0, 0, -1).transformDirection(new THREE.Matrix4().fromArray(m));
+          const { clientX, clientY } = arRayToClientXY(origin, direction);
+          arLastDragX = clientX;
+          arLastDragY = clientY;
+          dispatchArPointer(arDragActive ? "pointermove" : "pointerdown", clientX, clientY);
+          arDragActive = true;
+        }
+      }
       renderer.render(scene, camera);
     }
 
@@ -10977,6 +11057,9 @@ export default function RoomBuilder() {
       renderer.setAnimationLoop(null);
       arSession = null;
       arHitTestSource = null;
+      arSessionIsActive = false;
+      arDragInputSource = null;
+      arDragActive = false;
       scene.background = savedBackground;
       scene.fog = savedFog;
       groundGroup.visible = true;
@@ -11025,6 +11108,9 @@ export default function RoomBuilder() {
         arSession = session;
         session.addEventListener("end", onArSessionEnd);
         session.addEventListener("select", onArSelect);
+        session.addEventListener("selectstart", onArSelectStart);
+        session.addEventListener("selectend", onArSelectEndOrCancel);
+        session.addEventListener("selectcancel", onArSelectEndOrCancel);
         renderer.xr.setReferenceSpaceType("local");
         await renderer.xr.setSession(session);
         setArStatusIfChanged("Renderer attached -- requesting hit-test...");
@@ -11032,6 +11118,7 @@ export default function RoomBuilder() {
         arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
         setArStatusIfChanged("Looking for a surface... point the camera at the ground");
         renderer.setAnimationLoop(arRenderLoop);
+        arSessionIsActive = true;
         setArActive(true);
       } catch (err) {
         // AR unsupported, or the user declined the camera permission
