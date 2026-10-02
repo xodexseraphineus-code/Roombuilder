@@ -9280,6 +9280,17 @@ export default function RoomBuilder() {
     el.addEventListener("touchstart", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
     el.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
     el.addEventListener("gesturestart", (e) => e.preventDefault());
+    // A lost WebGL context stops all rendering without throwing any
+    // catchable JS error -- it's just an async event -- so on a device
+    // where AR renders solid black with no visible exception, this is the
+    // other real candidate worth ruling in or out directly.
+    el.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      setArDebugInfo("WEBGL CONTEXT LOST");
+    });
+    el.addEventListener("webglcontextrestored", () => {
+      setArDebugInfo("WebGL context restored");
+    });
     el.addEventListener("gesturechange", (e) => e.preventDefault());
 
     function onKeyDown(e) {
@@ -11120,6 +11131,19 @@ export default function RoomBuilder() {
     }
 
     function arRenderLoop(_timestamp, frame) {
+      try {
+        arRenderLoopBody(_timestamp, frame);
+      } catch (err) {
+        // A throw in here otherwise fails completely silently -- the status
+        // text (set earlier in the body, before whatever line threw) keeps
+        // looking perfectly normal while renderer.render() at the end never
+        // runs, so the screen just never draws anything, forever, with no
+        // visible sign of why. Surface it instead of guessing again.
+        setArDebugInfo("AR ERROR: " + (err && err.message ? err.message : String(err)));
+      }
+    }
+
+    function arRenderLoopBody(_timestamp, frame) {
       arFrameCount++;
       if (frame && arHitTestSource && !arPlaced) {
         const refSpace = renderer.xr.getReferenceSpace();
