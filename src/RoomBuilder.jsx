@@ -894,6 +894,16 @@ export default function RoomBuilder() {
   const [doorSplit, setDoorSplit] = useState(false);
   const doorSplitRef = useRef(doorSplit);
   useEffect(() => { doorSplitRef.current = doorSplit; }, [doorSplit]);
+  // "Full height" -- orthogonal to style: when on, the opening's top edge
+  // is pinned 1ft below the wall height and tracks it dynamically (see the
+  // c.fullHeight resolution in renderOpeningCutout) instead of using a
+  // fixed height/bottomOverride snapshotted at creation time.
+  const [openingFullHeight, setOpeningFullHeight] = useState(false);
+  const openingFullHeightRef = useRef(openingFullHeight);
+  useEffect(() => { openingFullHeightRef.current = openingFullHeight; }, [openingFullHeight]);
+  const [doorFullHeight, setDoorFullHeight] = useState(false);
+  const doorFullHeightRef = useRef(doorFullHeight);
+  useEffect(() => { doorFullHeightRef.current = doorFullHeight; }, [doorFullHeight]);
   // "standard" (plain rectangular head), "arched", "revolving", or
   // "turnstile" -- the latter two replace the door leaf entirely with a
   // freestanding assembly, see renderOpeningCutout/renderDoorAssembly.
@@ -1135,7 +1145,7 @@ export default function RoomBuilder() {
   const deleteBalconyRef = useRef(() => {});
   const deleteOpeningRef = useRef(() => {});
   const deletePropRef = useRef(() => {});
-  const openingEditApiRef = useRef({ setHeight: () => {}, setDividers: () => {}, setAxis: () => {} });
+  const openingEditApiRef = useRef({ setHeight: () => {}, setDividers: () => {}, setAxis: () => {}, setFullHeight: () => {} });
   const [selectedOpeningIsDoor, setSelectedOpeningIsDoor] = useState(false);
   const voiceActionsRef = useRef({});
   const voiceRoomContextRef = useRef(() => "");
@@ -2780,7 +2790,7 @@ export default function RoomBuilder() {
     // balcony platform -- a distinct orange (not the magenta selection fill
     // they sit on top of, which they'd otherwise blend into) and unlit /
     // depth-tested off so they always read clearly and stay easy to grab.
-    const handleMat = new THREE.MeshBasicMaterial({ color: 0xff6b1a, transparent: true, opacity: 1, depthTest: false });
+    const handleMat = new THREE.MeshBasicMaterial({ color: 0xffa726, transparent: true, opacity: 1, depthTest: false });
     // a selected prop's own thin white outline, reused for a selected
     // window/door too -- both now read as "a crisp white line plus orange
     // corner/edge handles" rather than windows/doors getting a solid
@@ -3390,6 +3400,13 @@ export default function RoomBuilder() {
       if (c.fromBalcony != null) {
         const bal = (state.balconies || []).find((b) => b.id === c.fromBalcony);
         if (bal) c = { ...c, bottomOverride: bal.platformHeight || c.bottomOverride };
+      }
+      // "Full height" openings/doors pin their top edge 1ft below the wall
+      // height H and re-derive bottomOverride/height from the CURRENT H
+      // every rebuild, so moving the Level height slider afterward keeps
+      // the top pinned instead of leaving the opening at its original size.
+      if (c.fullHeight) {
+        c = { ...c, bottomOverride: 0, height: Math.max(0.1, H - 1 * FT) };
       }
       if (c.isDoor) {
         // pillars always run floor-to-(ceiling minus a short header),
@@ -4537,6 +4554,31 @@ export default function RoomBuilder() {
       }
       return a / 2;
     }
+    // Precise corner snapping for the freeform tool: without this, lining a
+    // new point up exactly with an existing corner means zooming way in and
+    // fighting the grid snap -- a screen-space hit test (same HANDLE_HIT_PX
+    // radius as grabbing a resize handle, so it reads as "about a finger
+    // wide" regardless of zoom level) against every corner worth aligning to
+    // finds the closest one and, if it's within that radius, returns its
+    // exact coordinates to use instead of the ordinary grid-snapped point.
+    function findFreeformCornerSnap(y, curPx, rw, rh) {
+      const candidates = [];
+      if (freeformDraft) candidates.push(...freeformDraft.points);
+      (state.freeformRooms || []).forEach((rm) => { if (rm.points) candidates.push(...rm.points); });
+      if (state.footprint) {
+        const { xMin, xMax, zMin, zMax } = state.footprint;
+        candidates.push({ x: xMin, z: zMin }, { x: xMin, z: zMax }, { x: xMax, z: zMin }, { x: xMax, z: zMax });
+      }
+      let best = null, bestDist = HANDLE_HIT_PX;
+      for (const c of candidates) {
+        const proj = new THREE.Vector3(c.x, y, c.z).project(interactionCamera);
+        const px = (proj.x * 0.5 + 0.5) * rw;
+        const py = (-proj.y * 0.5 + 0.5) * rh;
+        const d = Math.hypot(px - curPx.x, py - curPx.y);
+        if (d < bestDist) { bestDist = d; best = { x: c.x, z: c.z }; }
+      }
+      return best;
+    }
     // the two loops that make a closed freeform room's walls a solid ring in
     // plan -- whichever of the +halfThickness/-halfThickness offsets encloses
     // more area is the outer boundary, the other is the hole punched through
@@ -4634,7 +4676,11 @@ export default function RoomBuilder() {
         const wallMatHere = isSelected ? wallMatSelected : currentWallMat;
         const floorMatHere = isSelected ? floorMatSelected : currentFloorMat;
         const thickness = rm.thickness || 0.35;
-        const height = rm.height || WALL_HEIGHT;
+        // Unset (null/undefined) means "track the level's own height," same
+        // as a regular room's walls -- only an explicit drag of the
+        // freeform tool's own Height slider turns this into a fixed
+        // per-room override that stops following the level slider.
+        const height = rm.height != null ? rm.height : state.height;
         const { outer, inner } = buildFreeformWallLoops(rm.points, thickness);
         const wallShape = loopToShape(outer);
         const innerHolePath = (() => { const h = new THREE.Path(); inner.forEach((p, i) => { if (i === 0) h.moveTo(p.x, -p.z); else h.lineTo(p.x, -p.z); }); h.closePath(); return h; })();
@@ -4939,7 +4985,7 @@ export default function RoomBuilder() {
     }
     const PROP_MIN_SIZE = 0.2; // smallest edge/diameter/height a prop can be resized to
     const PROP_MAX_SIZE = 30;
-    const PROP_HANDLE = 0.16; // small cube handles -- visually unobtrusive, still easy to grab on touch
+    const PROP_HANDLE = 0.22; // cube handles -- bigger/brighter than before so they're easy to spot and grab on touch
 
     function renderProps() {
       (state.props || []).forEach((p) => {
@@ -7057,7 +7103,7 @@ export default function RoomBuilder() {
     // radius that's constant in SCREEN pixels: project each one to screen
     // space and grab whichever is closest to the pointer, as long as it's
     // within a generous "fingertip" radius -- independent of zoom level.
-    const HANDLE_HIT_PX = 42; // bigger than a fingertip in screen space -- these are fiddly to grab otherwise
+    const HANDLE_HIT_PX = 56; // about a finger-width in screen space -- these were still a bit fiddly to grab at 42
     const handleWorldPos = new THREE.Vector3();
     function pointerPixel(e) {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -7424,7 +7470,11 @@ export default function RoomBuilder() {
         if (!ray.intersectPlane(plane, pt)) return;
         if (activeRoomId != null) switchActiveRoom(null);
         const local = toLocalXZ(pt);
-        const snapped = { x: snapValue(local.x), z: snapValue(local.z) };
+        const rect0 = renderer.domElement.getBoundingClientRect();
+        const rw0 = interactionRect ? interactionRect.w : rect0.width;
+        const rh0 = interactionRect ? interactionRect.h : rect0.height;
+        const cornerSnap = findFreeformCornerSnap(pt.y, pointerPixel(e), rw0, rh0);
+        const snapped = cornerSnap || { x: snapValue(local.x), z: snapValue(local.z) };
         if (!freeformDraft) {
           // Starting a brand-new shape needs a full-second hold, exactly like
           // the rectangle Room tool's own "pending-room-tool" gesture (see
@@ -7461,9 +7511,13 @@ export default function RoomBuilder() {
             if (!state.freeformRooms) state.freeformRooms = [];
             state.freeformRooms.push({
               id, points: pts, thickness: freeformThicknessRef.current,
-              height: freeformHeightRef.current, ceilingEnabled: freeformCeilingOnRef.current,
+              // null -- tracks the level's own height slider, same as a
+              // regular room's walls, until the Height slider here is
+              // dragged explicitly (see setActiveFreeformHeight).
+              height: null, ceilingEnabled: freeformCeilingOnRef.current,
             });
             setSelectedFreeformId(id);
+            setFreeformHeight(state.height);
           }
           freeformDraft = null;
           setFreeformDraftCount(0);
@@ -7877,7 +7931,7 @@ export default function RoomBuilder() {
         setSelectedFreeformId(rm.id);
         setSelectedFreeformOpeningId(obj.userData.id);
         setFreeformThickness(rm.thickness || 0.35);
-        setFreeformHeight(rm.height || WALL_HEIGHT);
+        setFreeformHeight(rm.height != null ? rm.height : state.height);
         setFreeformCeilingOn(!!rm.ceilingEnabled);
         return;
       }
@@ -7902,7 +7956,7 @@ export default function RoomBuilder() {
         setSelectedFreeformOpeningId(null);
         setSelectedFreeformId(rm.id);
         setFreeformThickness(rm.thickness || 0.35);
-        setFreeformHeight(rm.height || WALL_HEIGHT);
+        setFreeformHeight(rm.height != null ? rm.height : state.height);
         setFreeformCeilingOn(!!rm.ceilingEnabled);
         return;
       }
@@ -7936,10 +7990,12 @@ export default function RoomBuilder() {
           setOpeningAxisVertical(o.dividerAxis === "vertical" || o.dividerAxis === "both");
           setOpeningAxisHorizontal(o.dividerAxis === "horizontal" || o.dividerAxis === "both");
           setOpeningStyle(o.style || "grid");
+          setOpeningFullHeight(!!o.fullHeight);
         } else if (o && o.isDoor) {
           setDoorHeight(o.height ?? DEFAULT_OPENING_HEIGHT);
           setDoorSplit(!!o.dividers);
           setDoorStyle(o.style || "standard");
+          setDoorFullHeight(!!o.fullHeight);
           if (o.style === "pillars") {
             setPillarShape(o.pillarShape || "round");
             setPillarSize(o.pillarSize || 2 * FT);
@@ -8963,6 +9019,7 @@ export default function RoomBuilder() {
           state.openings.push({
             id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current,
             pillarShape: pillarShapeRef.current, pillarSize: pillarSizeRef.current, pillarCount: pillarCountRef.current,
+            fullHeight: doorFullHeightRef.current,
           });
         }
       } else if (dragState.type === "pending-freeform-opening") {
@@ -9069,7 +9126,7 @@ export default function RoomBuilder() {
             // override falls back to.
             id: idSeq++, panel: dragState.panelKey, u0, u1, height: openingHeightRef.current, bottomOverride: 0, dividers: openingDividersRef.current,
             dividerAxis: openingAxisVerticalRef.current && openingAxisHorizontalRef.current ? "both" : openingAxisHorizontalRef.current ? "horizontal" : "vertical",
-            style: openingStyleRef.current,
+            style: openingStyleRef.current, fullHeight: openingFullHeightRef.current,
           });
         }
         previewOpening = null;
@@ -9081,6 +9138,7 @@ export default function RoomBuilder() {
           state.openings.push({
             id: idSeq++, panel: dragState.panelKey, u0, u1, height: doorHeightRef.current, isDoor: true, dividers: doorSplitRef.current ? 1 : 0, style: doorStyleRef.current,
             pillarShape: pillarShapeRef.current, pillarSize: pillarSizeRef.current, pillarCount: pillarCountRef.current,
+            fullHeight: doorFullHeightRef.current,
           });
         }
         previewOpening = null;
@@ -9850,6 +9908,14 @@ export default function RoomBuilder() {
       o.style = style;
       rebuild();
     }
+    function setActiveOpeningFullHeight(v) {
+      const id = selectedOpeningIdRef.current;
+      if (id == null) return;
+      const o = (state.openings || []).find((oo) => oo.id === id);
+      if (!o) return;
+      o.fullHeight = v;
+      rebuild();
+    }
     function setActiveOpeningPillarShape(shape) {
       const id = selectedOpeningIdRef.current;
       if (id == null) return;
@@ -9877,6 +9943,7 @@ export default function RoomBuilder() {
     openingEditApiRef.current = {
       setHeight: setActiveOpeningHeight, setDividers: setActiveOpeningDividers, setAxis: setActiveOpeningAxis, setStyle: setActiveOpeningStyle,
       setPillarShape: setActiveOpeningPillarShape, setPillarSize: setActiveOpeningPillarSize, setPillarCount: setActiveOpeningPillarCount,
+      setFullHeight: setActiveOpeningFullHeight,
     };
 
     // ---------- voice command actions ----------
@@ -10828,7 +10895,15 @@ export default function RoomBuilder() {
       if (dragState && dragState.type === "pending-freeform-point" && now - dragState.holdStart >= DRAW_TOOL_HOLD_MS) {
         pushUndo();
         const local = toLocalXZ(dragState.start);
-        const snapped = { x: snapValue(local.x), z: snapValue(local.z) };
+        const rectStart = renderer.domElement.getBoundingClientRect();
+        const rwStart = interactionRect ? interactionRect.w : rectStart.width;
+        const rhStart = interactionRect ? interactionRect.h : rectStart.height;
+        const startPx = {
+          x: dragState.startScreen.x - rectStart.left - (interactionRect ? interactionRect.x : 0),
+          y: dragState.startScreen.y - rectStart.top - (interactionRect ? interactionRect.y : 0),
+        };
+        const cornerSnap = findFreeformCornerSnap(dragState.start.y, startPx, rwStart, rhStart);
+        const snapped = cornerSnap || { x: snapValue(local.x), z: snapValue(local.z) };
         freeformDraft = { points: [snapped] };
         setFreeformDraftCount(1);
         dragState = null;
@@ -13147,10 +13222,22 @@ export default function RoomBuilder() {
                   {label}
                 </button>
               ))}
+              <button
+                className={`rb-btn ${openingFullHeight ? "active" : ""}`}
+                title="Top edge stays 1ft below the wall height, even as the wall height changes"
+                onClick={() => {
+                  pushUndoRef.current();
+                  const v = !openingFullHeight;
+                  setOpeningFullHeight(v);
+                  if (selectedOpeningId != null) openingEditApiRef.current.setFullHeight(v);
+                }}
+              >
+                Full height
+              </button>
             </div>
           </div>
         )}
-        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && doorStyle !== "pillars" && (
+        {((tool === "door" && selectedOpeningId == null) || (selectedOpeningId != null && selectedOpeningIsDoor)) && doorStyle !== "pillars" && !doorFullHeight && (
           <div className="ribbon-group">
             <span className="ribbon-label">
               {selectedOpeningId != null ? "Selected door height" : "Door height"} &middot; {(doorHeight / FT).toFixed(2)} ft
@@ -13206,6 +13293,20 @@ export default function RoomBuilder() {
                   }}
                 >
                   Split door
+                </button>
+              )}
+              {doorStyle !== "pillars" && (
+                <button
+                  className={`rb-btn ${doorFullHeight ? "active" : ""}`}
+                  title="Top edge stays 1ft below the wall height, even as the wall height changes"
+                  onClick={() => {
+                    pushUndoRef.current();
+                    const v = !doorFullHeight;
+                    setDoorFullHeight(v);
+                    if (selectedOpeningId != null) openingEditApiRef.current.setFullHeight(v);
+                  }}
+                >
+                  Full height
                 </button>
               )}
               {doorStyle === "pillars" && (
