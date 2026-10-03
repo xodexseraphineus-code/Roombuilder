@@ -13131,7 +13131,7 @@ export default function RoomBuilder() {
             </div>
           </div>
         )}
-        {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && (
+        {((tool === "cut" && selectedOpeningId == null) || (selectedOpeningId != null && !selectedOpeningIsDoor)) && !openingFullHeight && (
           <div className="ribbon-group">
             <span className="ribbon-label">
               {selectedOpeningId != null ? "Selected window height" : "Opening height"} &middot; {(openingHeight / FT).toFixed(2)} ft
