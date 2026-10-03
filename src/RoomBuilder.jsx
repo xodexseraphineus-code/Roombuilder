@@ -824,36 +824,6 @@ function makeRoadTexture(size) {
 }
 
 export default function RoomBuilder() {
-  // Opt-in on-device debug console (Eruda) for diagnosing issues on phones
-  // where there's no computer handy for USB/chrome://inspect remote
-  // debugging -- ?debug_console loads a floating button that opens a
-  // DevTools-like panel (console, network, elements) right on the device.
-  // Dynamically imported so it costs nothing for anyone not using the flag.
-  const [__erudaStatus, __setErudaStatus] = useState("");
-  useEffect(() => {
-    if (!new URLSearchParams(location.search).has("debug_console")) return;
-    __setErudaStatus("eruda: loading...");
-    import("eruda")
-      .then((eruda) => {
-        (eruda.default || eruda).init();
-        __setErudaStatus("eruda: loaded, button should be visible");
-      })
-      .catch((err) => {
-        // The floating button not showing up gives no clue on its own
-        // whether the import itself failed (network, stale service-worker
-        // cache serving an older bundle that predates this code, a module
-        // error) versus succeeding but the button being hidden/covered by
-        // something -- surfacing the outcome either way, right in the
-        // always-on banner below, removes that ambiguity.
-        __setErudaStatus("eruda FAILED: " + (err && err.message ? err.message : String(err)));
-      });
-  }, []);
-  // TEMPORARY, always-on (no flag needed): shows the exact URL this page
-  // actually sees. Several ?ar_... diagnostic flags produced identical
-  // "still broken" results across very different configurations -- worth
-  // confirming directly whether query params survive however this link is
-  // actually being opened, rather than trusting that they do.
-  const [__debugUrl] = useState(() => location.href);
   const mountRef = useRef(null);
   const hudRef = useRef(null);
   const heightLabelRef = useRef(null);
@@ -1310,13 +1280,6 @@ export default function RoomBuilder() {
   const setArStatusIfChanged = (msg) => {
     if (arStatusRef.current !== msg) { arStatusRef.current = msg; setArStatus(msg); }
   };
-  // Set once per session (not dedup'd/overwritten like arStatus, which
-  // changes constantly as hit-testing progresses) -- diagnostic info about
-  // the session itself, most importantly environmentBlendMode: if a device
-  // reports anything other than "alpha-blend", the camera is never composited
-  // through our transparent background no matter what else is right, which
-  // would explain a black AR view with otherwise-correct hit-test/UI behavior.
-  const [arDebugInfo, setArDebugInfo] = useState("");
   useEffect(() => {
     if (navigator.xr && navigator.xr.isSessionSupported) {
       navigator.xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
@@ -1584,28 +1547,7 @@ export default function RoomBuilder() {
     // alpha: true -- required for AR passthrough below: with no opaque
     // background, the browser's WebXR compositor can show the camera feed
     // through the canvas wherever the scene doesn't paint over it.
-    // Diagnostic-only: ?ar_no_antialias builds the renderer's WebGL context
-    // without antialiasing at all (set once here -- it can't be toggled
-    // after the context exists). Some mobile GPU drivers have had trouble
-    // compositing a multisampled, alpha-blended context into an XRWebGLLayer
-    // specifically, independent of anything the AR code itself does, so
-    // this tests whether that's what's happening on a device where
-    // Three.js's own official AR example works but this app's AR doesn't.
-    const arDiagParams = new URLSearchParams(location.search);
-    const arNoAntialias = arDiagParams.has("ar_no_antialias");
-    // Diagnostic-only: ?ar_premult_off builds the context with
-    // premultipliedAlpha: false instead of the default true. A well-known,
-    // specific WebXR/Three.js gotcha: with premultiplied alpha, a pixel the
-    // scene never touches (RGB and alpha both 0) can still composite as
-    // opaque black instead of see-through on some devices/drivers, exactly
-    // matching "content we draw shows up fine, but the background behind it
-    // never shows the camera" -- which is precisely what's left unexplained
-    // after ruling out no-render-at-all, errors, context loss, and blend mode.
-    const arPremultOff = arDiagParams.has("ar_premult_off");
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !arNoAntialias, alpha: true,
-      premultipliedAlpha: !arPremultOff,
-    });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -9323,17 +9265,9 @@ export default function RoomBuilder() {
     el.addEventListener("touchstart", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
     el.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
     el.addEventListener("gesturestart", (e) => e.preventDefault());
-    // A lost WebGL context stops all rendering without throwing any
-    // catchable JS error -- it's just an async event -- so on a device
-    // where AR renders solid black with no visible exception, this is the
-    // other real candidate worth ruling in or out directly.
-    el.addEventListener("webglcontextlost", (e) => {
-      e.preventDefault();
-      setArDebugInfo("WEBGL CONTEXT LOST");
-    });
-    el.addEventListener("webglcontextrestored", () => {
-      setArDebugInfo("WebGL context restored");
-    });
+    // preventDefault here is what allows the context to actually restore
+    // afterward, rather than staying permanently lost.
+    el.addEventListener("webglcontextlost", (e) => e.preventDefault());
     el.addEventListener("gesturechange", (e) => e.preventDefault());
 
     function onKeyDown(e) {
@@ -11000,35 +10934,6 @@ export default function RoomBuilder() {
     arReticle.matrixAutoUpdate = false;
     arReticle.visible = false;
     scene.add(arReticle);
-    // Diagnostic only: a large, impossible-to-miss sphere kept 1.5m directly
-    // in front of the camera at all times during the session, regardless of
-    // placement state. The reticle ring is small (8-10cm) and lies flat on
-    // the ground -- easy to miss entirely on a phone screen even if it's
-    // genuinely rendering -- so on a device where nothing seems to draw at
-    // all, this removes any doubt about whether that's literally true.
-    const arTestSphere = new THREE.Mesh(
-      new THREE.SphereGeometry(0.3, 24, 16),
-      new THREE.MeshBasicMaterial({ color: 0xff00ff, depthTest: false })
-    );
-    arTestSphere.renderOrder = 1000;
-    arTestSphere.visible = false;
-    scene.add(arTestSphere);
-    // A small bright dot showing exactly where the touch-drag bridge below
-    // thinks each tap/drag is hitting, so a real-device tester can tell at
-    // a glance whether it's actually landing where their finger is pointed
-    // -- without this, "it's offset" has no way to become "offset by how
-    // much, which way." Added directly to `scene`, so its own transform
-    // (position/scale, changed once at placement) carries it along with
-    // everything else automatically; its own position is always set in
-    // local (pre-transform) space to match.
-    const arDebugMarker = new THREE.Mesh(
-      new THREE.SphereGeometry(0.03, 12, 10),
-      new THREE.MeshBasicMaterial({ color: 0x00ff66, depthTest: false })
-    );
-    arDebugMarker.renderOrder = 999;
-    arDebugMarker.visible = false;
-    scene.add(arDebugMarker);
-    const arDebugRaycaster = new THREE.Raycaster();
     const savedBackground = scene.background;
     const savedFog = scene.fog;
     const savedShadowsEnabled = renderer.shadowMap.enabled;
@@ -11072,25 +10977,6 @@ export default function RoomBuilder() {
         clientX: rect.left + (ndc.x * 0.5 + 0.5) * rect.width,
         clientY: rect.top + (1 - (ndc.y * 0.5 + 0.5)) * rect.height,
       };
-    }
-
-    function updateArDebugMarker(origin, direction) {
-      arDebugRaycaster.set(origin, direction);
-      const hits = arDebugRaycaster.intersectObjects(pickList, false);
-      if (hits.length) {
-        const local = scene.worldToLocal(hits[0].point.clone());
-        arDebugMarker.position.copy(local);
-        arDebugMarker.visible = true;
-        // Categorical only (kind/panel, never the continuously-changing
-        // point coordinates) so this stays dedup'd by setArStatusIfChanged
-        // while dragging across the same surface, instead of forcing a
-        // React re-render every frame the way raw position text would.
-        const ud = hits[0].object.userData || {};
-        setArStatusIfChanged("Touching: " + (ud.kind || "unknown") + (ud.panel ? "  [" + ud.panel + "]" : ""));
-      } else {
-        arDebugMarker.visible = false;
-        setArStatusIfChanged("Touching: nothing (ray misses all pickable geometry)");
-      }
     }
 
     function dispatchArPointer(type, clientX, clientY, ray) {
@@ -11187,33 +11073,7 @@ export default function RoomBuilder() {
     }
 
     function arRenderLoop(_timestamp, frame) {
-      try {
-        arRenderLoopBody(_timestamp, frame);
-      } catch (err) {
-        // A throw in here otherwise fails completely silently -- the status
-        // text (set earlier in the body, before whatever line threw) keeps
-        // looking perfectly normal while renderer.render() at the end never
-        // runs, so the screen just never draws anything, forever, with no
-        // visible sign of why. Surface it instead of guessing again.
-        setArDebugInfo("AR ERROR: " + (err && err.message ? err.message : String(err)));
-      }
-    }
-
-    function arRenderLoopBody(_timestamp, frame) {
       arFrameCount++;
-      // Keep the big diagnostic sphere 1.5m in front of the camera, every
-      // frame, for the whole session -- see where it's created above.
-      {
-        const xrCam = renderer.xr.getCamera(camera);
-        const camPos = new THREE.Vector3();
-        const camDir = new THREE.Vector3();
-        xrCam.getWorldPosition(camPos);
-        xrCam.getWorldDirection(camDir);
-        const spherePos = camPos.addScaledVector(camDir, 1.5);
-        scene.worldToLocal(spherePos);
-        arTestSphere.position.copy(spherePos);
-        arTestSphere.visible = true;
-      }
       if (frame && arHitTestSource && !arPlaced) {
         const refSpace = renderer.xr.getReferenceSpace();
         const hitTestResults = frame.getHitTestResults(arHitTestSource);
@@ -11245,12 +11105,9 @@ export default function RoomBuilder() {
           arLastDragX = clientX;
           arLastDragY = clientY;
           arLastDragRay = { origin, direction };
-          updateArDebugMarker(origin, direction);
           dispatchArPointer(arDragActive ? "pointermove" : "pointerdown", clientX, clientY, arLastDragRay);
           arDragActive = true;
         }
-      } else if (!arDragInputSource) {
-        arDebugMarker.visible = false;
       }
       renderer.render(scene, camera);
     }
@@ -11272,10 +11129,8 @@ export default function RoomBuilder() {
       scene.quaternion.identity();
       scene.scale.setScalar(1);
       arReticle.visible = false;
-      arTestSphere.visible = false;
       setArActive(false);
       setArStatusIfChanged("");
-      setArDebugInfo("");
       lastTickTime = performance.now();
       raf = requestAnimationFrame(tick);
     }
@@ -11305,19 +11160,11 @@ export default function RoomBuilder() {
         // panels, buttons) stay visible and clickable on top of the AR
         // camera passthrough -- without requesting it, Chrome's immersive-ar
         // session only shows the WebGL canvas and nothing else on the page.
-        // Diagnostic-only escape hatches: appending ?ar_no_overlay and/or
-        // ?ar_no_hittest to the page URL drop those specific features from
-        // the session request, so the same build can be used to test which
-        // one (if any) is responsible for a given device's black-screen-in-
-        // AR problem, without a separate build for each guess.
-        const arDiag = new URLSearchParams(location.search);
-        const arSessionOptions = {};
-        if (!arDiag.has("ar_no_hittest")) arSessionOptions.requiredFeatures = ["hit-test"];
-        if (!arDiag.has("ar_no_overlay")) {
-          arSessionOptions.optionalFeatures = ["dom-overlay"];
-          arSessionOptions.domOverlay = { root: document.body };
-        }
-        const session = await navigator.xr.requestSession("immersive-ar", arSessionOptions);
+        const session = await navigator.xr.requestSession("immersive-ar", {
+          requiredFeatures: ["hit-test"],
+          optionalFeatures: ["dom-overlay"],
+          domOverlay: { root: document.body },
+        });
         setArStatusIfChanged("Session granted -- starting renderer...");
         arSession = session;
         session.addEventListener("end", onArSessionEnd);
@@ -11327,22 +11174,10 @@ export default function RoomBuilder() {
         session.addEventListener("selectcancel", onArSelectEndOrCancel);
         renderer.xr.setReferenceSpaceType("local");
         await renderer.xr.setSession(session);
-        setArDebugInfo(
-          "blend=" + session.environmentBlendMode +
-          "  overlay=" + (session.domOverlayState ? session.domOverlayState.type : "none")
-        );
         setArStatusIfChanged("Renderer attached -- requesting hit-test...");
-        if (arSessionOptions.requiredFeatures) {
-          const viewerSpace = await session.requestReferenceSpace("viewer");
-          arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-          setArStatusIfChanged("Looking for a surface... point the camera at the ground");
-        } else {
-          // ar_no_hittest diagnostic mode -- hit-test was never requested as
-          // a session feature, so asking for a hit-test source would throw.
-          // No placement reticle in this mode, but it still proves whether
-          // the camera passthrough itself shows up without hit-test in play.
-          setArStatusIfChanged("Diagnostic mode: no hit-test -- just checking passthrough");
-        }
+        const viewerSpace = await session.requestReferenceSpace("viewer");
+        arHitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+        setArStatusIfChanged("Looking for a surface... point the camera at the ground");
         renderer.setAnimationLoop(arRenderLoop);
         arSessionIsActive = true;
         setArActive(true);
@@ -11396,10 +11231,6 @@ export default function RoomBuilder() {
       pillarMatSelected.dispose();
       arReticle.geometry.dispose();
       arReticle.material.dispose();
-      arTestSphere.geometry.dispose();
-      arTestSphere.material.dispose();
-      arDebugMarker.geometry.dispose();
-      arDebugMarker.material.dispose();
       mullionMat.dispose();
       ceilingMat.dispose();
       balconyRoofMat.dispose();
@@ -11714,18 +11545,6 @@ export default function RoomBuilder() {
     <div style={isCompact ? { width: "100vw", height: "100dvh", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a1a" } : { width: "100%", height: "100%" }}>
     <div style={isCompact ? { width: designWidth, height: DESIGN_HEIGHT, flex: "none", transform: `scale(${fitScale})` } : { width: "100%", height: "100%" }}>
     <div data-theme={uiTheme} style={{ position: "relative", width: "100%", height: "100%", background: arActive ? "transparent" : "var(--bg-window)", overflow: "hidden", fontFamily: "var(--font-system)", overscrollBehavior: "none" }}>
-      {/* TEMPORARY diagnostic banner, always on -- shows the literal URL
-          this page instance sees, to confirm whether query-string flags
-          (?ar_no_overlay etc.) actually reach the app when opened via
-          whatever link/route the person actually used. */}
-      <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, zIndex: 100000,
-        background: "#ffcf00", color: "#000", fontSize: 11, fontFamily: "monospace",
-        padding: "3px 6px", wordBreak: "break-all", pointerEvents: "none",
-      }}>
-        URL: {__debugUrl}
-        {__erudaStatus ? "  |  " + __erudaStatus : ""}
-      </div>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; }
@@ -11940,14 +11759,6 @@ export default function RoomBuilder() {
           }}>
             {arStatus || "AR active"}
           </div>
-          {arDebugInfo && (
-            <div style={{
-              padding: "4px 12px", borderRadius: 999, background: "rgba(0,0,0,0.65)", color: "#ffcf5c",
-              fontSize: 11, fontFamily: "var(--font-system)", textAlign: "center", maxWidth: "80vw",
-            }}>
-              {arDebugInfo}
-            </div>
-          )}
           {arActive && (
             <button
               onClick={() => arApiRef.current?.stop()}
