@@ -1112,6 +1112,14 @@ export default function RoomBuilder() {
   const suppBalconyHeightApiRef = useRef({ setHeight: () => {} });
   const [suppBalconyRailingCount, setSuppBalconyRailingCount] = useState(6);
   const suppBalconyRailingCountApiRef = useRef({ setCount: () => {} });
+  const [selectedStairPlatformId, setSelectedStairPlatformId] = useState(null);
+  const selectedStairPlatformIdRef = useRef(selectedStairPlatformId);
+  useEffect(() => { selectedStairPlatformIdRef.current = selectedStairPlatformId; rebuildModelRef.current(); }, [selectedStairPlatformId]);
+  const deleteStairPlatformRef = useRef(() => {});
+  const [stairPlatformDepth, setStairPlatformDepth] = useState(8 * FT);
+  const [stairPlatformStairDepth, setStairPlatformStairDepth] = useState(6 * FT);
+  const [stairPlatformNumSteps, setStairPlatformNumSteps] = useState(3);
+  const stairPlatformEditApiRef = useRef({ setPlatformDepth: () => {}, setStairDepth: () => {}, setNumSteps: () => {} });
   const [selectedSignId, setSelectedSignId] = useState(null);
   const selectedSignIdRef = useRef(selectedSignId);
   useEffect(() => { selectedSignIdRef.current = selectedSignId; rebuildModelRef.current(); }, [selectedSignId]);
@@ -2346,6 +2354,7 @@ export default function RoomBuilder() {
         columnBanks: [], // {id, panel, shape, u0, u1} -- a run of 5 evenly-spaced wall columns (square/round), drawn along a wall with the Wall tool
         suppBalconies: [], // {id, panel, u0, u1, side, platformHeight, railingCount} -- a thin floating platform on 2 corner pillars reaching the floor, a glass door, and a roof canopy, no stairs
         signs: [], // {id, panel, u0, u1, side, text} -- a rectangular sign standing off the wall on 4 corner posts, with the owner's own 3D text on its face
+        stairPlatforms: [], // {id, panel, u0, u1, side, platformDepth, stairDepth, numSteps} -- a stair leading up to a platform against the wall, flanked by full-height rectangular columns, a row of round pillars at the back, and a cantilevered slab on top at ceiling height
         freeformRooms: [], // {id, points: [{x,z}...], thickness, height, ceilingEnabled} -- a closed polyline of arbitrary straight segments, extruded into mitered walls with a floor and optional ceiling
         ceilingEnabled: false, // a purely decorative slab at wall-height -- never a raycast target; off by default (transparent ceilings noticeably slowed the UI)
       };
@@ -4483,6 +4492,7 @@ export default function RoomBuilder() {
       renderBalconies();
       renderTerraces();
       renderSuppBalconies();
+      renderStairPlatforms();
       renderSigns();
       renderFreeformRooms();
       renderFloorPillars();
@@ -5571,6 +5581,126 @@ export default function RoomBuilder() {
           const geo = axis === "x" ? new THREE.BoxGeometry(uLen, ROOF_THICKNESS, DEPTH) : new THREE.BoxGeometry(DEPTH, ROOF_THICKNESS, uLen);
           const w = toWorld((sb.u0 + sb.u1) / 2, DEPTH / 2);
           addPiece(geo, platMat, w.x, roofBottom + ROOF_THICKNESS / 2, w.z);
+        }
+      });
+    }
+
+    // a monumental entry stair: a low flight of steps leading up to a
+    // platform against the wall, flanked by a pair of full-height
+    // rectangular columns running alongside the stair, a row of round
+    // pillars against the wall at the back of the platform (evenly spaced,
+    // same idea as the wall Pillar tool's own drag-fill), and one
+    // substantial concrete slab resting on all of them at the current
+    // ceiling height, cantilevering out past the last step and past both
+    // columns. Works equally well set into an interior wall (climbing
+    // toward the wall onto a raised platform) or against an exterior one
+    // (an entrance stoop) -- both are just "which side of the wall it was
+    // drawn on," same as every other wall-drawn prop here.
+    const STAIRPLATFORM_RISE = 1 * FT; // per-step rise, same fixed riser the plain balcony's own stair uses
+    const STAIRPLATFORM_PILLAR_SPACING = 4 * FT;
+    const STAIRPLATFORM_PILLAR_RADIUS = 0.45 * FT;
+    const STAIRPLATFORM_COLUMN_SIZE = 1.2 * FT; // chunky square-ish column footprint, not a thin balustrade
+    const STAIRPLATFORM_SLAB_THICKNESS = 1.3 * FT;
+    const STAIRPLATFORM_SLAB_OVERHANG_U = 1.5 * FT; // how far the top slab overshoots the columns along the wall
+    const STAIRPLATFORM_SLAB_OVERHANG_D = 2.5 * FT; // ...and how far it juts out past the bottom step
+    function renderStairPlatforms() {
+      (state.stairPlatforms || []).forEach((sp) => {
+        const info = getPanelInfo(sp.panel);
+        if (!info) return;
+        const side = sp.side || 1;
+        const nx = info.normal.x * side, nz = info.normal.z * side;
+        const axis = info.lengthAxis;
+        const isSelected = isPickableTarget && selectedStairPlatformIdRef.current === sp.id;
+        const platMat = isSelected ? floorMatSelected : balconyPlatformMat;
+        const colMat = isSelected ? pillarMatSelected : pillarMat;
+        const slabMat = isSelected ? wallMatSelected : balconyRoofMat;
+        function toWorld(u, d) {
+          if (axis === "x") return { x: u, z: info.coord + nz * d };
+          return { x: info.coord + nx * d, z: u };
+        }
+        function addBox(u0, u1, d0, d1, y0, y1, mat) {
+          const uLen = Math.max(0.02, u1 - u0);
+          const dLen = Math.max(0.02, d1 - d0);
+          const h = Math.max(0.02, y1 - y0);
+          const geo = axis === "x" ? new THREE.BoxGeometry(uLen, h, dLen) : new THREE.BoxGeometry(dLen, h, uLen);
+          const mesh = new THREE.Mesh(geo, mat);
+          const w = toWorld((u0 + u1) / 2, (d0 + d1) / 2);
+          mesh.position.set(w.x, (y0 + y1) / 2, w.z);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          addEdges(mesh);
+          mesh.userData = { kind: "stairplatform", id: sp.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+          sceneGroup.add(mesh);
+          if (isPickableTarget) pickList.push(mesh);
+        }
+        const u0 = sp.u0, u1 = sp.u1;
+        const platformDepth = sp.platformDepth || 8 * FT;
+        const stairDepth = sp.stairDepth || 6 * FT;
+        const numSteps = Math.max(1, sp.numSteps || 3);
+        const platformHeight = numSteps * STAIRPLATFORM_RISE;
+        const topY = state.height; // pillars/columns/slab always reach the current ceiling height
+
+        // platform, against the wall
+        addBox(u0, u1, 0, platformDepth, 0, platformHeight, platMat);
+        // steps descending away from the platform toward the floor
+        const stepD = stairDepth / numSteps;
+        const stepH = platformHeight / numSteps;
+        for (let i = 0; i < numSteps; i++) {
+          const topH = platformHeight - i * stepH;
+          addBox(u0, u1, platformDepth + i * stepD, platformDepth + (i + 1) * stepD, 0, topH, platMat);
+        }
+        // round pillars against the wall, along the back of the platform
+        {
+          const r = STAIRPLATFORM_PILLAR_RADIUS;
+          const span = Math.max(0.1, u1 - u0 - 2 * r);
+          const count = Math.max(2, Math.round(span / STAIRPLATFORM_PILLAR_SPACING) + 1);
+          for (let i = 0; i < count; i++) {
+            const pu = u0 + r + (count > 1 ? (span * i) / (count - 1) : span / 2);
+            const w = toWorld(pu, r);
+            const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, topY, 20), colMat);
+            mesh.position.set(w.x, topY / 2, w.z);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            addEdges(mesh);
+            mesh.userData = { kind: "stairplatform", id: sp.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            if (isPickableTarget) pickList.push(mesh);
+          }
+        }
+        // 2 full-height rectangular columns flanking the stair run
+        const stairMidD = platformDepth + stairDepth / 2;
+        [u0 + STAIRPLATFORM_COLUMN_SIZE / 2, u1 - STAIRPLATFORM_COLUMN_SIZE / 2].forEach((cu) => {
+          addBox(
+            cu - STAIRPLATFORM_COLUMN_SIZE / 2, cu + STAIRPLATFORM_COLUMN_SIZE / 2,
+            stairMidD - stairDepth / 2, stairMidD + stairDepth / 2,
+            0, topY, colMat
+          );
+        });
+        // the big slab on top, overhanging on every open side -- its near
+        // edge reaches slightly past the wall so it reads as seated into it
+        // rather than floating just in front.
+        addBox(
+          u0 - STAIRPLATFORM_SLAB_OVERHANG_U, u1 + STAIRPLATFORM_SLAB_OVERHANG_U,
+          -0.3, platformDepth + stairDepth + STAIRPLATFORM_SLAB_OVERHANG_D,
+          topY, topY + STAIRPLATFORM_SLAB_THICKNESS, slabMat
+        );
+        // draggable edge bars at the platform's two side edges, only while
+        // selected -- same look/placement as the plain balcony's own.
+        if (isPickableTarget && isSelected) {
+          const barU = Math.max(0.08, Math.min(0.16, (u1 - u0) * 0.15));
+          const barD = 0.16;
+          function addHandle(edge, uCenter) {
+            const geo = axis === "x" ? new THREE.BoxGeometry(barU, topY, barD) : new THREE.BoxGeometry(barD, topY, barU);
+            const mesh = new THREE.Mesh(geo, handleMat);
+            mesh.renderOrder = 10;
+            const w = toWorld(uCenter, platformDepth / 2);
+            mesh.position.set(w.x, topY / 2, w.z);
+            mesh.userData = { kind: "resize-handle", target: "stairplatform", id: sp.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          addHandle("left", u0);
+          addHandle("right", u1);
         }
       });
     }
@@ -7761,6 +7891,7 @@ export default function RoomBuilder() {
         setSelectedOpeningId(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -7787,6 +7918,7 @@ export default function RoomBuilder() {
         setSelectedOpeningId(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -7817,6 +7949,7 @@ export default function RoomBuilder() {
         setSelectedBalconyId(null);
         setSelectedBalconyPart(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -7866,6 +7999,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
         setSelectedSignId(sign.id);
@@ -7883,6 +8017,32 @@ export default function RoomBuilder() {
             };
             capture(e);
           }
+        }
+        return;
+      }
+
+      // the stair-platform assembly -- tapping the platform, a step, a
+      // column, a round pillar, or the top slab all select the whole thing.
+      if (kind === "stairplatform") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        const sp = (state.stairPlatforms || []).find((s) => s.id === obj.userData.id);
+        setSelectedPanel(null);
+        setSelectedStairId(null);
+        setSelectedPropId(null);
+        setSelectedOpeningId(null);
+        setSelectedBalconyId(null);
+        setSelectedBalconyPart(null);
+        setSelectedTerraceId(null);
+        setSelectedSuppBalconyId(null);
+        setSelectedSignId(null);
+        setSelectedFreeformId(null);
+        setSelectedFreeformOpeningId(null);
+        setSelectedStairPlatformId(obj.userData.id);
+        if (sp) {
+          setStairPlatformDepth(sp.platformDepth || 8 * FT);
+          setStairPlatformStairDepth(sp.stairDepth || 6 * FT);
+          setStairPlatformNumSteps(sp.numSteps || 3);
         }
         return;
       }
@@ -7927,6 +8087,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(rm.id);
         setSelectedFreeformOpeningId(obj.userData.id);
@@ -7951,6 +8112,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -7975,6 +8137,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -8018,6 +8181,7 @@ export default function RoomBuilder() {
         setSelectedOpeningId(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -8057,7 +8221,7 @@ export default function RoomBuilder() {
       // the exceptions -- all four are drawn along a wall (see the
       // pending-balcony/pending-terrace/pending-suppbalcony/pending-sign
       // branches below), so this doesn't apply to any of them.
-      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony" && propsShapeRef.current !== "sign") {
+      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony" && propsShapeRef.current !== "stairPlatform" && propsShapeRef.current !== "sign") {
         if (kind === "floor") {
           const ownerRoomId = obj.userData.ownerRoomId ?? null;
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
@@ -8103,6 +8267,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -8132,6 +8297,7 @@ export default function RoomBuilder() {
         setSelectedBalconyPart(null);
         setSelectedTerraceId(null);
         setSelectedSuppBalconyId(null);
+        setSelectedStairPlatformId(null);
         setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -8213,6 +8379,14 @@ export default function RoomBuilder() {
         const normalComponent4 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
         const side4 = Math.sign((thickCoord4 - info.coord) * normalComponent4) || 1;
         dragState = { type: "pending-sign", panelKey, info, hitPoint: hp, side: side4, startScreen: { x: e.clientX, y: e.clientY } };
+      } else if (toolRef.current === "props" && propsShapeRef.current === "stairPlatform") {
+        // same wall-drag entry point as balcony/terrace/suppBalcony/sign
+        // above, just its own dragState type -- see the stairplatform-draw
+        // handling in onPointerMove/onPointerUp.
+        const thickCoord5 = info.thickAxis === "x" ? hit.point.x : hit.point.z;
+        const normalComponent5 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
+        const side5 = Math.sign((thickCoord5 - info.coord) * normalComponent5) || 1;
+        dragState = { type: "pending-stairplatform", panelKey, info, hitPoint: hp, side: side5, startScreen: { x: e.clientX, y: e.clientY } };
       } else if (toolRef.current === "move" && columnShapeRef.current !== "none") {
         // a run of columns is drawn along a wall exactly like a window --
         // tap and drag to mark its span -- rather than the Wall tool's
@@ -8516,6 +8690,21 @@ export default function RoomBuilder() {
         return;
       }
 
+      if (dragState.type === "pending-stairplatform") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "stairplatform-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u, side: dragState.side };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: 7 * FT };
+          rebuild();
+        }
+        return;
+      }
+
       if (dragState.type === "pending-sign") {
         const dx = e.clientX - dragState.startScreen.x;
         const dy = e.clientY - dragState.startScreen.y;
@@ -8682,6 +8871,15 @@ export default function RoomBuilder() {
         previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
         rebuild();
       } else if (dragState.type === "sign-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
+        rebuild();
+      } else if (dragState.type === "stairplatform-draw") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
         const info = getPanelInfo(dragState.panelKey);
@@ -8979,6 +9177,7 @@ export default function RoomBuilder() {
           setSelectedBalconyPart(null);
           setSelectedTerraceId(null);
           setSelectedSuppBalconyId(null);
+          setSelectedStairPlatformId(null);
           setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -9207,6 +9406,25 @@ export default function RoomBuilder() {
           setSignText("");
         }
         previewOpening = null;
+      } else if (dragState.type === "stairplatform-draw") {
+        const u0p = Math.min(dragState.u0, dragState.u1);
+        const u1p = Math.max(dragState.u0, dragState.u1);
+        const MIN_STAIRPLATFORM = 8 * FT;
+        if (u1p - u0p >= MIN_STAIRPLATFORM) {
+          const sp = {
+            id: idSeq++, panel: dragState.panelKey, u0: u0p, u1: u1p, side: dragState.side || 1,
+            platformDepth: 8 * FT, stairDepth: 6 * FT, numSteps: 3,
+          };
+          if (!state.stairPlatforms) state.stairPlatforms = [];
+          state.stairPlatforms.push(sp);
+          // deliberately not auto-selected -- same reasoning as the plain
+          // balcony above, the selection highlight right after drawing is
+          // more distracting than useful.
+          setStairPlatformDepth(sp.platformDepth);
+          setStairPlatformStairDepth(sp.stairDepth);
+          setStairPlatformNumSteps(sp.numSteps);
+        }
+        previewOpening = null;
       } else if (dragState.type === "column-draw") {
         const u0 = Math.min(dragState.u0, dragState.u1);
         const u1 = Math.max(dragState.u0, dragState.u1);
@@ -9413,6 +9631,7 @@ export default function RoomBuilder() {
       setSelectedBalconyPart(null);
       setSelectedTerraceId(null);
       setSelectedSuppBalconyId(null);
+      setSelectedStairPlatformId(null);
       setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -9598,6 +9817,7 @@ export default function RoomBuilder() {
       setSelectedBalconyPart(null);
       setSelectedTerraceId(null);
       setSelectedSuppBalconyId(null);
+      setSelectedStairPlatformId(null);
       setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -9762,9 +9982,49 @@ export default function RoomBuilder() {
       state.suppBalconies = (state.suppBalconies || []).filter((s) => s.id !== id);
       state.openings = state.openings.filter((o) => o.fromSuppBalcony !== id);
       setSelectedSuppBalconyId(null);
+      setSelectedStairPlatformId(null);
       rebuild();
     }
     deleteSuppBalconyRef.current = deleteActiveSuppBalcony;
+
+    function setActiveStairPlatformDepth(d) {
+      const id = selectedStairPlatformIdRef.current;
+      if (id == null) return;
+      const sp = (state.stairPlatforms || []).find((s) => s.id === id);
+      if (!sp) return;
+      sp.platformDepth = Math.max(2 * FT, d);
+      rebuild();
+    }
+    function setActiveStairPlatformStairDepth(d) {
+      const id = selectedStairPlatformIdRef.current;
+      if (id == null) return;
+      const sp = (state.stairPlatforms || []).find((s) => s.id === id);
+      if (!sp) return;
+      sp.stairDepth = Math.max(2 * FT, d);
+      rebuild();
+    }
+    function setActiveStairPlatformNumSteps(n) {
+      const id = selectedStairPlatformIdRef.current;
+      if (id == null) return;
+      const sp = (state.stairPlatforms || []).find((s) => s.id === id);
+      if (!sp) return;
+      sp.numSteps = Math.max(1, Math.min(12, Math.round(n)));
+      rebuild();
+    }
+    stairPlatformEditApiRef.current = {
+      setPlatformDepth: setActiveStairPlatformDepth,
+      setStairDepth: setActiveStairPlatformStairDepth,
+      setNumSteps: setActiveStairPlatformNumSteps,
+    };
+    function deleteActiveStairPlatform() {
+      const id = selectedStairPlatformIdRef.current;
+      if (id == null) return;
+      pushUndo();
+      state.stairPlatforms = (state.stairPlatforms || []).filter((s) => s.id !== id);
+      setSelectedStairPlatformId(null);
+      rebuild();
+    }
+    deleteStairPlatformRef.current = deleteActiveStairPlatform;
 
     function setActiveSignText(text) {
       const id = selectedSignIdRef.current;
@@ -10023,6 +10283,7 @@ export default function RoomBuilder() {
       setSelectedBalconyPart(null);
       setSelectedTerraceId(null);
       setSelectedSuppBalconyId(null);
+      setSelectedStairPlatformId(null);
       setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -12703,6 +12964,7 @@ export default function RoomBuilder() {
               setSelectedBalconyPart(null);
               setSelectedTerraceId(null);
               setSelectedSuppBalconyId(null);
+              setSelectedStairPlatformId(null);
               setSelectedSignId(null);
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
@@ -13398,6 +13660,7 @@ export default function RoomBuilder() {
                 { key: "balcony", label: "Balcony" },
                 { key: "terrace", label: "Terrace" },
                 { key: "suppBalcony", label: "Supported Balcony" },
+                { key: "stairPlatform", label: "Stair Platform" },
                 { key: "sign", label: "Sign" },
               ].map(({ key: s, label }) => (
                 <button
@@ -13732,6 +13995,67 @@ export default function RoomBuilder() {
                 const n = parseInt(e.target.value, 10);
                 setSuppBalconyRailingCount(n);
                 suppBalconyRailingCountApiRef.current.setCount(n);
+              }}
+            />
+          </div>
+        )}
+        {selectedStairPlatformId != null && (
+          <div className="ribbon-group" style={{ minWidth: 260 }}>
+            <span className="ribbon-label">Platform depth &middot; {(stairPlatformDepth / FT).toFixed(2)} ft</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="rb-bare-range"
+                type="range"
+                min={2}
+                max={30}
+                step={0.5}
+                value={stairPlatformDepth / FT}
+                onPointerDown={() => pushUndoRef.current()}
+                onChange={(e) => {
+                  const ft = parseFloat(e.target.value);
+                  setStairPlatformDepth(ft * FT);
+                  stairPlatformEditApiRef.current.setPlatformDepth(ft * FT);
+                }}
+              />
+              <button className="rb-btn" onClick={() => deleteStairPlatformRef.current()}>Delete</button>
+              <button className="rb-btn" onClick={() => setSelectedStairPlatformId(null)}>Done</button>
+            </div>
+          </div>
+        )}
+        {selectedStairPlatformId != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Stair depth &middot; {(stairPlatformStairDepth / FT).toFixed(2)} ft</span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={2}
+              max={20}
+              step={0.5}
+              value={stairPlatformStairDepth / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const ft = parseFloat(e.target.value);
+                setStairPlatformStairDepth(ft * FT);
+                stairPlatformEditApiRef.current.setStairDepth(ft * FT);
+              }}
+            />
+          </div>
+        )}
+        {selectedStairPlatformId != null && (
+          <div className="ribbon-group" style={{ minWidth: 160 }}>
+            <span className="ribbon-label">Steps &middot; {stairPlatformNumSteps}</span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={1}
+              max={12}
+              step={1}
+              value={stairPlatformNumSteps}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                setStairPlatformNumSteps(n);
+                stairPlatformEditApiRef.current.setNumSteps(n);
               }}
             />
           </div>
