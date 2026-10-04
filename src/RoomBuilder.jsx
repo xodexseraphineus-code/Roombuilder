@@ -3417,6 +3417,13 @@ export default function RoomBuilder() {
       if (c.fullHeight) {
         c = { ...c, bottomOverride: 0, height: Math.max(0.1, H - 1 * FT) };
       }
+      // the wall behind a Stair Platform's round pillars is cut away
+      // entirely -- floor to ceiling, tracking the current wall height same
+      // as a "full height" opening -- so it reads as a genuinely open
+      // colonnade rather than pillars standing in front of a solid wall.
+      if (c.fromStairPlatform != null) {
+        c = { ...c, bottomOverride: 0, height: H };
+      }
       if (c.isDoor) {
         // pillars always run floor-to-(ceiling minus a short header),
         // ignoring bottomOverride/height entirely -- there's no "door" in
@@ -5599,10 +5606,12 @@ export default function RoomBuilder() {
     const STAIRPLATFORM_RISE = 1 * FT; // per-step rise, same fixed riser the plain balcony's own stair uses
     const STAIRPLATFORM_PILLAR_SPACING = 4 * FT;
     const STAIRPLATFORM_PILLAR_RADIUS = 0.45 * FT;
-    const STAIRPLATFORM_COLUMN_SIZE = 1.2 * FT; // chunky square-ish column footprint, not a thin balustrade
-    const STAIRPLATFORM_SLAB_THICKNESS = 2 * FT;
-    const STAIRPLATFORM_SLAB_OVERHANG_U = 1.5 * FT; // how far the top slab overshoots the columns along the wall
-    const STAIRPLATFORM_SLAB_OVERHANG_D = 2.5 * FT; // ...and how far it juts out past the bottom step
+    const STAIRPLATFORM_COLUMN_SIZE = 1.2 * FT * 1.2; // chunky square-ish column footprint, 20% thicker than the first pass
+    const STAIRPLATFORM_SLAB_THICKNESS = 4 * FT; // 2x the first pass
+    const STAIRPLATFORM_SLAB_OVERHANG_U = 1.5 * FT; // how far the end slab segments overshoot the whole assembly along the wall
+    const STAIRPLATFORM_SLAB_OVERHANG_D = 2.5 * FT; // ...and how far every slab segment juts out past the bottom step
+    const STAIRPLATFORM_SLAB_GAP = 1 * FT; // gap between consecutive slab/column modules, so a long run reads as repeated bays
+    const STAIRPLATFORM_MODULE_LENGTH = 15 * FT; // one column+slab bay -- a longer drag tiles more of them rather than stretching one
     function renderStairPlatforms() {
       (state.stairPlatforms || []).forEach((sp) => {
         const info = getPanelInfo(sp.panel);
@@ -5612,8 +5621,11 @@ export default function RoomBuilder() {
         const axis = info.lengthAxis;
         const isSelected = isPickableTarget && selectedStairPlatformIdRef.current === sp.id;
         const platMat = isSelected ? floorMatSelected : balconyPlatformMat;
-        const colMat = isSelected ? pillarMatSelected : pillarMat;
-        const slabMat = isSelected ? wallMatSelected : balconyRoofMat;
+        // the rectangular columns, round pillars, and top slab all read as
+        // poured concrete continuous with the building itself, so they take
+        // the wall's own material/color rather than the generic pillar/roof
+        // tones every other prop here uses.
+        const structMat = isSelected ? wallMatSelected : currentWallMat;
         function toWorld(u, d) {
           if (axis === "x") return { x: u, z: info.coord + nz * d };
           return { x: info.coord + nx * d, z: u };
@@ -5646,16 +5658,18 @@ export default function RoomBuilder() {
         const slabBottom = slabTop - STAIRPLATFORM_SLAB_THICKNESS;
         const topY = slabBottom; // pillars/columns reach the slab's underside
 
-        // platform, against the wall
+        // platform and stairs stay one continuous run the full drawn length
+        // -- only the column+slab bays above repeat as separate modules.
         addBox(u0, u1, 0, platformDepth, 0, platformHeight, platMat);
-        // steps descending away from the platform toward the floor
         const stepD = stairDepth / numSteps;
         const stepH = platformHeight / numSteps;
         for (let i = 0; i < numSteps; i++) {
           const topH = platformHeight - i * stepH;
           addBox(u0, u1, platformDepth + i * stepD, platformDepth + (i + 1) * stepD, 0, topH, platMat);
         }
-        // round pillars against the wall, along the back of the platform
+        // round pillars against the wall, along the back of the platform --
+        // its own even spacing across the whole run, independent of the
+        // column/slab module tiling below.
         {
           const r = STAIRPLATFORM_PILLAR_RADIUS;
           const span = Math.max(0.1, u1 - u0 - 2 * r);
@@ -5663,7 +5677,7 @@ export default function RoomBuilder() {
           for (let i = 0; i < count; i++) {
             const pu = u0 + r + (count > 1 ? (span * i) / (count - 1) : span / 2);
             const w = toWorld(pu, r);
-            const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, topY, 20), colMat);
+            const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, topY, 20), structMat);
             mesh.position.set(w.x, topY / 2, w.z);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
@@ -5673,23 +5687,34 @@ export default function RoomBuilder() {
             if (isPickableTarget) pickList.push(mesh);
           }
         }
-        // 2 full-height rectangular columns flanking the stair run
+        // the column+slab bay repeats roughly every MODULE_LENGTH -- a
+        // longer drag tiles more whole bays rather than stretching one, same
+        // reasoning as the reference photos' own repeated colonnade.
+        const totalLen = Math.max(0.01, u1 - u0);
+        const numModules = Math.max(1, Math.round(totalLen / STAIRPLATFORM_MODULE_LENGTH));
+        const moduleLen = totalLen / numModules;
         const stairMidD = platformDepth + stairDepth / 2;
-        [u0 + STAIRPLATFORM_COLUMN_SIZE / 2, u1 - STAIRPLATFORM_COLUMN_SIZE / 2].forEach((cu) => {
+        for (let m = 0; m < numModules; m++) {
+          const mu0 = u0 + m * moduleLen, mu1 = mu0 + moduleLen;
+          const mCenter = (mu0 + mu1) / 2;
+          // one full-height rectangular column, centered on this bay's own
+          // stair run, not a pair at the bay's edges.
           addBox(
-            cu - STAIRPLATFORM_COLUMN_SIZE / 2, cu + STAIRPLATFORM_COLUMN_SIZE / 2,
+            mCenter - STAIRPLATFORM_COLUMN_SIZE / 2, mCenter + STAIRPLATFORM_COLUMN_SIZE / 2,
             stairMidD - stairDepth / 2, stairMidD + stairDepth / 2,
-            0, topY, colMat
+            0, topY, structMat
           );
-        });
-        // the big slab on top, overhanging on every open side -- its near
-        // edge reaches slightly past the wall so it reads as seated into it
-        // rather than floating just in front.
-        addBox(
-          u0 - STAIRPLATFORM_SLAB_OVERHANG_U, u1 + STAIRPLATFORM_SLAB_OVERHANG_U,
-          -0.3, platformDepth + stairDepth + STAIRPLATFORM_SLAB_OVERHANG_D,
-          slabBottom, slabTop, slabMat
-        );
+          // this bay's own slab segment -- the two end bays overhang past
+          // the whole assembly, interior bays leave a gap to the next one
+          // so a long run reads as distinct repeated roof segments.
+          const segU0 = mu0 + (m === 0 ? -STAIRPLATFORM_SLAB_OVERHANG_U : STAIRPLATFORM_SLAB_GAP / 2);
+          const segU1 = mu1 + (m === numModules - 1 ? STAIRPLATFORM_SLAB_OVERHANG_U : -STAIRPLATFORM_SLAB_GAP / 2);
+          addBox(
+            segU0, segU1,
+            -0.3, platformDepth + stairDepth + STAIRPLATFORM_SLAB_OVERHANG_D,
+            slabBottom, slabTop, structMat
+          );
+        }
         // draggable edge bars at the platform's two side edges, only while
         // selected -- same look/placement as the plain balcony's own.
         if (isPickableTarget && isSelected) {
@@ -5708,6 +5733,13 @@ export default function RoomBuilder() {
           addHandle("left", u0);
           addHandle("right", u1);
         }
+      });
+    }
+    function regenerateStairPlatformOpening(sp) {
+      state.openings = state.openings.filter((o) => o.fromStairPlatform !== sp.id);
+      state.openings.push({
+        id: idSeq++, panel: sp.panel, u0: sp.u0, u1: sp.u1,
+        bottomOverride: 0, height: state.height, dividers: 0, fromStairPlatform: sp.id,
       });
     }
 
@@ -9423,6 +9455,7 @@ export default function RoomBuilder() {
           };
           if (!state.stairPlatforms) state.stairPlatforms = [];
           state.stairPlatforms.push(sp);
+          regenerateStairPlatformOpening(sp);
           // deliberately not auto-selected -- same reasoning as the plain
           // balcony above, the selection highlight right after drawing is
           // more distracting than useful.
@@ -10027,6 +10060,7 @@ export default function RoomBuilder() {
       if (id == null) return;
       pushUndo();
       state.stairPlatforms = (state.stairPlatforms || []).filter((s) => s.id !== id);
+      state.openings = state.openings.filter((o) => o.fromStairPlatform !== id);
       setSelectedStairPlatformId(null);
       rebuild();
     }
