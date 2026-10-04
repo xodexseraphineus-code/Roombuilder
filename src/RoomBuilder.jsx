@@ -9714,14 +9714,14 @@ export default function RoomBuilder() {
       const savedState = state;
       state = entry.data;
       const lines = [];
+      const windowLines = []; // drawn afterward, thicker, to read as a band across the wall
       const addLines = (pk) => {
         const info = getPanelInfo(pk);
         if (!info) return;
         // draw the wall as solid line(s), but leave a gap wherever a
         // bump-out opens through it into another connected space --
         // otherwise the plan shows a wall where there is really an L-shaped
-        // opening. Window/door openings don't affect the plan silhouette,
-        // so those still draw as a continuous wall.
+        // opening.
         const cuts = bumpoutsFor(pk)
           .map((b) => ({
             u0: Math.max(info.u0, Math.min(b.u0, info.u1)),
@@ -9737,10 +9737,35 @@ export default function RoomBuilder() {
           cursor = c.u1;
         });
         if (cursor < info.u1 - 0.001) segs.push([cursor, info.u1]);
-        segs.forEach(([a, b]) => {
+        const pushLine = (a, b) => {
           if (info.lengthAxis === "x") lines.push([a, info.coord, b, info.coord]);
           else lines.push([info.coord, a, info.coord, b]);
+        };
+        // doors cut an actual gap in the wall line (same reasoning as a
+        // bump-out above); windows instead get a thicker band drawn on top
+        // afterward, with the wall line itself left continuous underneath.
+        const doorCuts = (state.openings || [])
+          .filter((o) => o.panel === pk && o.isDoor)
+          .map((o) => ({ u0: Math.max(info.u0, Math.min(o.u0, info.u1)), u1: Math.max(info.u0, Math.min(o.u1, info.u1)) }))
+          .filter((c) => c.u1 - c.u0 > 0.05)
+          .sort((a, b) => a.u0 - b.u0);
+        segs.forEach(([segA, segB]) => {
+          let cur = segA;
+          doorCuts.filter((c) => c.u1 > segA + 0.001 && c.u0 < segB - 0.001).forEach((c) => {
+            const a = Math.max(segA, c.u0), b = Math.min(segB, c.u1);
+            if (a > cur + 0.001) pushLine(cur, a);
+            cur = b;
+          });
+          if (cur < segB - 0.001) pushLine(cur, segB);
         });
+        (state.openings || [])
+          .filter((o) => o.panel === pk && !o.isDoor)
+          .map((o) => ({ u0: Math.max(info.u0, Math.min(o.u0, info.u1)), u1: Math.max(info.u0, Math.min(o.u1, info.u1)) }))
+          .filter((c) => c.u1 - c.u0 > 0.05)
+          .forEach((c) => {
+            if (info.lengthAxis === "x") windowLines.push([c.u0, info.coord, c.u1, info.coord]);
+            else windowLines.push([info.coord, c.u0, info.coord, c.u1]);
+          });
       };
       const keys = ["north", "south", "east", "west"];
       state.bumpouts.forEach((b) => {
@@ -9752,6 +9777,45 @@ export default function RoomBuilder() {
       });
       keys.forEach(addLines);
       state.partitions.forEach((p) => addLines("pt:" + p.id));
+
+      // freeform rooms: the closed polygon itself, plus the same door-gap /
+      // window-band treatment as a regular wall, projected from each
+      // opening's own along-segment u0/u1 onto that segment's world
+      // endpoints.
+      (state.freeformRooms || []).forEach((rm) => {
+        const pts = rm.points;
+        if (!pts || pts.length < 2) return;
+        const openingsBySeg = new Map();
+        (rm.openings || []).forEach((o) => {
+          if (!openingsBySeg.has(o.segIndex)) openingsBySeg.set(o.segIndex, []);
+          openingsBySeg.get(o.segIndex).push(o);
+        });
+        for (let i = 0; i < pts.length; i++) {
+          const a = pts[i], b = pts[(i + 1) % pts.length];
+          const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+          const lerp = (t) => ({ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t });
+          const segOpenings = (openingsBySeg.get(i) || []).slice().sort((x, y) => x.u0 - y.u0);
+          const doorCuts = segOpenings.filter((o) => o.isDoor && o.u1 - o.u0 > 0.05);
+          let cur = 0;
+          doorCuts.forEach((o) => {
+            const u0 = Math.max(0, Math.min(o.u0, segLen)), u1 = Math.max(0, Math.min(o.u1, segLen));
+            if (u0 > cur + 0.001) { const p0 = lerp(cur / segLen), p1 = lerp(u0 / segLen); lines.push([p0.x, p0.z, p1.x, p1.z]); }
+            cur = u1;
+          });
+          if (cur < segLen - 0.001) { const p0 = lerp(cur / segLen), p1 = lerp(1); lines.push([p0.x, p0.z, p1.x, p1.z]); }
+          segOpenings.filter((o) => !o.isDoor && o.u1 - o.u0 > 0.05).forEach((o) => {
+            const u0 = Math.max(0, Math.min(o.u0, segLen)), u1 = Math.max(0, Math.min(o.u1, segLen));
+            const p0 = lerp(u0 / segLen), p1 = lerp(u1 / segLen);
+            windowLines.push([p0.x, p0.z, p1.x, p1.z]);
+          });
+        }
+      });
+
+      // decorative props: small orange dots, roughly sized to each one's
+      // own footprint, so a placed sphere/cube/cone/cylinder at least shows
+      // up on the plan instead of vanishing entirely.
+      const propPoints = (state.props || []).map((p) => ({ x: p.x, z: p.z, r: Math.max(p.w || 1, p.d || 1) / 2 }));
+
       const fp = state.footprint;
       state = savedState;
 
@@ -9807,6 +9871,14 @@ export default function RoomBuilder() {
         minX = Math.min(minX, x0, x1); maxX = Math.max(maxX, x0, x1);
         minZ = Math.min(minZ, z0, z1); maxZ = Math.max(maxZ, z0, z1);
       });
+      (state.freeformRooms || []).forEach((rm) => (rm.points || []).forEach((p) => {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+      }));
+      propPoints.forEach((p) => {
+        minX = Math.min(minX, p.x - p.r); maxX = Math.max(maxX, p.x + p.r);
+        minZ = Math.min(minZ, p.z - p.r); maxZ = Math.max(maxZ, p.z + p.r);
+      });
       const pad = W * 0.09;
       const spanX = Math.max(0.5, maxX - minX), spanZ = Math.max(0.5, maxZ - minZ);
       const scale = Math.min((W - 2 * pad) / spanX, (H - 2 * pad) / spanZ);
@@ -9819,6 +9891,22 @@ export default function RoomBuilder() {
         ctx.moveTo(ox + x0 * scale, oz + z0 * scale);
         ctx.lineTo(ox + x1 * scale, oz + z1 * scale);
         ctx.stroke();
+      });
+      // windows draw as a thicker band directly on top of the wall line,
+      // rather than a gap -- distinguishing them from a door's open cut.
+      ctx.lineWidth = Math.max(3, W * 0.03);
+      windowLines.forEach(([x0, z0, x1, z1]) => {
+        ctx.beginPath();
+        ctx.moveTo(ox + x0 * scale, oz + z0 * scale);
+        ctx.lineTo(ox + x1 * scale, oz + z1 * scale);
+        ctx.stroke();
+      });
+      // decorative props as small orange dots.
+      ctx.fillStyle = "#FF6B1A";
+      propPoints.forEach((p) => {
+        ctx.beginPath();
+        ctx.arc(ox + p.x * scale, oz + p.z * scale, Math.max(2, p.r * scale), 0, Math.PI * 2);
+        ctx.fill();
       });
     }
     refreshThumbnailApiRef.current = refreshThumbnail;
