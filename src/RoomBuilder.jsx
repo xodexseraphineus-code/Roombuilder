@@ -5600,7 +5600,7 @@ export default function RoomBuilder() {
     const STAIRPLATFORM_PILLAR_SPACING = 4 * FT;
     const STAIRPLATFORM_PILLAR_RADIUS = 0.45 * FT;
     const STAIRPLATFORM_COLUMN_SIZE = 1.2 * FT; // chunky square-ish column footprint, not a thin balustrade
-    const STAIRPLATFORM_SLAB_THICKNESS = 1.3 * FT;
+    const STAIRPLATFORM_SLAB_THICKNESS = 2 * FT;
     const STAIRPLATFORM_SLAB_OVERHANG_U = 1.5 * FT; // how far the top slab overshoots the columns along the wall
     const STAIRPLATFORM_SLAB_OVERHANG_D = 2.5 * FT; // ...and how far it juts out past the bottom step
     function renderStairPlatforms() {
@@ -5638,7 +5638,13 @@ export default function RoomBuilder() {
         const stairDepth = sp.stairDepth || 6 * FT;
         const numSteps = Math.max(1, sp.numSteps || 3);
         const platformHeight = numSteps * STAIRPLATFORM_RISE;
-        const topY = state.height; // pillars/columns/slab always reach the current ceiling height
+        // the slab's TOP sits flush with the current ceiling height, hanging
+        // down from there by its own thickness -- the pillars/columns only
+        // need to reach its underside, which deliberately reads as a lower,
+        // more intimate covered area than the room's full ceiling height.
+        const slabTop = state.height;
+        const slabBottom = slabTop - STAIRPLATFORM_SLAB_THICKNESS;
+        const topY = slabBottom; // pillars/columns reach the slab's underside
 
         // platform, against the wall
         addBox(u0, u1, 0, platformDepth, 0, platformHeight, platMat);
@@ -5682,7 +5688,7 @@ export default function RoomBuilder() {
         addBox(
           u0 - STAIRPLATFORM_SLAB_OVERHANG_U, u1 + STAIRPLATFORM_SLAB_OVERHANG_U,
           -0.3, platformDepth + stairDepth + STAIRPLATFORM_SLAB_OVERHANG_D,
-          topY, topY + STAIRPLATFORM_SLAB_THICKNESS, slabMat
+          slabBottom, slabTop, slabMat
         );
         // draggable edge bars at the platform's two side edges, only while
         // selected -- same look/placement as the plain balcony's own.
