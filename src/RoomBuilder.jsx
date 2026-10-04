@@ -1104,6 +1104,10 @@ export default function RoomBuilder() {
   const selectedTerraceIdRef = useRef(selectedTerraceId);
   useEffect(() => { selectedTerraceIdRef.current = selectedTerraceId; rebuildModelRef.current(); }, [selectedTerraceId]);
   const deleteTerraceRef = useRef(() => {});
+  const [terraceDepth, setTerraceDepth] = useState(10 * FT);
+  const terraceDepthApiRef = useRef({ setDepth: () => {} });
+  const [terraceRailHeight, setTerraceRailHeight] = useState(3.5 * FT);
+  const terraceRailHeightApiRef = useRef({ setRailHeight: () => {} });
   const [selectedSuppBalconyId, setSelectedSuppBalconyId] = useState(null);
   const selectedSuppBalconyIdRef = useRef(selectedSuppBalconyId);
   useEffect(() => { selectedSuppBalconyIdRef.current = selectedSuppBalconyId; rebuildModelRef.current(); }, [selectedSuppBalconyId]);
@@ -1112,13 +1116,15 @@ export default function RoomBuilder() {
   const suppBalconyHeightApiRef = useRef({ setHeight: () => {} });
   const [suppBalconyRailingCount, setSuppBalconyRailingCount] = useState(6);
   const suppBalconyRailingCountApiRef = useRef({ setCount: () => {} });
+  const [suppBalconyDepth, setSuppBalconyDepth] = useState(6 * FT);
+  const suppBalconyDepthApiRef = useRef({ setDepth: () => {} });
   const [selectedStairPlatformId, setSelectedStairPlatformId] = useState(null);
   const selectedStairPlatformIdRef = useRef(selectedStairPlatformId);
   useEffect(() => { selectedStairPlatformIdRef.current = selectedStairPlatformId; rebuildModelRef.current(); }, [selectedStairPlatformId]);
   const deleteStairPlatformRef = useRef(() => {});
   const [stairPlatformDepth, setStairPlatformDepth] = useState(8 * FT);
   const [stairPlatformStairDepth, setStairPlatformStairDepth] = useState(6 * FT);
-  const [stairPlatformNumSteps, setStairPlatformNumSteps] = useState(3);
+  const [stairPlatformNumSteps, setStairPlatformNumSteps] = useState(5);
   const stairPlatformEditApiRef = useRef({ setPlatformDepth: () => {}, setStairDepth: () => {}, setNumSteps: () => {} });
   const [selectedSignId, setSelectedSignId] = useState(null);
   const selectedSignIdRef = useRef(selectedSignId);
@@ -5420,6 +5426,31 @@ export default function RoomBuilder() {
           }
           addHandle("left", u0);
           addHandle("right", u1);
+          // front handle at the platform's outer edge -- dragging it changes
+          // how far the whole assembly projects from the wall.
+          {
+            const mid = (u0 + u1) / 2;
+            const geo = axis === "x" ? new THREE.BoxGeometry(barU, pillarTop, barD) : new THREE.BoxGeometry(barD, pillarTop, barU);
+            const mesh = new THREE.Mesh(geo, handleMat);
+            mesh.renderOrder = 10;
+            const w = toWorld(mid, PLATFORM_D);
+            mesh.position.set(w.x, pillarTop / 2, w.z);
+            mesh.userData = { kind: "resize-handle", target: "balcony-depth", id: bal.id, edge: "front", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          // top handle above the platform's own center -- dragging it
+          // changes the platform height itself (and with it, the stairs).
+          {
+            const mid = (u0 + u1) / 2;
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+            mesh.renderOrder = 10;
+            const w = toWorld(mid, PLATFORM_D / 2);
+            mesh.position.set(w.x, platformHeight + PROP_HANDLE * 0.9, w.z);
+            mesh.userData = { kind: "resize-handle", target: "balcony-height", id: bal.id, edge: "top", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
         }
       });
     }
@@ -5429,9 +5460,7 @@ export default function RoomBuilder() {
     // fence) and a door cut into the wall directly behind it -- no stairs
     // down to the ground, since it's already at floor level.
     function renderTerraces() {
-      const DEPTH = 10 * FT;
       const PLATFORM_THICKNESS = 0.25;
-      const RAIL_TOP_H = 3.5 * FT;
       const POST_SIZE = 0.09;
       const terraceY = 0.5 * FT;
       (state.terraces || []).forEach((t) => {
@@ -5440,6 +5469,8 @@ export default function RoomBuilder() {
         const side = t.side || 1;
         const nx = info.normal.x * side, nz = info.normal.z * side;
         const axis = info.lengthAxis;
+        const DEPTH = t.depth || 10 * FT;
+        const RAIL_TOP_H = t.railHeight || 3.5 * FT;
         const isSelected = isPickableTarget && selectedTerraceIdRef.current === t.id;
         const platMat = isSelected ? floorMatSelected : balconyPlatformMat;
         const postMat = isSelected ? wallMatSelected : wallMat;
@@ -5495,6 +5526,47 @@ export default function RoomBuilder() {
           if (len < 0.02) continue;
           addPiece(new THREE.BoxGeometry(len, 0.08, POST_SIZE), postMat, (wa.x + wb.x) / 2, terraceY + RAIL_TOP_H, (wa.z + wb.z) / 2, Math.atan2(-dz, dx));
         }
+        // draggable handles while selected -- left/right at the platform's
+        // side edges, front at its outer edge (depth), top above its
+        // center (railing height).
+        if (isPickableTarget && isSelected) {
+          const barU = Math.max(0.08, Math.min(0.16, (t.u1 - t.u0) * 0.15));
+          const barD = 0.16;
+          const barH = terraceY + RAIL_TOP_H;
+          function addSideHandle(edge, uCenter) {
+            const geo2 = axis === "x" ? new THREE.BoxGeometry(barU, barH, barD) : new THREE.BoxGeometry(barD, barH, barU);
+            const mesh = new THREE.Mesh(geo2, handleMat);
+            mesh.renderOrder = 10;
+            const w2 = toWorld(uCenter, DEPTH / 2);
+            mesh.position.set(w2.x, barH / 2, w2.z);
+            mesh.userData = { kind: "resize-handle", target: "terrace", id: t.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          addSideHandle("left", t.u0);
+          addSideHandle("right", t.u1);
+          {
+            const mid = (t.u0 + t.u1) / 2;
+            const geo2 = axis === "x" ? new THREE.BoxGeometry(barU, barH, barD) : new THREE.BoxGeometry(barD, barH, barU);
+            const mesh = new THREE.Mesh(geo2, handleMat);
+            mesh.renderOrder = 10;
+            const w2 = toWorld(mid, DEPTH);
+            mesh.position.set(w2.x, barH / 2, w2.z);
+            mesh.userData = { kind: "resize-handle", target: "terrace-depth", id: t.id, edge: "front", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          {
+            const mid = (t.u0 + t.u1) / 2;
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+            mesh.renderOrder = 10;
+            const w2 = toWorld(mid, DEPTH / 2);
+            mesh.position.set(w2.x, terraceY + RAIL_TOP_H + PROP_HANDLE * 0.9, w2.z);
+            mesh.userData = { kind: "resize-handle", target: "terrace-railheight", id: t.id, edge: "top", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+        }
       });
     }
 
@@ -5504,7 +5576,6 @@ export default function RoomBuilder() {
     // wall behind it (handled by the ordinary opening system), and a
     // rectangular roof canopy a foot above the door -- no stairs.
     function renderSuppBalconies() {
-      const DEPTH = 6 * FT;
       const PLATFORM_THICKNESS = 0.25;
       const ROOF_THICKNESS = 0.25;
       const ROOF_GAP = 1 * FT;
@@ -5521,6 +5592,7 @@ export default function RoomBuilder() {
         const platMat = isSelected ? floorMatSelected : balconyPlatformMat;
         const railMat = isSelected ? wallMatSelected : wallMat;
         const platformTop = sb.platformHeight;
+        const DEPTH = sb.depth || 6 * FT;
         function toWorld(u, d) {
           if (axis === "x") return { x: u, z: info.coord + nz * d };
           return { x: info.coord + nx * d, z: u };
@@ -5588,6 +5660,46 @@ export default function RoomBuilder() {
           const geo = axis === "x" ? new THREE.BoxGeometry(uLen, ROOF_THICKNESS, DEPTH) : new THREE.BoxGeometry(DEPTH, ROOF_THICKNESS, uLen);
           const w = toWorld((sb.u0 + sb.u1) / 2, DEPTH / 2);
           addPiece(geo, platMat, w.x, roofBottom + ROOF_THICKNESS / 2, w.z);
+        }
+        // draggable handles while selected -- left/right at the platform's
+        // side edges, front at its outer edge (depth), top above its
+        // center (platform height).
+        if (isPickableTarget && isSelected) {
+          const barU = Math.max(0.08, Math.min(0.16, (sb.u1 - sb.u0) * 0.15));
+          const barD = 0.16;
+          function addSideHandle(edge, uCenter) {
+            const geo2 = axis === "x" ? new THREE.BoxGeometry(barU, platformTop, barD) : new THREE.BoxGeometry(barD, platformTop, barU);
+            const mesh = new THREE.Mesh(geo2, handleMat);
+            mesh.renderOrder = 10;
+            const w2 = toWorld(uCenter, DEPTH / 2);
+            mesh.position.set(w2.x, platformTop / 2, w2.z);
+            mesh.userData = { kind: "resize-handle", target: "suppbalcony", id: sb.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          addSideHandle("left", sb.u0);
+          addSideHandle("right", sb.u1);
+          {
+            const mid = (sb.u0 + sb.u1) / 2;
+            const geo2 = axis === "x" ? new THREE.BoxGeometry(barU, platformTop, barD) : new THREE.BoxGeometry(barD, platformTop, barU);
+            const mesh = new THREE.Mesh(geo2, handleMat);
+            mesh.renderOrder = 10;
+            const w2 = toWorld(mid, DEPTH);
+            mesh.position.set(w2.x, platformTop / 2, w2.z);
+            mesh.userData = { kind: "resize-handle", target: "suppbalcony-depth", id: sb.id, edge: "front", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          {
+            const mid = (sb.u0 + sb.u1) / 2;
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+            mesh.renderOrder = 10;
+            const w2 = toWorld(mid, DEPTH / 2);
+            mesh.position.set(w2.x, platformTop + PROP_HANDLE * 0.9, w2.z);
+            mesh.userData = { kind: "resize-handle", target: "suppbalcony-height", id: sb.id, edge: "top", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
         }
       });
     }
@@ -5715,12 +5827,14 @@ export default function RoomBuilder() {
             slabBottom, slabTop, structMat
           );
         }
-        // draggable edge bars at the platform's two side edges, only while
-        // selected -- same look/placement as the plain balcony's own.
+        // draggable handles while selected -- left/right at the platform's
+        // side edges (u0/u1), front at the far end of the stairs (platform
+        // depth), top above the slab's center (step count, which is what
+        // actually drives this assembly's overall height).
         if (isPickableTarget && isSelected) {
           const barU = Math.max(0.08, Math.min(0.16, (u1 - u0) * 0.15));
           const barD = 0.16;
-          function addHandle(edge, uCenter) {
+          function addSideHandle(edge, uCenter) {
             const geo = axis === "x" ? new THREE.BoxGeometry(barU, topY, barD) : new THREE.BoxGeometry(barD, topY, barU);
             const mesh = new THREE.Mesh(geo, handleMat);
             mesh.renderOrder = 10;
@@ -5730,8 +5844,29 @@ export default function RoomBuilder() {
             sceneGroup.add(mesh);
             pickList.push(mesh);
           }
-          addHandle("left", u0);
-          addHandle("right", u1);
+          addSideHandle("left", u0);
+          addSideHandle("right", u1);
+          {
+            const mid = (u0 + u1) / 2;
+            const geo = axis === "x" ? new THREE.BoxGeometry(barU, topY, barD) : new THREE.BoxGeometry(barD, topY, barU);
+            const mesh = new THREE.Mesh(geo, handleMat);
+            mesh.renderOrder = 10;
+            const w = toWorld(mid, platformDepth + stairDepth);
+            mesh.position.set(w.x, topY / 2, w.z);
+            mesh.userData = { kind: "resize-handle", target: "stairplatform", id: sp.id, edge: "front", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          {
+            const mid = (u0 + u1) / 2;
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+            mesh.renderOrder = 10;
+            const w = toWorld(mid, platformDepth / 2);
+            mesh.position.set(w.x, topY + PROP_HANDLE * 0.9, w.z);
+            mesh.userData = { kind: "resize-handle", target: "stairplatform", id: sp.id, edge: "top", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
         }
       });
     }
@@ -7866,6 +8001,87 @@ export default function RoomBuilder() {
           if (!info) return;
           pushUndo();
           dragState = { type: "resize-balcony", id: rh.id, edge: rh.edge, panelKey: bal.panel, plane: panelFacePlane(info, hit.point) };
+        } else if (rh.target === "balcony-depth") {
+          const bal = (state.balconies || []).find((b) => b.id === rh.id);
+          if (!bal) return;
+          pushUndo();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "resize-balcony-depth", id: rh.id, panelKey: bal.panel, plane };
+        } else if (rh.target === "balcony-height") {
+          const bal = (state.balconies || []).find((b) => b.id === rh.id);
+          if (!bal) return;
+          pushUndo();
+          const center = hit.point.clone();
+          const camXZ = new THREE.Vector3(interactionCamera.position.x - center.x, 0, interactionCamera.position.z - center.z);
+          if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camXZ, center);
+          dragState = { type: "resize-balcony-height", id: rh.id, plane, startH: bal.platformHeight || 5 * FT, startY: hit.point.y };
+        } else if (rh.target === "stairplatform" && (rh.edge === "left" || rh.edge === "right")) {
+          const sp = (state.stairPlatforms || []).find((s) => s.id === rh.id);
+          if (!sp) return;
+          const info = getPanelInfo(sp.panel);
+          if (!info) return;
+          pushUndo();
+          dragState = { type: "resize-stairplatform", id: rh.id, edge: rh.edge, panelKey: sp.panel, plane: panelFacePlane(info, hit.point) };
+        } else if (rh.target === "stairplatform" && rh.edge === "front") {
+          const sp = (state.stairPlatforms || []).find((s) => s.id === rh.id);
+          if (!sp) return;
+          pushUndo();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "resize-stairplatform-depth", id: rh.id, panelKey: sp.panel, plane };
+        } else if (rh.target === "stairplatform" && rh.edge === "top") {
+          const sp = (state.stairPlatforms || []).find((s) => s.id === rh.id);
+          if (!sp) return;
+          pushUndo();
+          const center = hit.point.clone();
+          const camXZ = new THREE.Vector3(interactionCamera.position.x - center.x, 0, interactionCamera.position.z - center.z);
+          if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camXZ, center);
+          dragState = { type: "resize-stairplatform-steps", id: rh.id, plane, startSteps: Math.max(1, sp.numSteps || 5), startY: hit.point.y };
+        } else if (rh.target === "suppbalcony") {
+          const sb = (state.suppBalconies || []).find((s) => s.id === rh.id);
+          if (!sb) return;
+          const info = getPanelInfo(sb.panel);
+          if (!info) return;
+          pushUndo();
+          dragState = { type: "resize-suppbalcony", id: rh.id, edge: rh.edge, panelKey: sb.panel, plane: panelFacePlane(info, hit.point) };
+        } else if (rh.target === "suppbalcony-depth") {
+          const sb = (state.suppBalconies || []).find((s) => s.id === rh.id);
+          if (!sb) return;
+          pushUndo();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "resize-suppbalcony-depth", id: rh.id, panelKey: sb.panel, plane };
+        } else if (rh.target === "suppbalcony-height") {
+          const sb = (state.suppBalconies || []).find((s) => s.id === rh.id);
+          if (!sb) return;
+          pushUndo();
+          const center = hit.point.clone();
+          const camXZ = new THREE.Vector3(interactionCamera.position.x - center.x, 0, interactionCamera.position.z - center.z);
+          if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camXZ, center);
+          dragState = { type: "resize-suppbalcony-height", id: rh.id, plane, startH: sb.platformHeight || 6 * FT, startY: hit.point.y };
+        } else if (rh.target === "terrace" && (rh.edge === "left" || rh.edge === "right")) {
+          const t = (state.terraces || []).find((tt) => tt.id === rh.id);
+          if (!t) return;
+          const info = getPanelInfo(t.panel);
+          if (!info) return;
+          pushUndo();
+          dragState = { type: "resize-terrace", id: rh.id, edge: rh.edge, panelKey: t.panel, plane: panelFacePlane(info, hit.point) };
+        } else if (rh.target === "terrace-depth") {
+          const t = (state.terraces || []).find((tt) => tt.id === rh.id);
+          if (!t) return;
+          pushUndo();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "resize-terrace-depth", id: rh.id, panelKey: t.panel, plane };
+        } else if (rh.target === "terrace-railheight") {
+          const t = (state.terraces || []).find((tt) => tt.id === rh.id);
+          if (!t) return;
+          pushUndo();
+          const center = hit.point.clone();
+          const camXZ = new THREE.Vector3(interactionCamera.position.x - center.x, 0, interactionCamera.position.z - center.z);
+          if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camXZ, center);
+          dragState = { type: "resize-terrace-railheight", id: rh.id, plane, startH: t.railHeight || 3.5 * FT, startY: hit.point.y };
         } else if (rh.target === "prop") {
           const p = (state.props || []).find((pp) => pp.id === rh.id);
           if (!p) return;
@@ -7992,6 +8208,13 @@ export default function RoomBuilder() {
         setSelectedFreeformId(null);
         setSelectedFreeformOpeningId(null);
         setSelectedTerraceId(obj.userData.id);
+        {
+          const t = (state.terraces || []).find((tt) => tt.id === obj.userData.id);
+          if (t) {
+            setTerraceDepth(t.depth || 10 * FT);
+            setTerraceRailHeight(t.railHeight || 3.5 * FT);
+          }
+        }
         return;
       }
 
@@ -8015,6 +8238,7 @@ export default function RoomBuilder() {
         if (sb) {
           setSuppBalconyHeight(sb.platformHeight || 6 * FT);
           setSuppBalconyRailingCount(sb.railingCount || 6);
+          setSuppBalconyDepth(sb.depth || 6 * FT);
         }
         return;
       }
@@ -9011,6 +9235,150 @@ export default function RoomBuilder() {
           }
         }
         rebuild();
+      } else if (dragState.type === "resize-balcony-depth") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const bal = (state.balconies || []).find((b) => b.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!bal || !info) { dragState = null; return; }
+        const side = bal.side || 1;
+        const d = info.lengthAxis === "x"
+          ? (pt.z - info.coord) / (info.normal.z * side)
+          : (pt.x - info.coord) / (info.normal.x * side);
+        const newDepth = Math.max(3 * FT, Math.min(60 * FT, d));
+        bal.platformWidth = newDepth;
+        setBalconyPlatformWidth(newDepth);
+        rebuild();
+      } else if (dragState.type === "resize-balcony-height") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const bal = (state.balconies || []).find((b) => b.id === dragState.id);
+        if (!bal) { dragState = null; return; }
+        const dy = pt.y - dragState.startY;
+        const newH = Math.max(1 * FT, Math.min(state.height - 1.5 * FT, dragState.startH + dy));
+        bal.platformHeight = newH;
+        regenerateBalconyOpenings(bal);
+        setBalconyStairHeight(newH);
+        rebuild();
+      } else if (dragState.type === "resize-stairplatform") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sp = (state.stairPlatforms || []).find((s) => s.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!sp || !info) { dragState = null; return; }
+        const MIN_STAIRPLATFORM = 8 * FT;
+        const u = snapValue(panelU(info, pt));
+        if (dragState.edge === "left") {
+          sp.u0 = Math.max(info.u0, Math.min(u, sp.u1 - MIN_STAIRPLATFORM));
+        } else {
+          sp.u1 = Math.min(info.u1, Math.max(u, sp.u0 + MIN_STAIRPLATFORM));
+        }
+        regenerateStairPlatformOpening(sp);
+        rebuild();
+      } else if (dragState.type === "resize-stairplatform-depth") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sp = (state.stairPlatforms || []).find((s) => s.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!sp || !info) { dragState = null; return; }
+        const side = sp.side || 1;
+        const totalD = info.lengthAxis === "x"
+          ? (pt.z - info.coord) / (info.normal.z * side)
+          : (pt.x - info.coord) / (info.normal.x * side);
+        const newDepth = Math.max(2 * FT, Math.min(30 * FT, totalD - (sp.stairDepth || 6 * FT)));
+        sp.platformDepth = newDepth;
+        setStairPlatformDepth(newDepth);
+        rebuild();
+      } else if (dragState.type === "resize-stairplatform-steps") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sp = (state.stairPlatforms || []).find((s) => s.id === dragState.id);
+        if (!sp) { dragState = null; return; }
+        const dy = pt.y - dragState.startY;
+        const STEP_RISE = 1 * FT; // must match STAIRPLATFORM_RISE in renderStairPlatforms
+        const newSteps = Math.max(1, Math.min(12, Math.round(dragState.startSteps + dy / STEP_RISE)));
+        sp.numSteps = newSteps;
+        setStairPlatformNumSteps(newSteps);
+        rebuild();
+      } else if (dragState.type === "resize-suppbalcony") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sb = (state.suppBalconies || []).find((s) => s.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!sb || !info) { dragState = null; return; }
+        const MIN_SUPPBAL = 6 * FT;
+        const u = snapValue(panelU(info, pt));
+        if (dragState.edge === "left") {
+          sb.u0 = Math.max(info.u0, Math.min(u, sb.u1 - MIN_SUPPBAL));
+        } else {
+          sb.u1 = Math.min(info.u1, Math.max(u, sb.u0 + MIN_SUPPBAL));
+        }
+        regenerateSuppBalconyOpening(sb);
+        rebuild();
+      } else if (dragState.type === "resize-suppbalcony-depth") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sb = (state.suppBalconies || []).find((s) => s.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!sb || !info) { dragState = null; return; }
+        const side = sb.side || 1;
+        const d = info.lengthAxis === "x"
+          ? (pt.z - info.coord) / (info.normal.z * side)
+          : (pt.x - info.coord) / (info.normal.x * side);
+        const newDepth = Math.max(3 * FT, Math.min(30 * FT, d));
+        sb.depth = newDepth;
+        setSuppBalconyDepth(newDepth);
+        rebuild();
+      } else if (dragState.type === "resize-suppbalcony-height") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const sb = (state.suppBalconies || []).find((s) => s.id === dragState.id);
+        if (!sb) { dragState = null; return; }
+        const dy = pt.y - dragState.startY;
+        const newH = Math.max(2 * FT, Math.min(state.height - 2 * FT, dragState.startH + dy));
+        sb.platformHeight = newH;
+        regenerateSuppBalconyOpening(sb);
+        setSuppBalconyHeight(newH);
+        rebuild();
+      } else if (dragState.type === "resize-terrace") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const t = (state.terraces || []).find((tt) => tt.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!t || !info) { dragState = null; return; }
+        const MIN_TERRACE = 4 * FT;
+        const u = snapValue(panelU(info, pt));
+        if (dragState.edge === "left") {
+          t.u0 = Math.max(info.u0, Math.min(u, t.u1 - MIN_TERRACE));
+        } else {
+          t.u1 = Math.min(info.u1, Math.max(u, t.u0 + MIN_TERRACE));
+        }
+        regenerateTerraceOpenings(t);
+        rebuild();
+      } else if (dragState.type === "resize-terrace-depth") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const t = (state.terraces || []).find((tt) => tt.id === dragState.id);
+        const info = getPanelInfo(dragState.panelKey);
+        if (!t || !info) { dragState = null; return; }
+        const side = t.side || 1;
+        const d = info.lengthAxis === "x"
+          ? (pt.z - info.coord) / (info.normal.z * side)
+          : (pt.x - info.coord) / (info.normal.x * side);
+        const newDepth = Math.max(3 * FT, Math.min(30 * FT, d));
+        t.depth = newDepth;
+        setTerraceDepth(newDepth);
+        rebuild();
+      } else if (dragState.type === "resize-terrace-railheight") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const t = (state.terraces || []).find((tt) => tt.id === dragState.id);
+        if (!t) { dragState = null; return; }
+        const dy = pt.y - dragState.startY;
+        const newH = Math.max(1 * FT, Math.min(6 * FT, dragState.startH + dy));
+        t.railHeight = newH;
+        setTerraceRailHeight(newH);
+        rebuild();
       } else if (dragState.type === "resize-sign") {
         const pt = new THREE.Vector3();
         if (!ray.intersectPlane(dragState.plane, pt)) return;
@@ -9410,10 +9778,12 @@ export default function RoomBuilder() {
         const MIN_TERRACE = 4 * FT;
         if (u1 - u0 >= MIN_TERRACE) {
           const tid = idSeq++;
-          const terrace = { id: tid, panel: dragState.panelKey, u0, u1, side: dragState.side || 1 };
+          const terrace = { id: tid, panel: dragState.panelKey, u0, u1, side: dragState.side || 1, depth: 10 * FT, railHeight: 3.5 * FT };
           if (!state.terraces) state.terraces = [];
           state.terraces.push(terrace);
           regenerateTerraceOpenings(terrace);
+          setTerraceDepth(terrace.depth);
+          setTerraceRailHeight(terrace.railHeight);
         }
         previewOpening = null;
       } else if (dragState.type === "suppbalcony-draw") {
@@ -9421,12 +9791,13 @@ export default function RoomBuilder() {
         const u1s = Math.max(dragState.u0, dragState.u1);
         const MIN_SUPPBAL = 6 * FT;
         if (u1s - u0s >= MIN_SUPPBAL) {
-          const supp = { id: idSeq++, panel: dragState.panelKey, u0: u0s, u1: u1s, side: dragState.side || 1, platformHeight: 6 * FT, railingCount: 6 };
+          const supp = { id: idSeq++, panel: dragState.panelKey, u0: u0s, u1: u1s, side: dragState.side || 1, platformHeight: 6 * FT, railingCount: 6, depth: 6 * FT };
           if (!state.suppBalconies) state.suppBalconies = [];
           state.suppBalconies.push(supp);
           regenerateSuppBalconyOpening(supp);
           setSuppBalconyHeight(supp.platformHeight);
           setSuppBalconyRailingCount(supp.railingCount);
+          setSuppBalconyDepth(supp.depth);
         }
         previewOpening = null;
       } else if (dragState.type === "sign-draw") {
@@ -9451,7 +9822,7 @@ export default function RoomBuilder() {
         if (u1p - u0p >= MIN_STAIRPLATFORM) {
           const sp = {
             id: idSeq++, panel: dragState.panelKey, u0: u0p, u1: u1p, side: dragState.side || 1,
-            platformDepth: 8 * FT, stairDepth: 6 * FT, numSteps: 3,
+            platformDepth: 8 * FT, stairDepth: 6 * FT, numSteps: 5,
           };
           if (!state.stairPlatforms) state.stairPlatforms = [];
           state.stairPlatforms.push(sp);
@@ -10081,6 +10452,26 @@ export default function RoomBuilder() {
     }
     deleteTerraceRef.current = deleteActiveTerrace;
 
+    function setActiveTerraceDepth(d) {
+      const id = selectedTerraceIdRef.current;
+      if (id == null) return;
+      const t = (state.terraces || []).find((tt) => tt.id === id);
+      if (!t) return;
+      t.depth = Math.max(3 * FT, d);
+      rebuild();
+    }
+    terraceDepthApiRef.current = { setDepth: setActiveTerraceDepth };
+
+    function setActiveTerraceRailHeight(h) {
+      const id = selectedTerraceIdRef.current;
+      if (id == null) return;
+      const t = (state.terraces || []).find((tt) => tt.id === id);
+      if (!t) return;
+      t.railHeight = Math.max(1 * FT, Math.min(6 * FT, h));
+      rebuild();
+    }
+    terraceRailHeightApiRef.current = { setRailHeight: setActiveTerraceRailHeight };
+
     function setActiveSuppBalconyHeight(h) {
       const id = selectedSuppBalconyIdRef.current;
       if (id == null) return;
@@ -10101,6 +10492,16 @@ export default function RoomBuilder() {
       rebuild();
     }
     suppBalconyRailingCountApiRef.current = { setCount: setActiveSuppBalconyRailingCount };
+
+    function setActiveSuppBalconyDepth(d) {
+      const id = selectedSuppBalconyIdRef.current;
+      if (id == null) return;
+      const sb = (state.suppBalconies || []).find((s) => s.id === id);
+      if (!sb) return;
+      sb.depth = Math.max(3 * FT, d);
+      rebuild();
+    }
+    suppBalconyDepthApiRef.current = { setDepth: setActiveSuppBalconyDepth };
 
     function deleteActiveSuppBalcony() {
       const id = selectedSuppBalconyIdRef.current;
@@ -14085,6 +14486,44 @@ export default function RoomBuilder() {
             </div>
           </div>
         )}
+        {selectedTerraceId != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Platform depth &middot; {(terraceDepth / FT).toFixed(2)} ft</span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={3}
+              max={30}
+              step={0.5}
+              value={terraceDepth / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const ft = parseFloat(e.target.value);
+                setTerraceDepth(ft * FT);
+                terraceDepthApiRef.current.setDepth(ft * FT);
+              }}
+            />
+          </div>
+        )}
+        {selectedTerraceId != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Rail height &middot; {(terraceRailHeight / FT).toFixed(2)} ft</span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={1}
+              max={6}
+              step={0.25}
+              value={terraceRailHeight / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const ft = parseFloat(e.target.value);
+                setTerraceRailHeight(ft * FT);
+                terraceRailHeightApiRef.current.setRailHeight(ft * FT);
+              }}
+            />
+          </div>
+        )}
         {selectedSuppBalconyId != null && (
           <div className="ribbon-group" style={{ minWidth: 260 }}>
             <span className="ribbon-label">Platform height &middot; {(suppBalconyHeight / FT).toFixed(2)} ft</span>
@@ -14123,6 +14562,25 @@ export default function RoomBuilder() {
                 const n = parseInt(e.target.value, 10);
                 setSuppBalconyRailingCount(n);
                 suppBalconyRailingCountApiRef.current.setCount(n);
+              }}
+            />
+          </div>
+        )}
+        {selectedSuppBalconyId != null && (
+          <div className="ribbon-group" style={{ minWidth: 200 }}>
+            <span className="ribbon-label">Platform depth &middot; {(suppBalconyDepth / FT).toFixed(2)} ft</span>
+            <input
+              className="rb-bare-range"
+              type="range"
+              min={3}
+              max={30}
+              step={0.5}
+              value={suppBalconyDepth / FT}
+              onPointerDown={() => pushUndoRef.current()}
+              onChange={(e) => {
+                const ft = parseFloat(e.target.value);
+                setSuppBalconyDepth(ft * FT);
+                suppBalconyDepthApiRef.current.setDepth(ft * FT);
               }}
             />
           </div>
