@@ -9871,7 +9871,7 @@ export default function RoomBuilder() {
         minX = Math.min(minX, x0, x1); maxX = Math.max(maxX, x0, x1);
         minZ = Math.min(minZ, z0, z1); maxZ = Math.max(maxZ, z0, z1);
       });
-      (state.freeformRooms || []).forEach((rm) => (rm.points || []).forEach((p) => {
+      (entry.data.freeformRooms || []).forEach((rm) => (rm.points || []).forEach((p) => {
         minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
         minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
       }));
