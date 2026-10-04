@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, Scan as ArIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Pencil } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, Scan as ArIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Pencil, Maximize2, Minimize2 } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -4925,6 +4925,45 @@ export default function RoomBuilder() {
           sceneGroup.add(mesh);
           if (isPickableTarget) pickList.push(mesh);
         }
+        // draggable handles while selected -- left/right at the two climb
+        // ends (start/end), front at the far width edge, top above the
+        // center (total rise height) -- same left/right/front/top pattern
+        // every other wall-prop here already uses.
+        if (isPickableTarget && isSelected) {
+          const midWidth = (st.widthMin + st.widthMax) / 2;
+          const midAxis = (st.start + st.end) / 2;
+          const barAxis = Math.max(0.08, Math.min(0.16, Math.abs(span) * 0.15));
+          const barWidth = 0.16;
+          function addStairHandle(target, edge, wx, wz, geo) {
+            const mesh = new THREE.Mesh(geo, handleMat);
+            mesh.renderOrder = 10;
+            mesh.position.set(wx, H / 2, wz);
+            mesh.userData = { kind: "resize-handle", target, id: st.id, edge, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+          if (st.axis === "x") {
+            const edgeGeo = new THREE.BoxGeometry(barAxis, H, barWidth);
+            addStairHandle("stair", "left", st.start, midWidth, edgeGeo);
+            addStairHandle("stair", "right", st.end, midWidth, edgeGeo.clone());
+            addStairHandle("stair-width", "front", midAxis, st.widthMax, edgeGeo.clone());
+          } else {
+            const edgeGeo = new THREE.BoxGeometry(barWidth, H, barAxis);
+            addStairHandle("stair", "left", midWidth, st.start, edgeGeo);
+            addStairHandle("stair", "right", midWidth, st.end, edgeGeo.clone());
+            addStairHandle("stair-width", "front", st.widthMax, midAxis, edgeGeo.clone());
+          }
+          {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
+            mesh.renderOrder = 10;
+            const wx = st.axis === "x" ? midAxis : midWidth;
+            const wz = st.axis === "x" ? midWidth : midAxis;
+            mesh.position.set(wx, H + PROP_HANDLE * 0.9, wz);
+            mesh.userData = { kind: "resize-handle", target: "stair-height", id: st.id, edge: "top", ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+            sceneGroup.add(mesh);
+            pickList.push(mesh);
+          }
+        }
       });
       if (previewStair && isPickableTarget) {
         const w = previewStair.x1 - previewStair.x0;
@@ -8082,6 +8121,27 @@ export default function RoomBuilder() {
           if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
           const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camXZ, center);
           dragState = { type: "resize-terrace-railheight", id: rh.id, plane, startH: t.railHeight || 3.5 * FT, startY: hit.point.y };
+        } else if (rh.target === "stair" && (rh.edge === "left" || rh.edge === "right")) {
+          const st = (state.stairs || []).find((s) => s.id === rh.id);
+          if (!st) return;
+          pushUndo();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "resize-stair-edge", id: rh.id, edge: rh.edge, plane };
+        } else if (rh.target === "stair-width") {
+          const st = (state.stairs || []).find((s) => s.id === rh.id);
+          if (!st) return;
+          pushUndo();
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          dragState = { type: "resize-stair-width", id: rh.id, plane };
+        } else if (rh.target === "stair-height") {
+          const st = (state.stairs || []).find((s) => s.id === rh.id);
+          if (!st) return;
+          pushUndo();
+          const center = hit.point.clone();
+          const camXZ = new THREE.Vector3(interactionCamera.position.x - center.x, 0, interactionCamera.position.z - center.z);
+          if (camXZ.lengthSq() < 1e-6) camXZ.set(0, 0, 1); else camXZ.normalize();
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camXZ, center);
+          dragState = { type: "resize-stair-height", id: rh.id, plane, startH: st.height != null ? st.height : state.height, startY: hit.point.y };
         } else if (rh.target === "prop") {
           const p = (state.props || []).find((pp) => pp.id === rh.id);
           if (!p) return;
@@ -9378,6 +9438,41 @@ export default function RoomBuilder() {
         const newH = Math.max(1 * FT, Math.min(6 * FT, dragState.startH + dy));
         t.railHeight = newH;
         setTerraceRailHeight(newH);
+        rebuild();
+      } else if (dragState.type === "resize-stair-edge") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const st = (state.stairs || []).find((s) => s.id === dragState.id);
+        if (!st) { dragState = null; return; }
+        const v = snapValue(st.axis === "x" ? pt.x : pt.z);
+        if (dragState.edge === "left") {
+          if (st.end >= st.start) st.start = Math.min(v, st.end - MIN_STAIR_SIZE);
+          else st.start = Math.max(v, st.end + MIN_STAIR_SIZE);
+        } else {
+          if (st.end >= st.start) st.end = Math.max(v, st.start + MIN_STAIR_SIZE);
+          else st.end = Math.min(v, st.start - MIN_STAIR_SIZE);
+        }
+        rebuild();
+      } else if (dragState.type === "resize-stair-width") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const st = (state.stairs || []).find((s) => s.id === dragState.id);
+        if (!st) { dragState = null; return; }
+        const v = snapValue(st.axis === "x" ? pt.z : pt.x);
+        st.widthMax = Math.max(v, st.widthMin + MIN_STAIR_SIZE);
+        rebuild();
+      } else if (dragState.type === "resize-stair-height") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const st = (state.stairs || []).find((s) => s.id === dragState.id);
+        if (!st) { dragState = null; return; }
+        const dy = pt.y - dragState.startY;
+        const newH = Math.max(MIN_STAIR_SIZE, dragState.startH + dy);
+        st.height = newH;
+        st.steps = defaultStairSteps(newH);
+        setStairSteps(st.steps);
+        setStairHeight(newH);
+        if (activeRoomId == null) recomputeAllStairFloorHoles();
         rebuild();
       } else if (dragState.type === "resize-sign") {
         const pt = new THREE.Vector3();
@@ -12200,6 +12295,25 @@ export default function RoomBuilder() {
   // panels -- hidden entirely rather than shrunk, with its own floating
   // chevron to bring it back.
   const [ribbonCollapsed, setRibbonCollapsed] = useState(false);
+  // "focus mode" -- one button that hides all three chrome panels (left
+  // layers panel, right panel, bottom ribbon) at once for a full-bleed 3D
+  // view, and restores each to whatever state it was actually in before.
+  const [focusMode, setFocusMode] = useState(false);
+  const prePanelStateRef = useRef({ left: false, right: false, ribbon: false });
+  function toggleFocusMode() {
+    if (!focusMode) {
+      prePanelStateRef.current = { left: layersPanelCollapsed, right: rightPanelCollapsed, ribbon: ribbonCollapsed };
+      setLayersPanelCollapsed(true);
+      setRightPanelCollapsed(true);
+      setRibbonCollapsed(true);
+      setFocusMode(true);
+    } else {
+      setLayersPanelCollapsed(prePanelStateRef.current.left);
+      setRightPanelCollapsed(prePanelStateRef.current.right);
+      setRibbonCollapsed(prePanelStateRef.current.ribbon);
+      setFocusMode(false);
+    }
+  }
   // how much of the right edge / bottom edge the (possibly collapsed) right
   // panel and ribbon actually occupy right now -- every other floating
   // widget that keeps itself clear of them (the ViewCube, viewport-button
@@ -13714,6 +13828,17 @@ export default function RoomBuilder() {
           border: "0.5px solid var(--border-control)", borderRadius: 9, padding: "5px 7px",
         }}
       >
+        <div style={{ display: "flex", gap: 4 }}>
+          <button
+            className={`rb-btn ${focusMode ? "active" : ""}`}
+            title={focusMode ? "Exit full view (restore panels)" : "Full view (hide all panels)"}
+            style={{ display: "flex", alignItems: "center", padding: "6px 9px" }}
+            onClick={toggleFocusMode}
+          >
+            {focusMode ? <Minimize2 size={14} strokeWidth={2} /> : <Maximize2 size={14} strokeWidth={2} />}
+          </button>
+        </div>
+        <div style={{ width: 1, alignSelf: "stretch", background: "var(--border-separator)" }} />
         <div style={{ display: "flex", gap: 4 }}>
           <button className={`rb-btn ${viewLayout === "single" ? "active" : ""}`} title="Single view" style={{ display: "flex", alignItems: "center", padding: "6px 9px" }} onClick={() => setViewLayout("single")}>
             <SingleViewIcon />
