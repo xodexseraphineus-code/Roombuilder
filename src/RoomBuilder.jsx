@@ -13847,19 +13847,6 @@ export default function RoomBuilder() {
             <QuadViewIcon />
           </button>
         </div>
-        <div style={{ width: 1, alignSelf: "stretch", background: "var(--border-separator)" }} />
-        <div style={{ display: "flex", gap: 4 }}>
-          {["orbit", "top", "front", "left", "right"].map((v) => (
-            <button
-              key={v}
-              className={`rb-btn ${viewMode === v ? "active" : ""}`}
-              style={{ padding: "6px 8px", fontSize: 9 }}
-              onClick={() => setViewMode(v)}
-            >
-              {v.charAt(0).toUpperCase() + v.slice(1)}
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* BOTTOM: ribbon -- tools, then snapping/measurements, then viewport controls.
