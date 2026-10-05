@@ -2898,6 +2898,13 @@ export default function RoomBuilder() {
       colSquare: wallMat,
       colRound: wallMat,
       jailWall: wallMat,
+      // the escalator reads as actual mechanical equipment rather than a
+      // colored toy prop, so it gets its own brushed-steel/dark-tread
+      // finishes instead of the plastic palette above.
+      escalator: new THREE.MeshStandardMaterial({ color: 0x9a9ea4, roughness: 0.38, metalness: 0.55 }),
+      escalatorStep: new THREE.MeshStandardMaterial({ color: 0x55585d, roughness: 0.48, metalness: 0.5 }),
+      escalatorRubber: new THREE.MeshStandardMaterial({ color: 0x18181a, roughness: 0.78, metalness: 0.08 }),
+      escalatorMarking: new THREE.MeshStandardMaterial({ color: 0xffc400, roughness: 0.5, metalness: 0.1 }),
     };
     const PROP_HEIGHT = 8 * FT;
     // the round/louver window trim and the arched/revolving/turnstile door
@@ -3695,6 +3702,11 @@ export default function RoomBuilder() {
 
     // ---------- rebuild the visible + pickable geometry from state ----------
     let pickList = [];
+    // escalator props register their moving step/handrail meshes here so
+    // tick() can reposition them every frame without rebuilding the scene --
+    // entries are cleared and repopulated per (floor, room) context at the
+    // top of renderProps(), same granularity pickList is filtered at.
+    let escalatorRegistry = [];
     let previewSelection = null;
     let previewOpening = null;
     let previewColumnBank = null; // {panel, shape, u0, u1} while dragging out a new run of wall columns
@@ -5050,15 +5062,34 @@ export default function RoomBuilder() {
     function propDefaultDiameter(kind) {
       if (kind === "cone" || kind === "cylinder") return 6 * FT;
       if (kind === "colSquare" || kind === "colRound") return 1 * FT;
+      if (kind === "escalator") return 4 * FT;
       return PROP_HEIGHT;
     }
+    // an escalator's incline is fixed at a realistic 30 degrees -- its run
+    // (horizontal footprint depth) is always derived from its current rise
+    // rather than stored, so dragging the height handle keeps the same
+    // angle automatically instead of needing a separate depth control.
+    const ESCALATOR_ANGLE = THREE.MathUtils.degToRad(30);
+    const ESCALATOR_STEP_DEPTH = 0.4; // meters -- one tread's horizontal depth
+    const ESCALATOR_BELT_SPEED = 0.5; // m/s -- real-world step/handrail speed, fixed for now
+    const ESCALATOR_MARGIN_FRAC = 0.08; // fraction of the loop hidden inside each landing housing
+    function escalatorRunFor(rise) { return rise / Math.tan(ESCALATOR_ANGLE); }
+    // the step/handrail path's height along its run: flat tangent at both
+    // ends (steps visibly level as they emerge/disappear), steepest in the
+    // middle -- a real curved-track escalator's profile without needing to
+    // model the actual curved track.
+    function escalatorProfileY(u, rise) { return rise * (u - Math.sin(2 * Math.PI * u) / (2 * Math.PI)); }
     function propWidthOf(p) { return p.w != null ? p.w : (p.kind === "jailWall" ? 6 * FT : propDefaultDiameter(p.kind)); }
-    function propDepthOf(p) { return p.d != null ? p.d : (p.kind === "jailWall" ? 0.2 * FT : propDefaultDiameter(p.kind)); }
+    function propDepthOf(p) {
+      if (p.kind === "escalator") return escalatorRunFor(propHeightOf(p));
+      return p.d != null ? p.d : (p.kind === "jailWall" ? 0.2 * FT : propDefaultDiameter(p.kind));
+    }
     // a column/pillar defaults to spanning floor-to-ceiling rather than the
-    // fixed 8ft other props use, same for a jail-cell wall panel.
+    // fixed 8ft other props use, same for a jail-cell wall panel and an
+    // escalator's rise (so it reads proportioned to whatever room it's in).
     function propHeightOf(p) {
       if (p.h != null) return p.h;
-      if (p.kind === "colSquare" || p.kind === "colRound" || p.kind === "jailWall") return state.height;
+      if (p.kind === "colSquare" || p.kind === "colRound" || p.kind === "jailWall" || p.kind === "escalator") return state.height;
       return PROP_HEIGHT;
     }
     const PROP_MIN_SIZE = 0.2; // smallest edge/diameter/height a prop can be resized to
@@ -5066,8 +5097,16 @@ export default function RoomBuilder() {
     const PROP_HANDLE = 0.22; // cube handles -- bigger/brighter than before so they're easy to spot and grab on touch
 
     function renderProps() {
+      // this (floor, room) context is about to rebuild its props from
+      // scratch -- drop any escalator animation entries it registered last
+      // time, same granularity pickList is filtered at in rebuildFloorEntry.
+      escalatorRegistry = escalatorRegistry.filter((e) => !(e.ownerFloorId === (buildingFloorEntry && buildingFloorEntry.id) && e.ownerRoomId === buildingRoomId));
       (state.props || []).forEach((p) => {
         const w = propWidthOf(p), d = propDepthOf(p), h = propHeightOf(p);
+        if (p.kind === "escalator") {
+          buildEscalatorProp(p, w, h, d);
+          return;
+        }
         // a barred panel rather than a single solid volume -- built as its
         // own group of vertical bar cylinders plus top/bottom rails, since
         // it can't be expressed as one THREE geometry the way every other
@@ -5127,6 +5166,207 @@ export default function RoomBuilder() {
         sceneGroup.add(mesh);
         if (isPickableTarget) pickList.push(mesh);
         renderPropSelectionOverlay(p, w, d, h);
+      });
+    }
+
+    // a mall-style moving-stair prop: two glass-balustraded trusses frame a
+    // chain of treads that rise out of the bottom housing, stay level
+    // across the incline, and vanish into the top housing on a smooth
+    // S-curve -- see escalatorProfileY above. Width is the only resizable
+    // dimension (the corner-drag special case lives in the resize-prop-
+    // corner handler); rise defaults to the room's own height via
+    // propHeightOf and run is always derived from it, so the assembly
+    // stays correctly proportioned at any size. Steps/handrail-grips are
+    // built once here as a fixed pool of meshes and only repositioned per
+    // frame by updateEscalators() in tick() -- see escalatorRegistry above.
+    function buildEscalatorProp(p, w, rise, run) {
+      const group = new THREE.Group();
+      group.position.set(p.x, 0, p.z);
+      const zBottom = -run / 2;
+      const toZ = (u) => zBottom + run * u;
+      const toY = (u) => escalatorProfileY(u, rise);
+
+      const trussThickness = Math.max(0.06, Math.min(0.12, w * 0.04));
+      const trussHeight = Math.max(0.3, rise * 0.05);
+      const skirtInset = trussThickness + 0.02;
+      const sideX = w / 2 - trussThickness / 2;
+      const SEGMENTS = 20;
+
+      function curveBeams(step) {
+        let prevZ = toZ(0), prevY = toY(0);
+        for (let i = 1; i <= SEGMENTS; i++) {
+          const u = i / SEGMENTS;
+          const z = toZ(u), y = toY(u);
+          step(prevZ, prevY, z, y);
+          prevZ = z; prevY = y;
+        }
+      }
+      // a short box between two consecutive curve samples, tilted around
+      // the X axis so it follows the local slope there -- a smooth curve
+      // approximated by a faceted chain, same trick as the rail segments
+      // balconies already use (addRailSeg), just tilted instead of yawed.
+      // raycasting here never descends into a Group's children (pickList
+      // hit-testing runs with recursive:false), so every actual clickable
+      // surface has to be its own leaf mesh in pickList with its own
+      // userData -- the parent group's userData is just for humans reading
+      // the scene graph, not for picking.
+      const propUserData = { kind: "prop", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
+      function addBoxBeam(z0, y0, z1, y1, xCenter, xThick, crossH, material, yOffset) {
+        const dz = z1 - z0, dy = y1 - y0;
+        const len = Math.hypot(dz, dy) * 1.08;
+        if (len < 0.001) return;
+        const geo = new THREE.BoxGeometry(xThick, crossH, len);
+        const mesh = new THREE.Mesh(geo, material);
+        mesh.position.set(xCenter, (y0 + y1) / 2 + yOffset, (z0 + z1) / 2);
+        mesh.rotation.x = -Math.atan2(dy, dz);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        addEdges(mesh);
+        mesh.userData = propUserData;
+        group.add(mesh);
+        if (isPickableTarget) pickList.push(mesh);
+      }
+      function addCylinderBeam(z0, y0, z1, y1, xCenter, radius, material, yOffset) {
+        const dz = z1 - z0, dy = y1 - y0;
+        const len = Math.hypot(dz, dy) * 1.08;
+        if (len < 0.001) return;
+        const geo = new THREE.CylinderGeometry(radius, radius, len, 8);
+        const mesh = new THREE.Mesh(geo, material);
+        mesh.position.set(xCenter, (y0 + y1) / 2 + yOffset, (z0 + z1) / 2);
+        mesh.rotation.x = Math.atan2(dz, dy);
+        mesh.castShadow = true;
+        mesh.userData = propUserData;
+        group.add(mesh);
+        if (isPickableTarget) pickList.push(mesh);
+      }
+
+      // side trusses (2x), flush under the tread line
+      const trussYOffset = -0.05 - trussHeight / 2;
+      [-1, 1].forEach((side) => {
+        curveBeams((z0, y0, z1, y1) => addBoxBeam(z0, y0, z1, y1, side * sideX, trussThickness, trussHeight, propMats.escalator, trussYOffset));
+      });
+      // full-width skirt under the steps, concealing the hidden return path
+      const skirtHeight = trussHeight * 0.4;
+      const skirtYOffset = trussYOffset - trussHeight / 2 - skirtHeight / 2 - 0.02;
+      curveBeams((z0, y0, z1, y1) => addBoxBeam(z0, y0, z1, y1, 0, w - skirtInset * 2, skirtHeight, propMats.escalator, skirtYOffset));
+
+      // glass balustrade (2x), rising from just above the trusses
+      const glassBase = 0.08;
+      const glassHeight = Math.max(0.6, rise * 0.14);
+      const glassYOffset = glassBase + glassHeight / 2;
+      [-1, 1].forEach((side) => {
+        curveBeams((z0, y0, z1, y1) => addBoxBeam(z0, y0, z1, y1, side * sideX, 0.02, glassHeight, glassMat, glassYOffset));
+      });
+
+      // static rubber handrail band (2x) resting on the glass -- the small
+      // moving grip marks that sell its motion are animated separately,
+      // see the "ribs" entries pushed into escalatorRegistry below.
+      const railRadius = 0.045;
+      const railYOffset = glassBase + glassHeight + railRadius;
+      [-1, 1].forEach((side) => {
+        curveBeams((z0, y0, z1, y1) => addCylinderBeam(z0, y0, z1, y1, side * sideX, railRadius, propMats.escalatorRubber, railYOffset));
+      });
+
+      // landing housings at both ends -- simple boxes bridging the point
+      // where steps visibly emerge from / disappear into the casing,
+      // matching the hidden-band margin the animation below uses.
+      const housingLen = Math.max(0.6, run * ESCALATOR_MARGIN_FRAC * 1.6);
+      const housingH = trussHeight * 1.2;
+      [-1, 1].forEach((end) => {
+        const u = end < 0 ? 0 : 1;
+        const zEdge = toZ(u), yEdge = toY(u);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, housingH, housingLen), propMats.escalator);
+        mesh.position.set(0, yEdge - housingH * 0.3, zEdge + end * housingLen * 0.3);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        addEdges(mesh);
+        mesh.userData = propUserData;
+        group.add(mesh);
+        if (isPickableTarget) pickList.push(mesh);
+      });
+
+      // ---- steps: a fixed pool of identical tread+riser+marking groups,
+      // repositioned every animation frame by updateEscalators() rather
+      // than rebuilt -- only position/visibility changes per frame, so
+      // this stays cheap regardless of frame rate.
+      const stepDepth = ESCALATOR_STEP_DEPTH;
+      const stepW = Math.max(0.1, w - skirtInset * 2);
+      const N = Math.max(6, Math.round(run / stepDepth));
+      const riserH = Math.tan(ESCALATOR_ANGLE) * stepDepth;
+      const stepEntries = [];
+      for (let k = 0; k < N; k++) {
+        const stepGroup = new THREE.Group();
+        const tread = new THREE.Mesh(new THREE.BoxGeometry(stepW, 0.05, stepDepth), propMats.escalatorStep);
+        tread.position.set(0, -0.025, 0);
+        tread.castShadow = true;
+        tread.receiveShadow = true;
+        tread.userData = propUserData;
+        stepGroup.add(tread);
+        if (isPickableTarget) pickList.push(tread);
+        const riser = new THREE.Mesh(new THREE.BoxGeometry(stepW, riserH, 0.04), propMats.escalatorStep);
+        riser.position.set(0, -0.05 - riserH / 2, -stepDepth / 2 + 0.02);
+        riser.castShadow = true;
+        riser.userData = propUserData;
+        stepGroup.add(riser);
+        if (isPickableTarget) pickList.push(riser);
+        const marking = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.05, stepW - 0.1), 0.012, 0.035), propMats.escalatorMarking);
+        marking.position.set(0, 0.006, stepDepth / 2 - 0.05);
+        stepGroup.add(marking);
+        stepGroup.userData = propUserData;
+        group.add(stepGroup);
+        stepEntries.push({ group: stepGroup, k });
+      }
+
+      // small moving rib marks on each handrail, riding alongside their
+      // corresponding step so the belt visibly "rotates along with it".
+      const ribEntries = [];
+      [-1, 1].forEach((side) => {
+        for (let k = 0; k < N; k++) {
+          const rib = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.05, 0.1), propMats.escalatorRubber);
+          rib.visible = false;
+          group.add(rib);
+          ribEntries.push({ mesh: rib, k, x: side * sideX, y: railYOffset + railRadius * 0.3 });
+        }
+      });
+
+      group.userData = propUserData;
+      sceneGroup.add(group);
+
+      escalatorRegistry.push({
+        ownerFloorId: buildingFloorEntry && buildingFloorEntry.id, ownerRoomId: buildingRoomId,
+        run, rise, N, steps: stepEntries, ribs: ribEntries, group,
+        uSpeed: ESCALATOR_BELT_SPEED / Math.max(0.5, Math.hypot(run, rise)),
+      });
+
+      renderPropSelectionOverlay(p, w, run, rise);
+    }
+
+    // repositions every registered escalator's steps and handrail grip
+    // marks for the current frame -- called once per tick() regardless of
+    // view mode, so escalators keep moving in every camera mode. A step's
+    // u (0..1) cycles the WHOLE loop, including the hidden margin at each
+    // end that stands in for the real curved-track return trip -- it pops
+    // out of view there rather than animating through it, since that part
+    // is fully concealed by the housings/skirt anyway.
+    function updateEscalators(nowSec) {
+      if (!escalatorRegistry.length) return;
+      escalatorRegistry.forEach((e) => {
+        const margin = ESCALATOR_MARGIN_FRAC;
+        const zBottom = -e.run / 2;
+        e.steps.forEach(({ group, k }) => {
+          let u = (nowSec * e.uSpeed + k / e.N) % 1;
+          if (u < 0) u += 1;
+          const visible = u > margin && u < 1 - margin;
+          group.visible = visible;
+          if (visible) group.position.set(0, escalatorProfileY(u, e.rise), zBottom + e.run * u);
+        });
+        e.ribs.forEach(({ mesh, k, x, y }) => {
+          let u = (nowSec * e.uSpeed + k / e.N) % 1;
+          if (u < 0) u += 1;
+          const visible = u > margin && u < 1 - margin;
+          mesh.visible = visible;
+          if (visible) mesh.position.set(x, escalatorProfileY(u, e.rise) + y, zBottom + e.run * u);
+        });
       });
     }
 
@@ -6458,7 +6698,7 @@ export default function RoomBuilder() {
     // "special" is the callout set from the Material Editor request
     // (stairs, balconies, props) that gets its own distinct treatment.
     const BUILDING_SHELL_MATS = [wallMat, floorMat, wallMatDim, floorMatDim, wallMatSelected, floorMatSelected, ceilingMat, mullionMat, pillarMat, pillarMatSelected];
-    const SPECIAL_ITEM_MATS = [stairMat, propMats.sphere, propMats.cone, propMats.cube, propMats.cylinder, balconyPlatformMat, balconyRoofMat, signBoardMat];
+    const SPECIAL_ITEM_MATS = [stairMat, propMats.sphere, propMats.cone, propMats.cube, propMats.cylinder, propMats.escalator, propMats.escalatorStep, propMats.escalatorRubber, balconyPlatformMat, balconyRoofMat, signBoardMat];
 
     // Wireframe and Material Editor both override the same shell/special
     // materials, and each is driven by its own independent React effect
@@ -9561,6 +9801,11 @@ export default function RoomBuilder() {
           const newD = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, signZ * dz * 2));
           p.w = newW;
           p.d = newD;
+        } else if (p.kind === "escalator") {
+          // only width is adjustable this way -- run is always derived
+          // from rise at a fixed incline (see propDepthOf), so any corner
+          // drag just widens/narrows it, ignoring the drag's Z component.
+          p.w = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, signX * dx * 2));
         } else {
           // round shapes stay a uniform radius -- the diagonal distance
           // from center to the pointer, regardless of which corner it is.
@@ -10004,19 +10249,30 @@ export default function RoomBuilder() {
         const dz = Math.abs(dragState.z1 - dragState.z0);
         if (dx >= MIN_PROP_DRAW_SIZE && dz >= MIN_PROP_DRAW_SIZE) {
           const id = idSeq++;
-          // a cube keeps the drag's two footprint dimensions independent
-          // (a true box); sphere/cone/cylinder stay round, so both average
-          // into one uniform size. Height tracks that same horizontal size
-          // either way -- a roughly square 5x5ft drag makes a 5x5x5ft cube.
-          const w = dragState.kind === "cube" ? Math.max(MIN_PROP_DRAW_SIZE, dx) : Math.max(MIN_PROP_DRAW_SIZE, (dx + dz) / 2);
-          const d = dragState.kind === "cube" ? Math.max(MIN_PROP_DRAW_SIZE, dz) : w;
-          const h = (w + d) / 2;
           if (!state.props) state.props = [];
-          state.props.push({
-            id, kind: dragState.kind,
-            x: (dragState.x0 + dragState.x1) / 2, z: (dragState.z0 + dragState.z1) / 2,
-            w, d, h,
-          });
+          if (dragState.kind === "escalator") {
+            // only the drag's X extent sets the width; rise defaults to
+            // the room's own height and run is always derived from it
+            // (see propHeightOf/propDepthOf), so neither is stored here.
+            state.props.push({
+              id, kind: "escalator",
+              x: (dragState.x0 + dragState.x1) / 2, z: (dragState.z0 + dragState.z1) / 2,
+              w: Math.max(MIN_PROP_DRAW_SIZE, dx),
+            });
+          } else {
+            // a cube keeps the drag's two footprint dimensions independent
+            // (a true box); sphere/cone/cylinder stay round, so both average
+            // into one uniform size. Height tracks that same horizontal size
+            // either way -- a roughly square 5x5ft drag makes a 5x5x5ft cube.
+            const w = dragState.kind === "cube" ? Math.max(MIN_PROP_DRAW_SIZE, dx) : Math.max(MIN_PROP_DRAW_SIZE, (dx + dz) / 2);
+            const d = dragState.kind === "cube" ? Math.max(MIN_PROP_DRAW_SIZE, dz) : w;
+            const h = (w + d) / 2;
+            state.props.push({
+              id, kind: dragState.kind,
+              x: (dragState.x0 + dragState.x1) / 2, z: (dragState.z0 + dragState.z1) / 2,
+              w, d, h,
+            });
+          }
         }
         previewProp = null;
       }
@@ -11747,6 +12003,7 @@ export default function RoomBuilder() {
       const now = performance.now();
       const dt = Math.min(0.1, (now - lastTickTime) / 1000);
       lastTickTime = now;
+      updateEscalators(now / 1000);
 
       // the press-and-hold solid -> door -> fully-open cycle needs to keep
       // advancing purely from elapsed time while the pointer sits still (no
@@ -14350,6 +14607,18 @@ export default function RoomBuilder() {
                   style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, padding: 0 }}
                 >
                   <Icon size={16} strokeWidth={2} />
+                </button>
+              ))}
+              {[
+                { key: "escalator", label: "Escalator" },
+              ].map(({ key: s, label }) => (
+                <button
+                  key={s}
+                  className={`rb-btn ${propsShape === s ? "active" : ""}`}
+                  onClick={() => setPropsShape(s)}
+                  title="Escalator -- drag a footprint on the floor, resize width from its side handles"
+                >
+                  {label}
                 </button>
               ))}
               {[
