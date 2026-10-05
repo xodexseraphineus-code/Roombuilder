@@ -10961,6 +10961,13 @@ export default function RoomBuilder() {
       }));
       const newId = nextFloorId++;
       const entry = { id: newId, data: clone, rooms: clonedRooms, offsetX: src.offsetX || 0, offsetZ: src.offsetZ || 0 };
+      // a floor whose base content was replaced by a gap-split (or that has
+      // multiple independently-pickable rooms from a split/paste/duplicate)
+      // carries that state on the floor entry itself, outside `data` --
+      // previously dropped here, so a duplicated split floor silently
+      // reverted to one solid, un-split room with its original walls intact.
+      if (src.baseContentReplaced) entry.baseContentReplaced = true;
+      if (src.allowMultiRoomPick) entry.allowMultiRoomPick = true;
       floors.splice(idx + 1, 0, entry);
       const g = new THREE.Group();
       scene.add(g);
@@ -11395,6 +11402,12 @@ export default function RoomBuilder() {
       const entry = floors.find((f) => f.id === activeFloorId);
       if (!entry) return;
       entry.data.ceilingEnabled = enabled;
+      // a floor split into separate rooms (gap-split, paste, duplicate) no
+      // longer renders its own base content -- each room is its own fully
+      // independent mini-floor with its own ceilingEnabled, so the level's
+      // own roof toggle needs to reach every one of them or it does nothing
+      // visible at all once a split has happened.
+      (entry.rooms || []).forEach((room) => { room.data.ceilingEnabled = enabled; });
       rebuild();
     }
     ceilingApiRef.current = { setEnabled: setActiveFloorCeiling };
@@ -11404,7 +11417,9 @@ export default function RoomBuilder() {
     function toggleFloorCeiling(id) {
       const entry = floors.find((f) => f.id === id);
       if (!entry) return;
-      entry.data.ceilingEnabled = !entry.data.ceilingEnabled;
+      const next = !entry.data.ceilingEnabled;
+      entry.data.ceilingEnabled = next;
+      (entry.rooms || []).forEach((room) => { room.data.ceilingEnabled = next; });
       if (id === activeFloorId) rebuild();
       else rebuildFloorEntry(entry, false);
       syncFloorsToReact();
