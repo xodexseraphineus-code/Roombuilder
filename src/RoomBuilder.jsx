@@ -2572,7 +2572,7 @@ export default function RoomBuilder() {
     // (much tighter) corner-touch tolerance that lets a notch hand its
     // corner off to the adjacent wall -- both read as "walls disconnected,
     // floor missing" in the final render.
-    const CORNER_SNAP_DIST = 1 * FT;
+    const CORNER_SNAP_DIST = 2 * FT;
     function snapUToPanelCorner(info, u) {
       if (Math.abs(u - info.u0) < CORNER_SNAP_DIST) return info.u0;
       if (Math.abs(u - info.u1) < CORNER_SNAP_DIST) return info.u1;
