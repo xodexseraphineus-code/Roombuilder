@@ -13816,6 +13816,30 @@ export default function RoomBuilder() {
         />
       )}
 
+      {/* a second, unmissable way back out of full view -- pinned to the
+          very top-center of the viewport regardless of panel state, so it
+          can never end up hidden behind/below other floating chrome the
+          way a corner-docked button could on an unusual viewport size. The
+          bottom-right toggle (below) still exists for turning it ON, but
+          exiting should never depend on finding one small icon. */}
+      {focusMode && (
+        <button
+          onClick={toggleFocusMode}
+          title="Exit full view (restore panels)"
+          style={{
+            position: "absolute", top: 14, left: "50%", transform: "translateX(-50%)", zIndex: 20,
+            display: "flex", alignItems: "center", gap: 7,
+            background: "var(--bg-floating)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+            border: "0.5px solid var(--border-control)", borderRadius: 999,
+            padding: "7px 14px", color: "var(--text-primary)", fontSize: 12, fontWeight: 600,
+            boxShadow: "0 2px 10px rgba(0,0,0,0.3)",
+          }}
+        >
+          <Minimize2 size={14} strokeWidth={2} />
+          Exit full view
+        </button>
+      )}
+
       {/* viewport buttons -- single/quad layout and the named camera
           views, moved down into the viewport's own bottom-right corner
           (used to live in the top bar) so they read as viewport chrome
