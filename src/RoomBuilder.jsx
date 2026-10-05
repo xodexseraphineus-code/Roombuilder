@@ -8800,10 +8800,31 @@ export default function RoomBuilder() {
       // pending-balcony/pending-terrace/pending-suppbalcony/pending-sign
       // branches below), so this doesn't apply to any of them.
       if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony" && propsShapeRef.current !== "stairPlatform" && propsShapeRef.current !== "sign") {
-        if (kind === "floor") {
+        // a wall/partition/selection hit still belongs to this room's own
+        // floor (these are the only other kinds that can reach here --
+        // every other kind, e.g. "prop", is handled by generic pick logic
+        // earlier and returns before this) -- anchoring on its real hit
+        // point keeps the drag starting where the user actually clicked,
+        // rather than falling through to the "outside any room" ground-
+        // level branch below, which re-intersects the raw pointer ray
+        // against a plane at a totally different depth and can place the
+        // prop far outside the room, poking through the wall.
+        if (kind === "floor" || kind === "wall" || kind === "partition" || kind === "selection") {
           const ownerRoomId = obj.userData.ownerRoomId ?? null;
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
           const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+          if (propsShapeRef.current === "escalator") {
+            // arms immediately, same as balcony/terrace/sign below -- an
+            // escalator has only one size control (width), so there's no
+            // "orbit vs. draw" ambiguity a hold-first gesture needs to
+            // resolve the way a free-form cube/sphere footprint does.
+            const local = toLocalXZ(hit.point);
+            pushUndo();
+            dragState = { type: "props-draw", plane, kind: "escalator", x0: local.x, z0: local.z, x1: local.x, z1: local.z };
+            previewProp = { kind: "escalator", x0: local.x, z0: local.z, x1: local.x, z1: local.z };
+            capture(e);
+            return;
+          }
           dragState = {
             type: "pending-props-draw", plane, start: hit.point.clone(), kind: propsShapeRef.current,
             startScreen: { x: e.clientX, y: e.clientY }, holdStart: performance.now(),
