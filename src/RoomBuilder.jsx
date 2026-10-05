@@ -2563,6 +2563,22 @@ export default function RoomBuilder() {
       return [uMin, uMax];
     }
 
+    // snaps a position along a panel's own length axis to that panel's own
+    // u0/u1 bound once it lands within a short distance of it -- used while
+    // drawing/extruding a wall selection, so a drag clearly aimed at a
+    // corner actually reaches it exactly instead of landing a hair short.
+    // A near-miss there leaves an unrendered sliver of floor between the
+    // bump's own floor piece and the main footprint, and can also miss the
+    // (much tighter) corner-touch tolerance that lets a notch hand its
+    // corner off to the adjacent wall -- both read as "walls disconnected,
+    // floor missing" in the final render.
+    const CORNER_SNAP_DIST = 1 * FT;
+    function snapUToPanelCorner(info, u) {
+      if (Math.abs(u - info.u0) < CORNER_SNAP_DIST) return info.u0;
+      if (Math.abs(u - info.u1) < CORNER_SNAP_DIST) return info.u1;
+      return u;
+    }
+
     // if a balcony's drawn span reaches all the way to one of its wall's
     // own ends (a real building corner rather than just a spot along a
     // flat run), it wraps 90° onto the adjacent wall sharing that corner
@@ -8848,7 +8864,7 @@ export default function RoomBuilder() {
           const ns = worldDirScreen(dragState.hitPoint, info.normal);
           const isInward = (dx * ns.x + dy * ns.y) < 0;
           if (cls === "select") {
-            const u = panelU(info, dragState.hitPoint);
+            const u = snapUToPanelCorner(info, panelU(info, dragState.hitPoint));
             dragState = { type: "select-drag", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
             previewSelection = { id: "__preview__", panel: dragState.panelKey, u0: u, u1: u };
           } else if (dragState.selIdAtPoint) {
@@ -9088,7 +9104,7 @@ export default function RoomBuilder() {
         if (!ray.intersectPlane(dragState.plane, pt)) return;
         const info = getPanelInfo(dragState.panelKey);
         if (!info) return;
-        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        const u = snapUToPanelCorner(info, Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt)))));
         dragState.u1 = u;
         previewSelection = { id: "__preview__", panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u) };
         rebuild();
