@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Undo2, Redo2, Camera as CameraIcon, Scan as ArIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Pencil, Maximize2, Minimize2 } from "lucide-react";
+import { Undo2, Redo2, Camera as CameraIcon, Scan as ArIcon, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Mic, Sun, Moon, Send, Globe, Box, Cone, Cylinder, Trash2, Copy, Plus, Eye, EyeOff, Crosshair, PanelTop, Shapes, MoreHorizontal, Grid3x3, Magnet, Ruler, SquareDashed, Cuboid, Contrast, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Pencil, Maximize, Minimize } from "lucide-react";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
@@ -2892,19 +2892,18 @@ export default function RoomBuilder() {
       cone: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cone, ...PROP_PLASTIC }),
       cube: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cube, ...PROP_PLASTIC }),
       cylinder: new THREE.MeshStandardMaterial({ color: PROP_DEFAULT_COLORS.cylinder, ...PROP_PLASTIC }),
-      // columns and the jail-cell wall read as part of the building rather
-      // than a colored prop, so they share the same material as the walls
-      // themselves rather than their own tint.
+      // columns, the jail-cell wall, and the escalator's structure (every
+      // part of it except the glass balustrade) read as part of the
+      // building rather than a colored prop, so they share the same
+      // material as the walls themselves -- a color/material preset that
+      // changes the wall finish picks these up automatically too.
       colSquare: wallMat,
       colRound: wallMat,
       jailWall: wallMat,
-      // the escalator reads as actual mechanical equipment rather than a
-      // colored toy prop, so it gets its own brushed-steel/dark-tread
-      // finishes instead of the plastic palette above.
-      escalator: new THREE.MeshStandardMaterial({ color: 0x9a9ea4, roughness: 0.38, metalness: 0.55 }),
-      escalatorStep: new THREE.MeshStandardMaterial({ color: 0x55585d, roughness: 0.48, metalness: 0.5 }),
-      escalatorRubber: new THREE.MeshStandardMaterial({ color: 0x18181a, roughness: 0.78, metalness: 0.08 }),
-      escalatorMarking: new THREE.MeshStandardMaterial({ color: 0xffc400, roughness: 0.5, metalness: 0.1 }),
+      escalator: wallMat,
+      escalatorStep: wallMat,
+      escalatorRubber: wallMat,
+      escalatorMarking: wallMat,
     };
     const PROP_HEIGHT = 8 * FT;
     // the round/louver window trim and the arched/revolving/turnstile door
@@ -3369,32 +3368,17 @@ export default function RoomBuilder() {
       }
     }
 
-    // 5 evenly-spaced wall columns (square or round), floor to ceiling,
-    // spanning a drawn wall span -- purely decorative, doesn't cut the
-    // wall the way a window/door opening does.
+    // 5 evenly-spaced wall columns (square or round), spanning a drawn wall
+    // span -- cuts the wall away between them like a window/door opening
+    // does (see the "column" cut branch below), leaving a header strip of
+    // solid wall at the top (COLUMN_TOP_GAP) connecting the column tops,
+    // same idea as the Door tool's "Pillars" style. Reuses renderPillarBank
+    // itself (same floor-to-header free-standing column look), just with
+    // this tool's own fixed count/size instead of the door style's
+    // user-adjustable ones.
     const COLUMN_BANK_COUNT = 5;
     const COLUMN_SIZE = 1 * FT;
-    function renderColumnBank(c, lengthAxis, coord, H, thickAxis, normal, T) {
-      const width = c.u1 - c.u0;
-      const spacing = width / COLUMN_BANK_COUNT;
-      // sit proud on the room-interior face of the wall rather than buried
-      // inside its thickness, where a floor-to-ceiling column of about the
-      // same depth as the wall would otherwise be visually indistinguishable
-      // from the wall itself.
-      const normalComp = thickAxis === "z" ? normal.z : normal.x;
-      const adjCoord = coord - normalComp * (T / 2 + COLUMN_SIZE / 2);
-      for (let i = 0; i < COLUMN_BANK_COUNT; i++) {
-        const uCenter = c.u0 + spacing * (i + 0.5);
-        const geo = c.shape === "round"
-          ? new THREE.CylinderGeometry(COLUMN_SIZE / 2, COLUMN_SIZE / 2, H, 20)
-          : new THREE.BoxGeometry(COLUMN_SIZE, H, COLUMN_SIZE);
-        const mesh = new THREE.Mesh(geo, wallMat);
-        mesh.position.y = H / 2;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        sceneGroup.add(placeOnWall(mesh, lengthAxis, adjCoord, uCenter));
-      }
-    }
+    const COLUMN_TOP_GAP = 0.5 * FT;
 
     // "Pillars" door style -- replaces the whole drawn wall span with a row
     // of free-standing round/square pillars (no wall behind or between
@@ -3880,6 +3864,7 @@ export default function RoomBuilder() {
       const cuts = [
         ...openingsFor(panelKey).map((o) => ({ ...o, _t: "open" })),
         ...bumpoutsFor(panelKey).map((b) => ({ ...b, _t: "bump" })),
+        ...columnBanksFor(panelKey).map((cb) => ({ ...cb, _t: "column" })),
       ]
         .map((c) => ({ ...c, u0: Math.max(wallU0, Math.min(c.u0, wallU1)), u1: Math.max(wallU0, Math.min(c.u1, wallU1)) }))
         .filter((c) => c.u1 - c.u0 > 0.05)
@@ -3890,6 +3875,17 @@ export default function RoomBuilder() {
         if (c.u0 > cursor + 0.001) addSeg(cursor, c.u0, 0, H);
         if (c._t === "open") {
           renderOpeningCutout(c, lengthAxis, coord, H, addSeg, addMullion);
+        } else if (c._t === "column") {
+          // same shape as the Door tool's "Pillars" style: the wall is cut
+          // away for the whole span except a header strip at the top
+          // (COLUMN_TOP_GAP) connecting the column tops, with free-standing
+          // columns filling the opening on the wall's own centerline.
+          const colTop = Math.max(0.1, H - COLUMN_TOP_GAP);
+          if (colTop < H - 0.02) addSeg(c.u0, c.u1, colTop, H);
+          renderPillarBank(
+            { u0: c.u0, u1: c.u1, pillarShape: c.shape, pillarCount: COLUMN_BANK_COUNT, pillarSize: COLUMN_SIZE },
+            lengthAxis, coord, 0, colTop
+          );
         } else if (Math.abs(c.depth) > 0.02) {
           // the far wall AND the two connector (side) walls are each rendered
           // by their own panel pass below ("bf:"/"bs0:"/"bs1:"+c.id) so every
@@ -3908,7 +3904,6 @@ export default function RoomBuilder() {
         cursor = c.u1;
       });
       if (cursor < wallU1 - 0.001) addSeg(cursor, wallU1, 0, H);
-      columnBanksFor(panelKey).forEach((cb) => renderColumnBank(cb, lengthAxis, coord, H, thickAxis, normal, T));
       addWallHeightHandle(panelKey, lengthAxis, coord, (wallU0 + wallU1) / 2, H);
 
       selectionsFor(panelKey).forEach((sel) => {
@@ -5073,12 +5068,19 @@ export default function RoomBuilder() {
     const ESCALATOR_STEP_DEPTH = 0.4; // meters -- one tread's horizontal depth
     const ESCALATOR_BELT_SPEED = 0.5; // m/s -- real-world step/handrail speed, fixed for now
     const ESCALATOR_MARGIN_FRAC = 0.08; // fraction of the loop hidden inside each landing housing
-    function escalatorRunFor(rise) { return rise / Math.tan(ESCALATOR_ANGLE); }
-    // the step/handrail path's height along its run: flat tangent at both
-    // ends (steps visibly level as they emerge/disappear), steepest in the
-    // middle -- a real curved-track escalator's profile without needing to
-    // model the actual curved track.
-    function escalatorProfileY(u, rise) { return rise * (u - Math.sin(2 * Math.PI * u) / (2 * Math.PI)); }
+    // a flat landing at each end plus a single straight incline between
+    // them -- real escalator geometry (flat / angle / flat), not a
+    // continuously curving track. Extra run is added so the straight
+    // middle section still climbs the full rise at the true 30 degree
+    // angle, same as before the flat zones were carved out of it.
+    const ESCALATOR_FLAT_FRAC = 0.14;
+    function escalatorRunFor(rise) { return (rise / Math.tan(ESCALATOR_ANGLE)) / (1 - 2 * ESCALATOR_FLAT_FRAC); }
+    function escalatorProfileY(u, rise) {
+      if (u <= ESCALATOR_FLAT_FRAC) return 0;
+      if (u >= 1 - ESCALATOR_FLAT_FRAC) return rise;
+      const t = (u - ESCALATOR_FLAT_FRAC) / (1 - 2 * ESCALATOR_FLAT_FRAC);
+      return rise * t;
+    }
     // only escalators use this -- drawn along a wall, its ascending (+Z)
     // axis is rotated to match that wall's own outward normal (see the
     // escalator-draw commit in onPointerUp) so it always runs perpendicular
@@ -6714,7 +6716,11 @@ export default function RoomBuilder() {
     // "special" is the callout set from the Material Editor request
     // (stairs, balconies, props) that gets its own distinct treatment.
     const BUILDING_SHELL_MATS = [wallMat, floorMat, wallMatDim, floorMatDim, wallMatSelected, floorMatSelected, ceilingMat, mullionMat, pillarMat, pillarMatSelected];
-    const SPECIAL_ITEM_MATS = [stairMat, propMats.sphere, propMats.cone, propMats.cube, propMats.cylinder, propMats.escalator, propMats.escalatorStep, propMats.escalatorRubber, balconyPlatformMat, balconyRoofMat, signBoardMat];
+    // the escalator's own materials are now all just wallMat (so wall
+    // color/material presets apply to it) -- already covered by
+    // BUILDING_SHELL_MATS, so they're deliberately left out here to avoid
+    // double-listing the same material object under two different treatments.
+    const SPECIAL_ITEM_MATS = [stairMat, propMats.sphere, propMats.cone, propMats.cube, propMats.cylinder, balconyPlatformMat, balconyRoofMat, signBoardMat];
 
     // Wireframe and Material Editor both override the same shell/special
     // materials, and each is driven by its own independent React effect
@@ -14223,7 +14229,7 @@ export default function RoomBuilder() {
             boxShadow: "0 2px 10px rgba(0,0,0,0.3)",
           }}
         >
-          <Minimize2 size={14} strokeWidth={2} />
+          <Minimize size={14} strokeWidth={2} />
           Exit full view
         </button>
       )}
@@ -14247,7 +14253,7 @@ export default function RoomBuilder() {
             style={{ display: "flex", alignItems: "center", padding: "6px 9px" }}
             onClick={toggleFocusMode}
           >
-            {focusMode ? <Minimize2 size={14} strokeWidth={2} /> : <Maximize2 size={14} strokeWidth={2} />}
+            {focusMode ? <Minimize size={14} strokeWidth={2} /> : <Maximize size={14} strokeWidth={2} />}
           </button>
         </div>
         <div style={{ width: 1, alignSelf: "stretch", background: "var(--border-separator)" }} />
