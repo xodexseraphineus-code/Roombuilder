@@ -5079,6 +5079,12 @@ export default function RoomBuilder() {
     // middle -- a real curved-track escalator's profile without needing to
     // model the actual curved track.
     function escalatorProfileY(u, rise) { return rise * (u - Math.sin(2 * Math.PI * u) / (2 * Math.PI)); }
+    // only escalators use this -- drawn along a wall, its ascending (+Z)
+    // axis is rotated to match that wall's own outward normal (see the
+    // escalator-draw commit in onPointerUp) so it always runs perpendicular
+    // to the wall with its top landing against it; floor-dropped escalators
+    // (no wall reference) default to 0, same as every other prop kind.
+    function propRotationYOf(p) { return p.rotationY || 0; }
     function propWidthOf(p) { return p.w != null ? p.w : (p.kind === "jailWall" ? 6 * FT : propDefaultDiameter(p.kind)); }
     function propDepthOf(p) {
       if (p.kind === "escalator") return escalatorRunFor(propHeightOf(p));
@@ -5182,6 +5188,7 @@ export default function RoomBuilder() {
     function buildEscalatorProp(p, w, rise, run) {
       const group = new THREE.Group();
       group.position.set(p.x, 0, p.z);
+      group.rotation.y = propRotationYOf(p);
       const zBottom = -run / 2;
       const toZ = (u) => zBottom + run * u;
       const toY = (u) => escalatorProfileY(u, rise);
@@ -5338,7 +5345,7 @@ export default function RoomBuilder() {
         uSpeed: ESCALATOR_BELT_SPEED / Math.max(0.5, Math.hypot(run, rise)),
       });
 
-      renderPropSelectionOverlay(p, w, run, rise);
+      renderPropSelectionOverlay(p, w, run, rise, propRotationYOf(p));
     }
 
     // repositions every registered escalator's steps and handrail grip
@@ -5374,7 +5381,7 @@ export default function RoomBuilder() {
     // from the prop's own w/d/h/position -- shared by every prop kind
     // (including jailWall's group, which has no single mesh of its own to
     // hang this off of).
-    function renderPropSelectionOverlay(p, w, d, h) {
+    function renderPropSelectionOverlay(p, w, d, h, rotationY = 0) {
       if (!isPickableTarget || selectedPropIdRef.current !== p.id) return;
       const boxGeo = new THREE.BoxGeometry(w, h, d);
       const wire = new THREE.LineSegments(
@@ -5382,9 +5389,17 @@ export default function RoomBuilder() {
         new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthTest: false })
       );
       wire.position.set(p.x, h / 2, p.z);
+      wire.rotation.y = rotationY;
       wire.renderOrder = 9;
       sceneGroup.add(wire);
 
+      // a local (sx*w/2, sz*d/2) corner offset, rotated into world space --
+      // identity when rotationY is 0 (every non-escalator prop), so this
+      // doesn't change anything for the axis-aligned common case.
+      const cosR = Math.cos(rotationY), sinR = Math.sin(rotationY);
+      function rotatedOffset(lx, lz) {
+        return { x: lx * cosR + lz * sinR, z: -lx * sinR + lz * cosR };
+      }
       function addHandle(edge, hx, hy, hz) {
         const mesh2 = new THREE.Mesh(new THREE.BoxGeometry(PROP_HANDLE, PROP_HANDLE, PROP_HANDLE), handleMat);
         mesh2.position.set(hx, hy, hz);
@@ -5394,7 +5409,8 @@ export default function RoomBuilder() {
         pickList.push(mesh2);
       }
       [["nw", -1, -1], ["ne", 1, -1], ["sw", -1, 1], ["se", 1, 1]].forEach(([edge, sx, sz]) => {
-        addHandle(edge, p.x + sx * (w / 2), h, p.z + sz * (d / 2));
+        const off = rotatedOffset(sx * (w / 2), sz * (d / 2));
+        addHandle(edge, p.x + off.x, h, p.z + off.z);
       });
       addHandle("top", p.x, h + PROP_HANDLE * 0.9, p.z);
     }
@@ -8790,6 +8806,22 @@ export default function RoomBuilder() {
         }
         return;
       }
+      // Props tool, Escalator shape, dropped on open floor rather than a
+      // wall (see the pending-escalator/escalator-draw wall-anchored path
+      // below for the normal case) -- no wall to take an orientation from,
+      // so it defaults to running along world +Z same as before, arming
+      // immediately same as the wall-anchored path (no hold-first delay).
+      if (toolRef.current === "props" && propsShapeRef.current === "escalator" && kind === "floor") {
+        const ownerRoomId = obj.userData.ownerRoomId ?? null;
+        if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+        const local = toLocalXZ(hit.point);
+        pushUndo();
+        dragState = { type: "props-draw", plane, kind: "escalator", x0: local.x, z0: local.z, x1: local.x, z1: local.z };
+        previewProp = { kind: "escalator", x0: local.x, z0: local.z, x1: local.x, z1: local.z };
+        capture(e);
+        return;
+      }
       // Props tool: holding on the floor -- or anywhere outside the room,
       // on open ground -- for a full second arms drawing, then dragging out
       // a footprint sizes the prop from that drag (a roughly 5x5ft diagonal
@@ -8799,32 +8831,11 @@ export default function RoomBuilder() {
       // the exceptions -- all four are drawn along a wall (see the
       // pending-balcony/pending-terrace/pending-suppbalcony/pending-sign
       // branches below), so this doesn't apply to any of them.
-      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony" && propsShapeRef.current !== "stairPlatform" && propsShapeRef.current !== "sign") {
-        // a wall/partition/selection hit still belongs to this room's own
-        // floor (these are the only other kinds that can reach here --
-        // every other kind, e.g. "prop", is handled by generic pick logic
-        // earlier and returns before this) -- anchoring on its real hit
-        // point keeps the drag starting where the user actually clicked,
-        // rather than falling through to the "outside any room" ground-
-        // level branch below, which re-intersects the raw pointer ray
-        // against a plane at a totally different depth and can place the
-        // prop far outside the room, poking through the wall.
-        if (kind === "floor" || kind === "wall" || kind === "partition" || kind === "selection") {
+      if (toolRef.current === "props" && propsShapeRef.current !== "balcony" && propsShapeRef.current !== "terrace" && propsShapeRef.current !== "suppBalcony" && propsShapeRef.current !== "stairPlatform" && propsShapeRef.current !== "sign" && propsShapeRef.current !== "escalator") {
+        if (kind === "floor") {
           const ownerRoomId = obj.userData.ownerRoomId ?? null;
           if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
           const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
-          if (propsShapeRef.current === "escalator") {
-            // arms immediately, same as balcony/terrace/sign below -- an
-            // escalator has only one size control (width), so there's no
-            // "orbit vs. draw" ambiguity a hold-first gesture needs to
-            // resolve the way a free-form cube/sphere footprint does.
-            const local = toLocalXZ(hit.point);
-            pushUndo();
-            dragState = { type: "props-draw", plane, kind: "escalator", x0: local.x, z0: local.z, x1: local.x, z1: local.z };
-            previewProp = { kind: "escalator", x0: local.x, z0: local.z, x1: local.x, z1: local.z };
-            capture(e);
-            return;
-          }
           dragState = {
             type: "pending-props-draw", plane, start: hit.point.clone(), kind: propsShapeRef.current,
             startScreen: { x: e.clientX, y: e.clientY }, holdStart: performance.now(),
@@ -8986,6 +8997,13 @@ export default function RoomBuilder() {
         const normalComponent5 = info.thickAxis === "x" ? info.normal.x : info.normal.z;
         const side5 = Math.sign((thickCoord5 - info.coord) * normalComponent5) || 1;
         dragState = { type: "pending-stairplatform", panelKey, info, hitPoint: hp, side: side5, startScreen: { x: e.clientX, y: e.clientY } };
+      } else if (toolRef.current === "props" && propsShapeRef.current === "escalator") {
+        // wall-anchored, like balcony/terrace above -- oriented from this
+        // wall's own outward normal (computed at commit time in onPointerUp)
+        // so the escalator's top landing sits against whichever wall it was
+        // drawn on and the rest descends away into the room, rather than
+        // along a fixed world axis regardless of which wall was clicked.
+        dragState = { type: "pending-escalator", panelKey, info, hitPoint: hp, startScreen: { x: e.clientX, y: e.clientY } };
       } else if (toolRef.current === "move" && columnShapeRef.current !== "none") {
         // a run of columns is drawn along a wall exactly like a window --
         // tap and drag to mark its span -- rather than the Wall tool's
@@ -9259,6 +9277,21 @@ export default function RoomBuilder() {
         return;
       }
 
+      if (dragState.type === "pending-escalator") {
+        const dx = e.clientX - dragState.startScreen.x;
+        const dy = e.clientY - dragState.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > MOVE_PX) {
+          pushUndo();
+          const info = dragState.info;
+          const u = panelU(info, dragState.hitPoint);
+          dragState = { type: "escalator-draw", panelKey: dragState.panelKey, plane: panelFacePlane(info, dragState.hitPoint), u0: u, u1: u };
+          previewOpening = { panel: dragState.panelKey, u0: u, u1: u, height: 7 * FT };
+          rebuild();
+        }
+        return;
+      }
+
       if (dragState.type === "pending-terrace") {
         const dx = e.clientX - dragState.startScreen.x;
         const dy = e.clientY - dragState.startScreen.y;
@@ -9441,6 +9474,15 @@ export default function RoomBuilder() {
           u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), isDoor: dragState.isDoor,
           height: dragState.isDoor ? doorHeightRef.current : openingHeightRef.current,
         };
+        rebuild();
+      } else if (dragState.type === "escalator-draw") {
+        const pt = new THREE.Vector3();
+        if (!ray.intersectPlane(dragState.plane, pt)) return;
+        const info = getPanelInfo(dragState.panelKey);
+        if (!info) return;
+        const u = Math.max(info.u0, Math.min(info.u1, snapValue(panelU(info, pt))));
+        dragState.u1 = u;
+        previewOpening = { panel: dragState.panelKey, u0: Math.min(dragState.u0, u), u1: Math.max(dragState.u0, u), height: 7 * FT };
         rebuild();
       } else if (dragState.type === "balcony-draw") {
         const pt = new THREE.Vector3();
@@ -9824,9 +9866,13 @@ export default function RoomBuilder() {
           p.d = newD;
         } else if (p.kind === "escalator") {
           // only width is adjustable this way -- run is always derived
-          // from rise at a fixed incline (see propDepthOf), so any corner
-          // drag just widens/narrows it, ignoring the drag's Z component.
-          p.w = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, signX * dx * 2));
+          // from rise at a fixed incline (see propDepthOf). A wall-drawn
+          // escalator is rotated to face its wall (see propRotationYOf),
+          // so the drag delta has to be projected onto its own rotated
+          // local-X axis rather than assumed to be world X.
+          const theta = propRotationYOf(p);
+          const alongLocalX = dx * Math.cos(theta) - dz * Math.sin(theta);
+          p.w = Math.max(PROP_MIN_SIZE, Math.min(PROP_MAX_SIZE, signX * alongLocalX * 2));
         } else {
           // round shapes stay a uniform radius -- the diagonal distance
           // from center to the pointer, regardless of which corner it is.
@@ -10122,6 +10168,39 @@ export default function RoomBuilder() {
             pillarShape: pillarShapeRef.current, pillarSize: pillarSizeRef.current, pillarCount: pillarCountRef.current,
             fullHeight: doorFullHeightRef.current,
           });
+        }
+        previewOpening = null;
+      } else if (dragState.type === "escalator-draw") {
+        const u0 = Math.min(dragState.u0, dragState.u1);
+        const u1 = Math.max(dragState.u0, dragState.u1);
+        const width = u1 - u0;
+        if (width >= MIN_PROP_DRAW_SIZE) {
+          const info = getPanelInfo(dragState.panelKey);
+          if (info) {
+            // oriented so local +Z (the ascending direction, see
+            // escalatorProfileY) points along this wall's own outward
+            // normal -- the "top" (full rise) lands against the wall, the
+            // "bottom" (floor-level entry) extends away into the room.
+            const rotationY = Math.atan2(info.normal.x, info.normal.z);
+            const rise = state.height;
+            const run = escalatorRunFor(rise);
+            // centered on the drag's wall-span midpoint, inset from the
+            // wall's centerline by half its run plus half the wall's own
+            // thickness (plus a hair of clearance) so the top landing sits
+            // flush against the wall's interior face instead of clipping
+            // through it.
+            const inset = run / 2 + state.thickness / 2 + 0.05;
+            const uCenter = (u0 + u1) / 2;
+            const baseX = info.lengthAxis === "x" ? uCenter : info.coord;
+            const baseZ = info.lengthAxis === "x" ? info.coord : uCenter;
+            const id = idSeq++;
+            if (!state.props) state.props = [];
+            state.props.push({
+              id, kind: "escalator",
+              x: baseX - info.normal.x * inset, z: baseZ - info.normal.z * inset,
+              w: width, rotationY,
+            });
+          }
         }
         previewOpening = null;
       } else if (dragState.type === "balcony-draw") {
