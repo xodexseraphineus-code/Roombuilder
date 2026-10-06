@@ -7937,10 +7937,16 @@ export default function RoomBuilder() {
     // ordinary automatic-connecting-door system (computeRoomConnections)
     // now that they're flush-touching; 2 = a wide, floor-to-ceiling opening
     // spanning almost the whole shared wall on both sides, reading as the
-    // wall having been removed entirely.
+    // wall having been removed entirely. Returns whether the split actually
+    // happened -- false (declined, the anchor point landed too close to a
+    // corner to leave two real rooms) leaves state untouched, so the caller
+    // must still get rid of the now-orphaned partition itself rather than
+    // leaving it stuck flush against the far wall (see the partition
+    // release handler, which falls back to deleting it when this returns
+    // false) -- same reasoning as splitFloorWithBumpoutGap's own guard.
     function splitFloorWithPartition(floorEntry, p, wallMode) {
       const parent = getPanelInfo(p.panel);
-      if (!parent) return;
+      if (!parent) return false;
       const fp = state.footprint;
       let rectA, rectB, aPanel, bPanel, openLo, openHi;
       if (parent.thickAxis === "z") {
@@ -7958,6 +7964,9 @@ export default function RoomBuilder() {
         aPanel = "south"; bPanel = "north";
         openLo = fp.xMin; openHi = fp.xMax;
       }
+      const sizeA = parent.thickAxis === "z" ? rectA.xMax - rectA.xMin : rectA.zMax - rectA.zMin;
+      const sizeB = parent.thickAxis === "z" ? rectB.xMax - rectB.xMin : rectB.zMax - rectB.zMin;
+      if (sizeA < MIN_SIZE || sizeB < MIN_SIZE) return false;
       const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height; dataA.thickness = state.thickness;
       const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height; dataB.thickness = state.thickness;
       const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
@@ -7982,6 +7991,7 @@ export default function RoomBuilder() {
       // pickable at a time (see isPickableTarget in rebuildRoomEntry); tap
       // into the other one via the Room tool to edit its side.
       replaceWithSplitRooms(floorEntry, roomA, roomB, false);
+      return true;
     }
 
     // true once a bump-out's inward notch has been pushed all the way to
@@ -8010,10 +8020,16 @@ export default function RoomBuilder() {
     // doesn't become a shared wall like the point-partition gesture does --
     // it deletes that whole width outright, leaving two fully independent
     // rooms with a real gap (the notch's own width) between them, each a
-    // complete, self-contained room like any other extracted one.
+    // complete, self-contained room like any other extracted one. Returns
+    // whether the split actually happened -- false (declined, usually
+    // because the notch landed too close to a corner to leave two real
+    // rooms) leaves state untouched, so the caller must still get rid of
+    // the now-orphaned bump-out itself rather than leaving it stuck at
+    // whatever depth it was pushed to (see the panel-extrude release
+    // handler, which falls back to deleting it when this returns false).
     function splitFloorWithBumpoutGap(floorEntry, bo) {
       const parent = getPanelInfo(bo.panel);
-      if (!parent) return;
+      if (!parent) return false;
       const fp = state.footprint;
       let rectA, rectB;
       if (parent.thickAxis === "z") {
@@ -8029,7 +8045,7 @@ export default function RoomBuilder() {
       }
       const sizeA = parent.thickAxis === "z" ? rectA.xMax - rectA.xMin : rectA.zMax - rectA.zMin;
       const sizeB = parent.thickAxis === "z" ? rectB.xMax - rectB.xMin : rectB.zMax - rectB.zMin;
-      if (sizeA < MIN_SIZE || sizeB < MIN_SIZE) return; // the notch landed too close to a corner to leave two real rooms
+      if (sizeA < MIN_SIZE || sizeB < MIN_SIZE) return false; // the notch landed too close to a corner to leave two real rooms
       const dataA = makeFloorData(); dataA.footprint = rectA; dataA.height = state.height; dataA.thickness = state.thickness;
       const dataB = makeFloorData(); dataB.footprint = rectB; dataB.height = state.height; dataB.thickness = state.thickness;
       const roomA = { id: idSeq++, data: dataA, offsetX: 0, offsetZ: 0 };
@@ -8039,6 +8055,7 @@ export default function RoomBuilder() {
       // wall plane), so there's no ambiguity in letting both be clickable
       // at once regardless of which is active.
       replaceWithSplitRooms(floorEntry, roomA, roomB, true);
+      return true;
     }
 
     function onPointerDown(e) {
@@ -10133,11 +10150,19 @@ export default function RoomBuilder() {
             // released while flush against the far wall and held long
             // enough -- delete this whole width, splitting the room into
             // two separate ones with a real gap between them (see
-            // splitFloorWithBumpoutGap).
+            // splitFloorWithBumpoutGap). The user has fully committed to
+            // "get rid of this" at this point (flush, armed, released), so
+            // if an actual two-room split isn't possible here -- the gate
+            // below declines (something else is already going on in this
+            // room) or splitFloorWithBumpoutGap itself declines (the notch
+            // landed too close to a corner) -- fall back to just deleting
+            // the bump-out outright rather than leaving it stuck at
+            // whatever depth it was pushed to, unrecoverable through the
+            // ordinary gesture (too far pushed to read as "near zero" above,
+            // too invalid to ever pass the full-span check into a split).
             const floorEntry = floors.find((f) => f.id === activeFloorId);
-            if (stateMatchesFloorContext(floorEntry) && canAutoSplitFloorByBumpout()) {
-              splitFloorWithBumpoutGap(floorEntry, bo);
-            }
+            const split = stateMatchesFloorContext(floorEntry) && canAutoSplitFloorByBumpout() && splitFloorWithBumpoutGap(floorEntry, bo);
+            if (!split) state.bumpouts = state.bumpouts.filter((b) => b.id !== id);
           }
         }
       } else if (dragState.type === "partition-draw" || dragState.type === "partition-redrag") {
@@ -10148,11 +10173,15 @@ export default function RoomBuilder() {
           // released while snapped flush and mid-hold -- the room this
           // partition just closed off becomes two independent rooms (see
           // splitFloorWithPartition), with the boundary the hold cycle
-          // landed on: solid, an ordinary door, or fully open.
+          // landed on: solid, an ordinary door, or fully open. Same
+          // fully-committed-but-nothing-sane-to-do-with-it fallback as the
+          // bump-out release above: if the gate declines or the split
+          // itself declines (anchor point too close to a corner), just
+          // delete the partition instead of leaving it stuck flush against
+          // the far wall.
           const floorEntry = floors.find((f) => f.id === activeFloorId);
-          if (stateMatchesFloorContext(floorEntry) && canAutoSplitFloor()) {
-            splitFloorWithPartition(floorEntry, p, dragState.wallMode || 0);
-          }
+          const split = stateMatchesFloorContext(floorEntry) && canAutoSplitFloor() && splitFloorWithPartition(floorEntry, p, dragState.wallMode || 0);
+          if (!split) state.partitions = state.partitions.filter((pp) => pp.id !== p.id);
         }
       } else if (dragState.type === "opening-draw") {
         let [u0, u1] = [Math.min(dragState.u0, dragState.u1), Math.max(dragState.u0, dragState.u1)];
