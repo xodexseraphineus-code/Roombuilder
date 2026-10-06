@@ -1588,6 +1588,15 @@ export default function RoomBuilder() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.domElement.style.touchAction = "none";
+    // touch-action:none stops the browser's own pan/zoom/scroll gestures
+    // from hijacking a drag, but it does nothing about iOS's separate
+    // long-press callout (the "Copy"/"Look Up" popup) -- a sustained,
+    // stationary hold is exactly what several press-and-hold gestures here
+    // need (see WALL_DELETE_HOLD_MS/WALL_CYCLE_HOLD_MS), so suppress that
+    // too, or a 1-2 second hold on a touch device can get hijacked by the
+    // OS partway through.
+    renderer.domElement.style.webkitTouchCallout = "none";
+    renderer.domElement.style.userSelect = "none";
     renderer.domElement.style.cursor = "grab";
     renderer.xr.enabled = true;
     mount.appendChild(renderer.domElement);
@@ -9461,9 +9470,17 @@ export default function RoomBuilder() {
               // landing flush against the opposite wall is also the moment
               // the press-and-hold solid -> door -> fully-open cycle (see
               // tick()) starts counting from -- pulling back off the wall
-              // below cancels it again.
+              // below cancels it again. committed is deliberately NOT reset
+              // there (see onPointerUp) -- once released while genuinely
+              // flush, releasing anywhere else later in the SAME gesture
+              // (e.g. a release event landing a frame after a last-instant
+              // sub-pixel move nudges it a hair off flush, which reads as
+              // "pulled back" here) still commits, rather than silently
+              // doing nothing just because the live state didn't exactly
+              // match at that one instant.
               dragState.holdCycleStart = now;
               dragState.wallMode = 0;
+              dragState.committed = true;
             } else if (!isFullSpan(newExt) && isFullSpan(p.ext)) {
               dragState.holdCycleStart = null;
               dragState.wallMode = 0;
@@ -10146,20 +10163,23 @@ export default function RoomBuilder() {
           const bo = state.bumpouts.find((b) => b.id === id);
           if (bo && Math.abs(bo.depth) < 0.04) {
             state.bumpouts = state.bumpouts.filter((b) => b.id !== id);
-          } else if (bo && dragState.holdCycleStart != null && dragState.wallMode === 1 && bumpoutIsFullSpan(bo)) {
-            // released while flush against the far wall and held long
-            // enough -- delete this whole width, splitting the room into
-            // two separate ones with a real gap between them (see
-            // splitFloorWithBumpoutGap). The user has fully committed to
-            // "get rid of this" at this point (flush, armed, released), so
-            // if an actual two-room split isn't possible here -- the gate
+          } else if (bo && dragState.committed) {
+            // armed at some point during this hold (see tick()) -- trust
+            // that rather than re-checking bumpoutIsFullSpan/wallMode fresh
+            // at this exact instant. The live state is pinned by the depth
+            // snap while the touch/cursor stays anywhere near the far wall,
+            // but a release event can still land a frame where it reads a
+            // hair off (a last-instant sub-pixel move as a touch lifts, a
+            // stray background rebuild, whatever) -- once truly committed,
+            // that shouldn't silently turn "release" into a no-op with the
+            // wall stuck exactly where it was, unrecoverable through the
+            // ordinary gesture (too far pushed to read as "near zero" above,
+            // and with no way back into "armed" once this event is missed).
+            // If an actual two-room split isn't possible here -- the gate
             // below declines (something else is already going on in this
             // room) or splitFloorWithBumpoutGap itself declines (the notch
             // landed too close to a corner) -- fall back to just deleting
-            // the bump-out outright rather than leaving it stuck at
-            // whatever depth it was pushed to, unrecoverable through the
-            // ordinary gesture (too far pushed to read as "near zero" above,
-            // too invalid to ever pass the full-span check into a split).
+            // the bump-out outright.
             const floorEntry = floors.find((f) => f.id === activeFloorId);
             const split = stateMatchesFloorContext(floorEntry) && canAutoSplitFloorByBumpout() && splitFloorWithBumpoutGap(floorEntry, bo);
             if (!split) state.bumpouts = state.bumpouts.filter((b) => b.id !== id);
@@ -10169,16 +10189,21 @@ export default function RoomBuilder() {
         const p = state.partitions.find((pp) => pp.id === dragState.id);
         if (p && Math.abs(p.ext) < 0.04) {
           state.partitions = state.partitions.filter((pp) => pp.id !== p.id);
-        } else if (p && dragState.holdCycleStart != null && partitionIsFullSpan(p)) {
-          // released while snapped flush and mid-hold -- the room this
-          // partition just closed off becomes two independent rooms (see
-          // splitFloorWithPartition), with the boundary the hold cycle
-          // landed on: solid, an ordinary door, or fully open. Same
-          // fully-committed-but-nothing-sane-to-do-with-it fallback as the
-          // bump-out release above: if the gate declines or the split
-          // itself declines (anchor point too close to a corner), just
-          // delete the partition instead of leaving it stuck flush against
-          // the far wall.
+        } else if (p && dragState.committed) {
+          // snapped flush at some point during this gesture (see the
+          // isFullSpan transition in onPointerMove, which sets committed
+          // immediately -- there's no minimum hold before a partition split
+          // is allowed, only before the solid/door/open cycle advances) --
+          // trust that instead of re-checking partitionIsFullSpan fresh at
+          // this exact instant, same reasoning as the bump-out release
+          // above. The room this partition just closed off becomes two
+          // independent rooms (see splitFloorWithPartition), with the
+          // boundary the hold cycle landed on: solid, an ordinary door, or
+          // fully open. Same fully-committed-but-nothing-sane-to-do-with-it
+          // fallback as the bump-out release above: if the gate declines or
+          // the split itself declines (anchor point too close to a
+          // corner), just delete the partition instead of leaving it stuck
+          // flush against the far wall.
           const floorEntry = floors.find((f) => f.id === activeFloorId);
           const split = stateMatchesFloorContext(floorEntry) && canAutoSplitFloor() && splitFloorWithPartition(floorEntry, p, dragState.wallMode || 0);
           if (!split) state.partitions = state.partitions.filter((pp) => pp.id !== p.id);
@@ -12174,6 +12199,10 @@ export default function RoomBuilder() {
           const armed = now - dragState.holdCycleStart >= WALL_DELETE_HOLD_MS ? 1 : 0;
           if (armed !== dragState.wallMode) {
             dragState.wallMode = armed;
+            // sticky once truly armed (held flush the full WALL_DELETE_HOLD_MS)
+            // -- see onPointerUp, which trusts this instead of re-checking
+            // bumpoutIsFullSpan fresh at the exact release instant.
+            if (armed === 1) dragState.committed = true;
             playClickSound();
             rebuild();
           }

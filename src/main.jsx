@@ -11,10 +11,20 @@ import RoomBuilder from "./RoomBuilder.jsx";
 // control actually changes hands is what makes a visit reliably pick up
 // whatever was just published, instead of only "sometimes, after enough
 // manual refreshes."
+//
+// clientsClaim() fires this same controllerchange event on a page's very
+// FIRST load too (going from no controller to one), not only on a later
+// takeover by a newer worker -- reloading on that first, totally ordinary
+// claim would silently refresh the page out from under whatever the user
+// was doing within the first moments of any visit (mid-drag, mid a
+// press-and-hold gesture, ...), wiping it with no visible explanation.
+// Only reload when this page was ALREADY under a (now-superseded)
+// controller's control -- a genuine update, not a first-ever claim.
 if ("serviceWorker" in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
   let reloaded = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (reloaded) return;
+    if (!hadController || reloaded) return;
     reloaded = true;
     window.location.reload();
   });
