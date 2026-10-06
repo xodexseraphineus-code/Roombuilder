@@ -26,6 +26,14 @@ const MIN_HIGHLIGHT = 0.15;       // smallest highlight worth keeping
 const MOVE_PX = 6;                // pixels of movement that resolves a quick drag
 const DEFAULT_OPENING_HEIGHT = +(WALL_HEIGHT * 0.8).toFixed(2);
 const FT = 0.3048;                // grid/measurement units are shown in feet
+// window/door mullions are a fixed real-world dimension rather than a
+// fraction of the wall's own thickness -- a thick exterior wall shouldn't
+// get a chunky frame, a thin partition shouldn't get an invisible one.
+// Centered on the wall's centerline (see makePanel), this naturally sits
+// recessed from both wall faces whenever the wall is thicker than the
+// frame, giving the mullion a visible reveal/shadow lip all the way
+// around instead of flushing with the wall surface.
+const MULLION_THICKNESS = 0.25 * FT;
 const DEFAULT_ROOM_HALF_X = 12.5; // default room is 25m x 15m
 const DEFAULT_ROOM_HALF_Z = 7.5;
 const MIN_STAIR_SIZE = FT;         // smallest footprint that commits as a staircase
@@ -3856,7 +3864,7 @@ export default function RoomBuilder() {
       // kept thinner than the wall itself rather than matching it.
       function addMullion(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
-        const seg = makePanel(lengthAxis, coord, a, b, T * 0.7, yb, yt, mullionMat);
+        const seg = makePanel(lengthAxis, coord, a, b, Math.min(T, MULLION_THICKNESS), yb, yt, mullionMat);
         seg.userData = { kind: "wall", panel: panelKey, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
       }
@@ -3960,7 +3968,7 @@ export default function RoomBuilder() {
       }
       function addMullion(a, b, yb, yt) {
         if (b - a < 0.02 || yt - yb < 0.02) return;
-        const seg = makePanel(lengthAxis, p.u, a, b, T * 0.7, yb, yt, mullionMat);
+        const seg = makePanel(lengthAxis, p.u, a, b, Math.min(T, MULLION_THICKNESS), yb, yt, mullionMat);
         seg.userData = { kind: "partition", id: p.id, ownerRoomId: buildingRoomId, ownerFloorId: buildingFloorEntry && buildingFloorEntry.id };
         sceneGroup.add(seg);
       }
