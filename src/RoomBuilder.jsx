@@ -13979,6 +13979,8 @@ export default function RoomBuilder() {
               {sceneName}
             </span>
           )}
+          {/* temporary build marker for cache-debugging -- safe to remove once confirmed */}
+          <span style={{ fontSize: 9, color: "var(--text-secondary)", opacity: 0.5, pointerEvents: "none" }}>build-2026-10-09-c</span>
           <button
             className="rb-btn"
             title="Previously saved buildings"
