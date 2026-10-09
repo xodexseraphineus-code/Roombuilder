@@ -844,6 +844,17 @@ export default function RoomBuilder() {
   const panelHeightApiRef = useRef({ setHeight: () => {}, getHeight: () => WALL_HEIGHT });
   const rebuildGridRef = useRef(() => {});
   const rebuildModelRef = useRef(() => {});
+  // true for the whole span of a pointer gesture (set in onPointerDown,
+  // cleared in onPointerUp) -- lets the many "clear this selection, sync
+  // this ref" effects below skip their own rebuild while a gesture is live.
+  // Those effects' rebuilds are always redundant with either the gesture's
+  // own per-frame rebuild() calls or onPointerUp's unconditional final one,
+  // but as a React effect they fire whenever React gets around to the
+  // commit -- which can land in the middle of the gesture's own synchronous
+  // rebuild cycle, racing two full scene rebuilds against each other for no
+  // reason. Worth avoiding regardless of how much of it any one glitch
+  // turns out to explain.
+  const dragActiveRef = useRef(false);
   const setViewModeApiRef = useRef(() => {});
   const viewCubeApiRef = useRef(null);
   const viewCubeDragRef = useRef(null);
@@ -878,7 +889,7 @@ export default function RoomBuilder() {
   useEffect(() => { viewportThemeApiRef.current(uiTheme); }, [uiTheme]);
   const [tool, setTool] = useState("move");
   const toolRef = useRef(tool);
-  useEffect(() => { toolRef.current = tool; rebuildModelRef.current(); }, [tool]);
+  useEffect(() => { toolRef.current = tool; if (!dragActiveRef.current) rebuildModelRef.current(); }, [tool]);
   const [openingHeight, setOpeningHeight] = useState(DEFAULT_OPENING_HEIGHT);
   const openingHeightRef = useRef(openingHeight);
   useEffect(() => { openingHeightRef.current = openingHeight; }, [openingHeight]);
@@ -928,7 +939,7 @@ export default function RoomBuilder() {
   const freeformDraftApiRef = useRef({ undo: () => {}, cancel: () => {} });
   const [selectedFreeformId, setSelectedFreeformId] = useState(null);
   const selectedFreeformIdRef = useRef(selectedFreeformId);
-  useEffect(() => { selectedFreeformIdRef.current = selectedFreeformId; rebuildModelRef.current(); }, [selectedFreeformId]);
+  useEffect(() => { selectedFreeformIdRef.current = selectedFreeformId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedFreeformId]);
   const deleteFreeformRef = useRef(() => {});
   const [freeformThickness, setFreeformThickness] = useState(0.35);
   const freeformThicknessRef = useRef(freeformThickness);
@@ -946,7 +957,7 @@ export default function RoomBuilder() {
   // rather than the flat state.openings array the rectangular system uses.
   const [selectedFreeformOpeningId, setSelectedFreeformOpeningId] = useState(null);
   const selectedFreeformOpeningIdRef = useRef(selectedFreeformOpeningId);
-  useEffect(() => { selectedFreeformOpeningIdRef.current = selectedFreeformOpeningId; rebuildModelRef.current(); }, [selectedFreeformOpeningId]);
+  useEffect(() => { selectedFreeformOpeningIdRef.current = selectedFreeformOpeningId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedFreeformOpeningId]);
   const deleteFreeformOpeningRef = useRef(() => {});
   const [columnShape, setColumnShape] = useState("none");
   const columnShapeRef = useRef(columnShape);
@@ -1088,11 +1099,17 @@ export default function RoomBuilder() {
   useEffect(() => { lightAzimuthApiRef.current(lightAzimuth); }, [lightAzimuth]);
   const [selectedPanel, setSelectedPanel] = useState(null);
   const selectedPanelRef = useRef(selectedPanel);
-  useEffect(() => { selectedPanelRef.current = selectedPanel; rebuildModelRef.current(); }, [selectedPanel]);
+  useEffect(() => { selectedPanelRef.current = selectedPanel; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedPanel]);
   const [selectedHeight, setSelectedHeight] = useState(WALL_HEIGHT);
   const [selectedRoomId, setSelectedRoomId] = useState(null);
   const selectedRoomIdRef = useRef(selectedRoomId);
-  useEffect(() => { selectedRoomIdRef.current = selectedRoomId; rebuildModelRef.current(); }, [selectedRoomId]);
+  // every setSelectedRoomId caller already does its own synchronous rebuild
+  // right next to the call (resetEverything, selectFloorById,
+  // switchActiveRoom all call rebuild()/rebuildFloorEntry() themselves), so
+  // this effect's own rebuild was always redundant -- and, same as
+  // dragActiveRef above, risked firing asynchronously in the middle of an
+  // in-progress pointer drag.
+  useEffect(() => { selectedRoomIdRef.current = selectedRoomId; }, [selectedRoomId]);
   const cutRoomRef = useRef(() => {});
   const copyRoomRef = useRef(() => {});
   const pasteRoomRef = useRef(() => {});
@@ -1101,16 +1118,16 @@ export default function RoomBuilder() {
   const [hasRoomClipboard, setHasRoomClipboard] = useState(false);
   const [selectedStairId, setSelectedStairId] = useState(null);
   const selectedStairIdRef = useRef(selectedStairId);
-  useEffect(() => { selectedStairIdRef.current = selectedStairId; rebuildModelRef.current(); }, [selectedStairId]);
+  useEffect(() => { selectedStairIdRef.current = selectedStairId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedStairId]);
   const [selectedBalconyId, setSelectedBalconyId] = useState(null);
   const selectedBalconyIdRef = useRef(selectedBalconyId);
-  useEffect(() => { selectedBalconyIdRef.current = selectedBalconyId; rebuildModelRef.current(); }, [selectedBalconyId]);
+  useEffect(() => { selectedBalconyIdRef.current = selectedBalconyId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedBalconyId]);
   const [selectedBalconyPart, setSelectedBalconyPart] = useState(null); // "pillars" | "ceiling" | null (whole assembly)
   const selectedBalconyPartRef = useRef(selectedBalconyPart);
   useEffect(() => { selectedBalconyPartRef.current = selectedBalconyPart; }, [selectedBalconyPart]);
   const [selectedTerraceId, setSelectedTerraceId] = useState(null);
   const selectedTerraceIdRef = useRef(selectedTerraceId);
-  useEffect(() => { selectedTerraceIdRef.current = selectedTerraceId; rebuildModelRef.current(); }, [selectedTerraceId]);
+  useEffect(() => { selectedTerraceIdRef.current = selectedTerraceId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedTerraceId]);
   const deleteTerraceRef = useRef(() => {});
   const [terraceDepth, setTerraceDepth] = useState(10 * FT);
   const terraceDepthApiRef = useRef({ setDepth: () => {} });
@@ -1118,7 +1135,7 @@ export default function RoomBuilder() {
   const terraceRailHeightApiRef = useRef({ setRailHeight: () => {} });
   const [selectedSuppBalconyId, setSelectedSuppBalconyId] = useState(null);
   const selectedSuppBalconyIdRef = useRef(selectedSuppBalconyId);
-  useEffect(() => { selectedSuppBalconyIdRef.current = selectedSuppBalconyId; rebuildModelRef.current(); }, [selectedSuppBalconyId]);
+  useEffect(() => { selectedSuppBalconyIdRef.current = selectedSuppBalconyId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedSuppBalconyId]);
   const deleteSuppBalconyRef = useRef(() => {});
   const [suppBalconyHeight, setSuppBalconyHeight] = useState(6 * FT);
   const suppBalconyHeightApiRef = useRef({ setHeight: () => {} });
@@ -1128,7 +1145,7 @@ export default function RoomBuilder() {
   const suppBalconyDepthApiRef = useRef({ setDepth: () => {} });
   const [selectedStairPlatformId, setSelectedStairPlatformId] = useState(null);
   const selectedStairPlatformIdRef = useRef(selectedStairPlatformId);
-  useEffect(() => { selectedStairPlatformIdRef.current = selectedStairPlatformId; rebuildModelRef.current(); }, [selectedStairPlatformId]);
+  useEffect(() => { selectedStairPlatformIdRef.current = selectedStairPlatformId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedStairPlatformId]);
   const deleteStairPlatformRef = useRef(() => {});
   const [stairPlatformDepth, setStairPlatformDepth] = useState(8 * FT);
   const [stairPlatformStairDepth, setStairPlatformStairDepth] = useState(6 * FT);
@@ -1136,16 +1153,16 @@ export default function RoomBuilder() {
   const stairPlatformEditApiRef = useRef({ setPlatformDepth: () => {}, setStairDepth: () => {}, setNumSteps: () => {} });
   const [selectedSignId, setSelectedSignId] = useState(null);
   const selectedSignIdRef = useRef(selectedSignId);
-  useEffect(() => { selectedSignIdRef.current = selectedSignId; rebuildModelRef.current(); }, [selectedSignId]);
+  useEffect(() => { selectedSignIdRef.current = selectedSignId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedSignId]);
   const deleteSignRef = useRef(() => {});
   const [signText, setSignText] = useState("");
   const signTextApiRef = useRef({ setText: () => {} });
   const [selectedOpeningId, setSelectedOpeningId] = useState(null); // a window or door cutout in a wall
   const selectedOpeningIdRef = useRef(selectedOpeningId);
-  useEffect(() => { selectedOpeningIdRef.current = selectedOpeningId; rebuildModelRef.current(); }, [selectedOpeningId]);
+  useEffect(() => { selectedOpeningIdRef.current = selectedOpeningId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedOpeningId]);
   const [selectedPropId, setSelectedPropId] = useState(null); // a placed sphere/cube/cone/cylinder prop
   const selectedPropIdRef = useRef(selectedPropId);
-  useEffect(() => { selectedPropIdRef.current = selectedPropId; rebuildModelRef.current(); }, [selectedPropId]);
+  useEffect(() => { selectedPropIdRef.current = selectedPropId; if (!dragActiveRef.current) rebuildModelRef.current(); }, [selectedPropId]);
   const [balconyStairHeight, setBalconyStairHeight] = useState(5 * FT);
   const balconyHeightApiRef = useRef({ setHeight: () => {} });
   const [balconyPlatformWidth, setBalconyPlatformWidth] = useState(10 * FT);
@@ -1199,7 +1216,7 @@ export default function RoomBuilder() {
   useEffect(() => { snapEnabledRef.current = snapEnabled; }, [snapEnabled]);
   const [showMeasurements, setShowMeasurements] = useState(false);
   const showMeasurementsRef = useRef(showMeasurements);
-  useEffect(() => { showMeasurementsRef.current = showMeasurements; rebuildModelRef.current(); }, [showMeasurements]);
+  useEffect(() => { showMeasurementsRef.current = showMeasurements; if (!dragActiveRef.current) rebuildModelRef.current(); }, [showMeasurements]);
   const [viewMode, setViewMode] = useState("orbit");
   useEffect(() => { setViewModeApiRef.current(viewMode); }, [viewMode]);
   const [hiddenLineMode, setHiddenLineMode] = useState(false);
@@ -8068,6 +8085,7 @@ export default function RoomBuilder() {
     }
 
     function onPointerDown(e) {
+      dragActiveRef.current = true;
       if (e.pointerType === "touch") e.preventDefault();
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (activePointers.size >= 2) {
@@ -8923,10 +8941,13 @@ export default function RoomBuilder() {
         setSelectedFreeformOpeningId(null);
         const ownerRoomId = obj.userData.ownerRoomId ?? null;
         if (ownerRoomId !== activeRoomId) switchActiveRoom(ownerRoomId);
-        // a deliberate tap on this room's own wall/partition, even if it was
-        // already the (silently, auto-landed) active one -- it's genuinely
-        // selected now, same as tapping into it via the Room tool would do.
-        else if (ownerRoomId != null && activeRoomSilent) switchActiveRoom(ownerRoomId, { silent: false });
+        // deliberately NOT un-silencing a same-room, already-(silently)-active
+        // tap here, even though it's a "real" tap on this room's own
+        // wall/partition -- the room this applies to was only ever
+        // auto-landed-on silently by replaceWithSplitRooms in the first
+        // place, precisely so its floor keeps reading as unselected through
+        // ordinary editing like this (pushing/resizing its own walls), not
+        // flashing to the "selected" highlight the instant you touch them.
         // switchActiveRoom resets `state` to the active floor when it
         // clears room focus -- reassert the cross-floor retarget so the
         // drag that's about to start still lands on the right floor.
@@ -10038,6 +10059,7 @@ export default function RoomBuilder() {
         if (activePointers.size < 2) pinchState = null;
         return;
       }
+      dragActiveRef.current = false;
       if (dividerDragActive) {
         dividerDragActive = false;
         return;
