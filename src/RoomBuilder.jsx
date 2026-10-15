@@ -11337,17 +11337,315 @@ export default function RoomBuilder() {
       pushUndo();
       ["north", "south", "east", "west"].forEach((w) => voiceAddWindowsToWall(w, countPerWall));
     }
+
+    // ---------- voice command actions, round 2: floor/direction targeting
+    // and the rest of the bottom ribbon (openings, doors, props, balconies/
+    // terraces/supported-balconies/signs, new rooms) ----------
+    //
+    // "front" is a fixed alias for whichever wall faces the app's own
+    // default camera angle -- not whatever the user has since orbited to.
+    // Derived from the actual startup theta/phi (0.65, 1.05): the default
+    // view leans toward +z/+x, so south is the dominantly front-facing
+    // wall, matching standard building-elevation convention (stand at the
+    // front looking in, your right hand points east).
+    const DIRECTION_ALIASES = { front: "south", back: "north", right: "east", left: "west" };
+    function resolveWallAlias(w) {
+      const key = String(w || "").toLowerCase().trim();
+      return DIRECTION_ALIASES[key] || key;
+    }
+    function wallsForSpec(spec) {
+      const key = String(spec || "").toLowerCase().trim();
+      if (key === "all" || key === "all around" || key === "every wall" || key === "all walls") {
+        return ["north", "south", "east", "west"];
+      }
+      return [resolveWallAlias(spec)];
+    }
+
+    // reproduces the Levels panel's own label computation (a custom
+    // floorNames override, else "Level N" counted bottom-to-top) so
+    // "third floor" resolves exactly the way the UI displays it right now
+    // -- floor order is just live array position, not a stored number, so
+    // this has to be recomputed fresh every call rather than cached.
+    function computeFloorLabels() {
+      const ids = floors.map((f) => f.id);
+      return ids.map((id, i) => ({ id, label: floorNamesRef.current[id] || `Level ${ids.length - i}` }));
+    }
+    const ORDINAL_WORDS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+    function resolveFloorIds(spec) {
+      const s = String(spec || "").trim().toLowerCase();
+      if (!s || s === "this" || s === "this floor" || s === "active" || s === "current") return [activeFloorId];
+      if (s === "all" || s === "every floor" || s === "all floors" || s === "the whole building") return floors.map((f) => f.id);
+      const labels = computeFloorLabels();
+      const named = labels.find((l) => l.label.toLowerCase() === s);
+      if (named) return [named.id];
+      let n = null;
+      const numMatch = s.match(/(\d+)/);
+      if (numMatch) n = Number(numMatch[1]);
+      else { for (const [word, val] of Object.entries(ORDINAL_WORDS)) { if (s.includes(word)) { n = val; break; } } }
+      if (n != null) {
+        const byLabel = labels.find((l) => l.label.toLowerCase() === `level ${n}`);
+        if (byLabel) return [byLabel.id];
+        if (n >= 1 && n <= floors.length) return [floors[n - 1].id]; // positional fallback if every floor was renamed
+      }
+      return [activeFloorId];
+    }
+    // every distinct editable space on a floor: its own undivided content
+    // if it hasn't been split yet, or each extracted room if it has. No
+    // shared helper for this existed anywhere in the app -- every other
+    // call site re-derives it ad hoc from activeRoomId === null.
+    function editableSpacesOnFloor(floorId) {
+      const entry = floors.find((f) => f.id === floorId);
+      if (!entry) return [];
+      if (entry.rooms && entry.rooms.length) return entry.rooms.map((r) => r.data);
+      return [entry.data];
+    }
+    function targetDatas(spec) {
+      const out = [];
+      resolveFloorIds(spec).forEach((fid) => out.push(...editableSpacesOnFloor(fid)));
+      return out;
+    }
+    // every wall/opening/prop helper below (getPanelInfo, wouldOverlapBumpout,
+    // effectiveWallSpan, ...) reads the shared `state` closure variable --
+    // the same thing switchActiveRoom does when moving editing context
+    // between rooms. A voice command can target a room/floor that isn't
+    // the one currently active, so it borrows that exact pattern: point
+    // `state` at the target, run the mutation, put it back.
+    function withTargetData(data, fn) {
+      const saved = state;
+      state = data;
+      try { fn(); } finally { state = saved; }
+    }
+
+    function voiceAddWindow(a) {
+      const wall = resolveWallAlias(a.wall);
+      const datas = targetDatas(a.target);
+      if (!datas.length || !wall) return;
+      pushUndo();
+      datas.forEach((data) => withTargetData(data, () => {
+        const info = getPanelInfo(wall);
+        if (!info) return;
+        const span = info.u1 - info.u0;
+        const wallH = data.height || WALL_HEIGHT;
+        let height, bottom;
+        if (a.full_height) { height = wallH - 1 * FT; bottom = 0; }
+        else if (a.vertical_position === "top_half") { height = wallH / 2; bottom = wallH / 2; }
+        else if (a.vertical_position === "bottom_half") { height = wallH / 2; bottom = 0; }
+        else { height = a.height_ft != null ? a.height_ft * FT : DEFAULT_OPENING_HEIGHT; bottom = a.bottom_ft != null ? a.bottom_ft * FT : 0; }
+        const width = a.width_ft != null ? a.width_ft * FT : Math.min(span * 0.6, 4 * FT);
+        const frac = a.position_fraction != null ? Math.max(0, Math.min(1, a.position_fraction)) : 0.5;
+        const center = info.u0 + span * frac;
+        let [u0, u1] = applyEdgeMargin(center - width / 2, center + width / 2, wall);
+        if (u1 - u0 < MIN_OPENING || wouldOverlapBumpout(wall, u0, u1)) return;
+        state.openings = state.openings.filter((o) => !(o.panel === wall && rangesOverlap(u0, u1, o.u0, o.u1)));
+        state.openings.push({
+          id: idSeq++, panel: wall, u0, u1, height, bottomOverride: bottom,
+          dividers: a.dividers != null ? Math.max(0, Math.min(20, Math.round(a.dividers))) : 3,
+          dividerAxis: a.divider_axis === "horizontal" || a.divider_axis === "both" ? a.divider_axis : "vertical",
+          style: a.style === "round" || a.style === "louver" ? a.style : "grid",
+          fullHeight: !!a.full_height,
+        });
+      }));
+      rebuildAllFloors();
+    }
+
+    function voiceAddDoor(a) {
+      const wall = resolveWallAlias(a.wall);
+      const datas = targetDatas(a.target);
+      if (!datas.length || !wall) return;
+      pushUndo();
+      const style = ["arched", "revolving", "turnstile", "jailWall", "pillars"].includes(a.style) ? a.style : "standard";
+      datas.forEach((data) => withTargetData(data, () => {
+        const info = getPanelInfo(wall);
+        if (!info) return;
+        const span = info.u1 - info.u0;
+        const width = a.width_ft != null ? a.width_ft * FT : 3 * FT;
+        const frac = a.position_fraction != null ? Math.max(0, Math.min(1, a.position_fraction)) : 0.5;
+        const center = info.u0 + span * frac;
+        let [u0, u1] = applyEdgeMargin(center - width / 2, center + width / 2, wall);
+        if (u1 - u0 < MIN_OPENING || wouldOverlapBumpout(wall, u0, u1)) return;
+        state.openings = state.openings.filter((o) => !(o.panel === wall && rangesOverlap(u0, u1, o.u0, o.u1)));
+        state.openings.push({
+          id: idSeq++, panel: wall, u0, u1,
+          height: a.height_ft != null ? a.height_ft * FT : 10 * FT,
+          isDoor: true, dividers: a.split ? 1 : 0, style,
+          pillarShape: a.pillar_shape === "square" ? "square" : "round",
+          pillarSize: Math.max(0.5, Math.min(5, a.pillar_size_ft || 2)) * FT,
+          pillarCount: Math.max(2, Math.min(12, Math.round(a.pillar_count || 5))),
+          fullHeight: !!a.full_height,
+        });
+      }));
+      rebuildAllFloors();
+    }
+
+    // basic solid props (sphere/cube/cone/cylinder) are the simplest thing
+    // in the app to place parametrically -- plain world-space {x,z,w,d,h},
+    // no wall/panel resolution at all. `count` spaces several out evenly
+    // along the room's own longer footprint axis, the same even-spacing
+    // arithmetic voiceAddWindowsToWall already uses along a wall.
+    function voiceAddProp(a) {
+      const kind = ["sphere", "cube", "cone", "cylinder"].includes(a.kind) ? a.kind : "cube";
+      const datas = targetDatas(a.target);
+      if (!datas.length) return;
+      pushUndo();
+      const size = Math.max(0.5, a.size_ft || 3) * FT;
+      const count = Math.max(1, Math.min(12, Math.round(a.count || 1)));
+      datas.forEach((data) => withTargetData(data, () => {
+        const fp = data.footprint;
+        const spanX = fp.xMax - fp.xMin, spanZ = fp.zMax - fp.zMin;
+        const axis = a.axis === "x" || a.axis === "z" ? a.axis : (spanX >= spanZ ? "x" : "z");
+        const span = axis === "x" ? spanX : spanZ;
+        const segW = span / count;
+        if (!data.props) data.props = [];
+        for (let i = 0; i < count; i++) {
+          const centerOffset = -span / 2 + segW * (i + 0.5);
+          const x = a.x_ft != null ? a.x_ft * FT : (axis === "x" ? (fp.xMin + fp.xMax) / 2 + centerOffset : (fp.xMin + fp.xMax) / 2);
+          const z = a.z_ft != null ? a.z_ft * FT : (axis === "z" ? (fp.zMin + fp.zMax) / 2 + centerOffset : (fp.zMin + fp.zMax) / 2);
+          data.props.push({ id: idSeq++, kind, x, z, w: size, d: size, h: size });
+        }
+      }));
+      rebuildAllFloors();
+    }
+
+    function voiceAddBalcony(a) {
+      const datas = targetDatas(a.target);
+      const walls = wallsForSpec(a.wall);
+      if (!datas.length) return;
+      pushUndo();
+      const style = ["supported", "recessed", "cantilevered"].includes(a.style) ? a.style : "supported";
+      datas.forEach((data) => withTargetData(data, () => {
+        walls.forEach((wall) => {
+          const info = getPanelInfo(wall);
+          if (!info) return;
+          const span = info.u1 - info.u0;
+          const width = Math.max(6 * FT, a.width_ft != null ? a.width_ft * FT : span * 0.8);
+          const frac = a.position_fraction != null ? Math.max(0, Math.min(1, a.position_fraction)) : 0.5;
+          const center = info.u0 + span * frac;
+          const u0 = Math.max(info.u0, center - width / 2), u1 = Math.min(info.u1, center + width / 2);
+          if (u1 - u0 < 6 * FT || wouldOverlapBumpout(wall, u0, u1)) return;
+          const platformHeight = 5 * FT;
+          const bal = {
+            id: idSeq++, panel: wall, u0, u1, dividerAxis: "vertical", side: 1, platformHeight,
+            pillarsRemoved: style !== "supported", ceilingRemoved: style !== "recessed",
+            wraps: computeBalconyWraps(wall, u0, u1),
+          };
+          if (!state.balconies) state.balconies = [];
+          state.balconies.push(bal);
+          regenerateBalconyOpenings(bal);
+        });
+      }));
+      rebuildAllFloors();
+    }
+
+    function voiceAddTerrace(a) {
+      const datas = targetDatas(a.target);
+      const walls = wallsForSpec(a.wall);
+      if (!datas.length) return;
+      pushUndo();
+      datas.forEach((data) => withTargetData(data, () => {
+        walls.forEach((wall) => {
+          const info = getPanelInfo(wall);
+          if (!info) return;
+          const span = info.u1 - info.u0;
+          const width = Math.max(4 * FT, a.width_ft != null ? a.width_ft * FT : span * 0.8);
+          const center = info.u0 + span * 0.5;
+          const u0 = Math.max(info.u0, center - width / 2), u1 = Math.min(info.u1, center + width / 2);
+          if (u1 - u0 < 4 * FT) return;
+          const terrace = { id: idSeq++, panel: wall, u0, u1, side: 1, depth: (a.depth_ft || 10) * FT, railHeight: 3.5 * FT };
+          if (!state.terraces) state.terraces = [];
+          state.terraces.push(terrace);
+          regenerateTerraceOpenings(terrace);
+        });
+      }));
+      rebuildAllFloors();
+    }
+
+    function voiceAddSuppBalcony(a) {
+      const datas = targetDatas(a.target);
+      const walls = wallsForSpec(a.wall);
+      if (!datas.length) return;
+      pushUndo();
+      datas.forEach((data) => withTargetData(data, () => {
+        walls.forEach((wall) => {
+          const info = getPanelInfo(wall);
+          if (!info) return;
+          const span = info.u1 - info.u0;
+          const width = Math.max(6 * FT, a.width_ft != null ? a.width_ft * FT : span * 0.8);
+          const center = info.u0 + span * 0.5;
+          const u0 = Math.max(info.u0, center - width / 2), u1 = Math.min(info.u1, center + width / 2);
+          if (u1 - u0 < 6 * FT) return;
+          const supp = { id: idSeq++, panel: wall, u0, u1, side: 1, platformHeight: 6 * FT, railingCount: 6, depth: (a.depth_ft || 6) * FT };
+          if (!state.suppBalconies) state.suppBalconies = [];
+          state.suppBalconies.push(supp);
+          regenerateSuppBalconyOpening(supp);
+        });
+      }));
+      rebuildAllFloors();
+    }
+
+    function voiceAddSign(a) {
+      const datas = targetDatas(a.target);
+      const wall = resolveWallAlias(a.wall) || "south";
+      if (!datas.length) return;
+      pushUndo();
+      datas.forEach((data) => withTargetData(data, () => {
+        const info = getPanelInfo(wall);
+        if (!info) return;
+        const span = info.u1 - info.u0;
+        const width = Math.max(4 * FT, a.width_ft != null ? a.width_ft * FT : Math.min(span * 0.6, 20 * FT));
+        const center = info.u0 + span * 0.5;
+        let [u0, u1] = applyEdgeMargin(center - width / 2, center + width / 2, wall, 1 * FT, 2 * FT);
+        if (u1 - u0 < 2 * FT) return;
+        const { bottom, height } = defaultSignVertical();
+        const sign = { id: idSeq++, panel: wall, u0, u1, side: 1, text: String(a.text || ""), bottom, height };
+        if (!state.signs) state.signs = [];
+        state.signs.push(sign);
+      }));
+      rebuildAllFloors();
+    }
+
+    // places a brand-new freestanding rectangular room on a floor -- same
+    // shape the Room tool's own "drag on open ground" commit builds
+    // (room-draw, onPointerUp), just from parameters instead of a drag.
+    function voiceCreateRoom(a) {
+      const floorIds = resolveFloorIds(a.target);
+      if (!floorIds.length) return;
+      pushUndo();
+      const w = Math.max(MIN_ROOM_DRAW_SIZE / FT, a.width_ft || 20) * FT;
+      const d = Math.max(MIN_ROOM_DRAW_SIZE / FT, a.depth_ft || 20) * FT;
+      const cx = (a.x_ft || 0) * FT, cz = (a.z_ft || 0) * FT;
+      floorIds.forEach((fid) => {
+        const floorEntry = floors.find((f) => f.id === fid);
+        if (!floorEntry) return;
+        const data = makeFloorData();
+        data.footprint = { xMin: cx - w / 2, xMax: cx + w / 2, zMin: cz - d / 2, zMax: cz + d / 2 };
+        data.height = a.height_ft != null ? a.height_ft * FT : floorEntry.data.height;
+        data.thickness = floorEntry.data.thickness;
+        if (!floorEntry.rooms) floorEntry.rooms = [];
+        floorEntry.rooms.push({ id: idSeq++, data, offsetX: 0, offsetZ: 0 });
+      });
+      rebuildAllFloors();
+    }
+
     voiceActionsRef.current = {
       set_room_size: (a) => voiceSetRoomSize(a.width_ft, a.depth_ft),
       add_partition: (a) => voiceAddPartition(a.wall, a.position_fraction ?? 0.5),
       add_windows_to_wall: (a) => voiceAddWindowsToWall(a.wall, a.count ?? 2),
       add_windows_all_walls: (a) => voiceAddWindowsAllWalls(a.count_per_wall ?? 2),
+      add_window: voiceAddWindow,
+      add_door: voiceAddDoor,
+      add_prop: voiceAddProp,
+      add_balcony: voiceAddBalcony,
+      add_terrace: voiceAddTerrace,
+      add_supported_balcony: voiceAddSuppBalcony,
+      add_sign: voiceAddSign,
+      create_room: voiceCreateRoom,
     };
     voiceRoomContextRef.current = () => {
       const fp = state.footprint;
       const wFt = ((fp.xMax - fp.xMin) / FT).toFixed(1);
       const dFt = ((fp.zMax - fp.zMin) / FT).toFixed(1);
-      return `Current room footprint: ${wFt} ft (east-west, walls "east"/"west" run along this) by ${dFt} ft (north-south, walls "north"/"south" run along this). Existing partitions: ${state.partitions.length}. Existing openings: ${state.openings.length}.`;
+      const floorList = computeFloorLabels().map((l) => l.label).join(", ");
+      return `Current room footprint: ${wFt} ft (east-west, walls "east"/"west" run along this) by ${dFt} ft (north-south, walls "north"/"south" run along this). Existing partitions: ${state.partitions.length}. Existing openings: ${state.openings.length}. Floors in this building, bottom to top: ${floorList}.`;
     };
 
     function selectFloorById(id) {
@@ -12839,12 +13137,49 @@ export default function RoomBuilder() {
     const systemPrompt =
       "You control a 3D room-builder app by translating one spoken instruction into a list of actions. " +
       voiceRoomContextRef.current() +
-      " Available actions -- respond with ONLY a JSON array, no prose, no markdown fences, each item shaped as " +
-      '{"action": "<name>", ...params}. Actions: ' +
-      'set_room_size {width_ft, depth_ft} -- sets the overall room footprint. ' +
-      'add_partition {wall: "north"|"south"|"east"|"west", position_fraction: 0-1} -- adds a single straight dividing wall running perpendicular to the named wall, at that fraction along its length (0.5 = middle). To divide a room into four with two crossing walls, emit one add_partition on "north" and one on "west", both at 0.5. ' +
-      'add_windows_to_wall {wall, count} -- evenly spaces that many windows along the named wall. ' +
-      'add_windows_all_walls {count_per_wall} -- windows on all four walls at once. ' +
+      " Respond with ONLY a JSON array, no prose, no markdown fences, each item shaped as " +
+      '{"action": "<name>", ...params}. Units are always feet. Emit as many action objects as the instruction needs ' +
+      "(e.g. three add_prop actions, or one with count:3; four add_balcony actions for all four walls, or wall:\"all\") " +
+      "-- there is no limit on array length, so never ask a follow-up question when you can just emit more actions. " +
+      "\n\nEvery action takes an optional target: a floor to act on. Omit it (or \"this\"/\"active\") for whatever floor " +
+      "is currently open; \"all\"/\"all floors\" for every floor in the building; \"third floor\"/\"floor 3\"/\"level 3\", or a " +
+      "custom name the user gave a floor, for one specific floor -- resolved fresh against the floor list above every " +
+      "time, since floor numbering is just current stacking order, not a fixed id (inserting/deleting a floor renumbers " +
+      "the ones above it). If that floor has already been divided into separate rooms, the action applies to every one " +
+      "of them. \n\nWall names are \"north\"/\"south\"/\"east\"/\"west\" (south = the wall facing the camera's default " +
+      "view, i.e. the building's \"front\"), or the aliases \"front\"=south, \"back\"=north, \"right\"=east, \"left\"=west " +
+      "-- front/back/left/right always mean this fixed convention, never the live, possibly-orbited camera. For a " +
+      "wall-mounted action, \"all\"/\"all around\"/\"every wall\" means all four. " +
+      "\n\nActions:\n" +
+      'set_room_size {target?, width_ft, depth_ft} -- sets the overall room/floor footprint.\n' +
+      'add_partition {target?, wall, position_fraction: 0-1} -- a single straight dividing wall perpendicular to the named wall, at that fraction along its length (0.5 = middle). Two crossing walls (north at 0.5, west at 0.5) divide a room into four.\n' +
+      'add_windows_to_wall {target?, wall, count} -- quick even spacing of that many plain windows along one wall.\n' +
+      'add_windows_all_walls {target?, count_per_wall} -- same, on all four walls.\n' +
+      'add_window {target?, wall, width_ft?, height_ft?, bottom_ft?, position_fraction?: 0-1 (default 0.5, center), ' +
+      'vertical_position?: "top_half"|"bottom_half"|"full" (overrides height_ft/bottom_ft with a convenient preset), ' +
+      'dividers?: 0-20 (pane/mullion count; a real architectural look like floor-to-ceiling glass with minimal framing ' +
+      'wants 1-2, not a high number -- high dividers reads as a traditional multi-pane grid), divider_axis?: ' +
+      '"vertical"|"horizontal"|"both", style?: "grid"|"round"|"louver", full_height?: bool (floor-to-ceiling, pinned to ' +
+      'the wall\'s own live height)} -- the fully-specified window, use this over add_windows_to_wall whenever height, ' +
+      'position, dividers, or style actually matter.\n' +
+      'add_door {target?, wall, width_ft?, height_ft?, position_fraction?, style?: "standard"|"arched"|"revolving"|' +
+      '"turnstile"|"jailWall"|"pillars", split?: bool (standard style only, one center mullion), pillar_shape?: "round"|' +
+      '"square", pillar_size_ft?, pillar_count?: 2-12 (pillars style only), full_height?: bool}.\n' +
+      'add_prop {target?, kind: "sphere"|"cube"|"cone"|"cylinder", size_ft?, count?: 1-12 (spaces that many evenly ' +
+      'across the room\'s own longer footprint axis, like "three spheres equidistant along the length"), axis?: "x"|"z" ' +
+      '(which footprint axis to space them along; default is whichever is longer), x_ft?, z_ft? (exact placement for ' +
+      'a single prop, ignored when count > 1)} -- freestanding solids only; there is no triangular/pyramid prop shape yet.\n' +
+      'add_balcony {target?, wall (supports "all"), width_ft?, position_fraction?, style?: "supported"|"recessed"|' +
+      '"cantilevered"} -- a staircase+platform+railing assembly with its own door cut into the wall behind it.\n' +
+      'add_terrace {target?, wall (supports "all"), width_ft?, depth_ft?}.\n' +
+      'add_supported_balcony {target?, wall (supports "all"), width_ft?, depth_ft?}.\n' +
+      'add_sign {target?, wall?, text, width_ft?} -- a wall-mounted sign reading exactly `text`.\n' +
+      'create_room {target?, x_ft?, z_ft?, width_ft?, depth_ft?, height_ft?} -- a new freestanding rectangular room on ' +
+      'a floor, placed by its own center (x_ft/z_ft) and size. To build a U-shaped layout, emit three create_room ' +
+      'actions (two parallel wings plus a connecting base) with coordinates you compute so their edges sit flush.\n' +
+      "\n\nWhen a request names an architectural style ('Richard Neutra', 'a modernist warehouse', ...) rather than raw " +
+      "numbers, translate it into these same parameters using real architectural judgment (era-appropriate glazing " +
+      "ratio, typical room proportions, dividers that match the style) instead of asking for specifics. " +
       "If the instruction is unclear or asks for something with no matching action, respond with an empty array [].";
     const resp = await fetch(VOICE_SERVER_URL, {
       method: "POST",
